@@ -37,17 +37,22 @@ Language). Andere Sprachen fallen auf Englisch zurück.
   im Mod-Einstellungsfenster von Penumbra selbst angezeigt (abschaltbar per
   Checkbox).
 - "Einkaufsliste"-Seite: importiert eine MakePlace-Einkaufsliste (`.list.txt`)
-  und zeigt fuer jedes Item den aktuell guenstigsten Marktpreis sowie die
-  Gesamtsumme an. Die Preisdaten kommen direkt von der oeffentlichen
-  [Universalis](https://universalis.app)-API, es wird kein zusaetzliches Plugin
-  benoetigt. Optional kann per Checkbox auf "nur meine Heimatwelt" umgeschaltet
-  werden; standardmaessig wird ueber die gesamte Region (alle Rechenzentren des
-  eigenen Spielgebiets) nach dem guenstigsten Angebot gesucht und angezeigt, auf
-  welcher Welt/welchem Rechenzentrum es zu finden ist. Items, die auf dem
-  Marktbrett nicht handelbar sind (z.B. manche Event-Belohnungen), werden als
-  solche gekennzeichnet statt in die Summe einzufliessen. Die Ergebnistabelle
-  laesst sich per Klick auf die Spaltenkoepfe nach Kategorie, Name, Menge,
-  Preis, Welt oder Gesamtsumme sortieren; ein Suchfeld filtert die Liste nach
+  oder einen Teamcraft-Listenexport (per Datei oder direkt aus der
+  Zwischenablage eingefuegt, Format wird automatisch erkannt) und zeigt fuer
+  jedes Item den aktuell guenstigsten Marktpreis sowie die Gesamtsumme an.
+  Mehrere Importe werden zusammengezaehlt (nicht ersetzt), so lassen sich z.B.
+  mehrere Teamcraft-Kategorien (Crystals, Items, Pre crafts, ...) nacheinander
+  importieren; "Liste leeren" setzt alles zurueck. Die Preisdaten kommen
+  direkt von der oeffentlichen [Universalis](https://universalis.app)-API, es
+  wird kein zusaetzliches Plugin benoetigt. Optional kann per Checkbox auf
+  "nur meine Heimatwelt" umgeschaltet werden; standardmaessig wird ueber die
+  gesamte Region (alle Rechenzentren des eigenen Spielgebiets) nach dem
+  guenstigsten Angebot gesucht und angezeigt, auf welcher Welt/welchem
+  Rechenzentrum es zu finden ist. Items, die auf dem Marktbrett nicht
+  handelbar sind (z.B. manche Event-Belohnungen), werden als solche
+  gekennzeichnet statt in die Summe einzufliessen. Die Ergebnistabelle laesst
+  sich per Klick auf die Spaltenkoepfe nach Kategorie, Name, Menge, Preis,
+  Welt oder Gesamtsumme sortieren; ein Suchfeld filtert die Liste nach
   Item-Namen.
 
 ## Bauen

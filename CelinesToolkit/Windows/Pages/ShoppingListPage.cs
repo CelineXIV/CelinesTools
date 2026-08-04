@@ -18,7 +18,7 @@ internal sealed class ShoppingListPage
 
     private List<ShoppingListEntry> entries = new();
     private List<PricedShoppingListItem>? pricedItems;
-    private string? loadedFileName;
+    private readonly List<string> importedSourceLabels = new();
     private bool homeWorldOnly;
     private string? statusMessage;
     private bool statusIsError;
@@ -46,7 +46,7 @@ internal sealed class ShoppingListPage
         {
             fileDialogManager.OpenFileDialog(
                 Loc.T("ShoppingList.ImportButton"),
-                "MakePlace Shopping List{.txt}",
+                "Shopping List{.txt}",
                 (success, path) =>
                 {
                     if (!success)
@@ -57,11 +57,7 @@ internal sealed class ShoppingListPage
                     try
                     {
                         var text = File.ReadAllText(path);
-                        entries = ShoppingListParser.Parse(text);
-                        loadedFileName = Path.GetFileName(path);
-                        pricedItems = null;
-                        lastUpdated = null;
-                        statusMessage = null;
+                        ImportEntries(ShoppingListParser.Parse(text), Path.GetFileName(path));
                     }
                     catch (Exception ex)
                     {
@@ -71,10 +67,49 @@ internal sealed class ShoppingListPage
                 });
         }
 
-        if (loadedFileName != null)
+        ImGui.SameLine();
+
+        if (ImGui.Button(Loc.T("ShoppingList.PasteButton")))
+        {
+            try
+            {
+                var text = ImGui.GetClipboardText();
+                if (string.IsNullOrWhiteSpace(text))
+                {
+                    statusMessage = Loc.T("ShoppingList.Error.ClipboardEmpty");
+                    statusIsError = true;
+                }
+                else
+                {
+                    ImportEntries(ShoppingListParser.Parse(text), Loc.T("ShoppingList.ClipboardSourceLabel"));
+                }
+            }
+            catch (Exception ex)
+            {
+                statusMessage = ex.Message;
+                statusIsError = true;
+            }
+        }
+
+        if (entries.Count > 0)
         {
             ImGui.SameLine();
-            ImGui.TextDisabled(loadedFileName);
+            ImGui.BeginDisabled(pendingPriceTask != null);
+            if (ImGui.Button(Loc.T("ShoppingList.ClearButton")))
+            {
+                entries = new List<ShoppingListEntry>();
+                importedSourceLabels.Clear();
+                pricedItems = null;
+                lastUpdated = null;
+                statusMessage = null;
+            }
+
+            ImGui.EndDisabled();
+        }
+
+        if (importedSourceLabels.Count > 0)
+        {
+            ImGui.TextDisabled(string.Join(", ", importedSourceLabels));
         }
 
         var homeOnly = homeWorldOnly;
@@ -257,6 +292,15 @@ internal sealed class ShoppingListPage
         {
             ImGui.TextDisabled(Loc.T("ShoppingList.LastUpdated", updated.ToString("t")));
         }
+    }
+
+    private void ImportEntries(List<ShoppingListEntry> imported, string sourceLabel)
+    {
+        entries = ShoppingListParser.Merge(entries, imported);
+        importedSourceLabels.Add(sourceLabel);
+        pricedItems = null;
+        lastUpdated = null;
+        statusMessage = null;
     }
 
     private static void SortItems(List<PricedShoppingListItem> items, ImGuiTableColumnSortSpecs spec)
