@@ -5,6 +5,7 @@ using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using CelinesToolkit.Services;
+using CelinesToolkit.Services.ShoppingList;
 using CelinesToolkit.Windows;
 
 namespace CelinesToolkit;
@@ -26,6 +27,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly CommandInfo openCommandInfo;
     private readonly CommandInfo runCommandInfo;
     private readonly PenumbraPanelIntegration penumbraPanelIntegration;
+    private readonly UniversalisClient universalisClient;
 
     private const int LoginInitialDelayMs = 3000;
 
@@ -37,6 +39,10 @@ public sealed class Plugin : IDalamudPlugin
 
     public PreviewTextureCache PreviewTextureCache { get; }
 
+    public ItemLookupService ItemLookupService { get; }
+
+    public ShoppingListPricingService ShoppingListPricingService { get; }
+
     public FileDialogManager FileDialogManager { get; } = new();
 
     public Plugin(
@@ -46,7 +52,9 @@ public sealed class Plugin : IDalamudPlugin
         IClientState clientState,
         IFramework framework,
         ITextureProvider textureProvider,
-        ICondition condition)
+        ICondition condition,
+        IDataManager dataManager,
+        IObjectTable objectTable)
     {
         this.pluginInterface = pluginInterface;
         this.commandManager = commandManager;
@@ -64,6 +72,9 @@ public sealed class Plugin : IDalamudPlugin
         PreviewImageService = new PreviewImageService();
         PreviewTextureCache = new PreviewTextureCache(textureProvider);
         penumbraPanelIntegration = new PenumbraPanelIntegration(this.pluginInterface, penumbraIpc, PreviewTextureCache, Configuration);
+        ItemLookupService = new ItemLookupService(dataManager, log);
+        universalisClient = new UniversalisClient(log);
+        ShoppingListPricingService = new ShoppingListPricingService(ItemLookupService, universalisClient, objectTable);
 
         mainWindow = new MainWindow(this);
         windowSystem.AddWindow(mainWindow);
@@ -163,5 +174,6 @@ public sealed class Plugin : IDalamudPlugin
         PreviewImageService.Dispose();
         PreviewTextureCache.Dispose();
         penumbraPanelIntegration.Dispose();
+        universalisClient.Dispose();
     }
 }

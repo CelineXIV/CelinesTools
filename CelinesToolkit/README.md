@@ -36,6 +36,16 @@ Language). Andere Sprachen fallen auf Englisch zurück.
   Ueber Penumbras eigene Erweiterungs-Events wird das Bild zusaetzlich direkt
   im Mod-Einstellungsfenster von Penumbra selbst angezeigt (abschaltbar per
   Checkbox).
+- "Einkaufsliste"-Seite: importiert eine MakePlace-Einkaufsliste (`.list.txt`)
+  und zeigt fuer jedes Item den aktuell guenstigsten Marktpreis sowie die
+  Gesamtsumme an. Die Preisdaten kommen direkt von der oeffentlichen
+  [Universalis](https://universalis.app)-API, es wird kein zusaetzliches Plugin
+  benoetigt. Optional kann per Checkbox auf "nur meine Heimatwelt" umgeschaltet
+  werden; standardmaessig wird ueber die gesamte Region (alle Rechenzentren des
+  eigenen Spielgebiets) nach dem guenstigsten Angebot gesucht und angezeigt, auf
+  welcher Welt/welchem Rechenzentrum es zu finden ist. Items, die auf dem
+  Marktbrett nicht handelbar sind (z.B. manche Event-Belohnungen), werden als
+  solche gekennzeichnet statt in die Summe einzufliessen.
 
 ## Bauen
 

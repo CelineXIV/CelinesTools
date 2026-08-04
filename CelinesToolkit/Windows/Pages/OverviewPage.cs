@@ -15,5 +15,6 @@ internal sealed class OverviewPage
         ImGui.BulletText(Loc.T("Overview.FeatureQuickBar"));
         ImGui.BulletText(Loc.T("Overview.FeatureOrchestrion"));
         ImGui.BulletText(Loc.T("Overview.FeaturePreviewManager"));
+        ImGui.BulletText(Loc.T("Overview.FeatureShoppingList"));
     }
 }

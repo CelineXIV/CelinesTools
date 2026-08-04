@@ -12,6 +12,7 @@ internal enum ToolkitPage
     QuickBar,
     Orchestrion,
     PreviewManager,
+    ShoppingList,
 }
 
 internal sealed class MainWindow : Window
@@ -21,6 +22,7 @@ internal sealed class MainWindow : Window
     private readonly QuickBarPage quickBarPage;
     private readonly OrchestrionPage orchestrionPage;
     private readonly PreviewManagerPage previewManagerPage;
+    private readonly ShoppingListPage shoppingListPage;
     private ToolkitPage currentPage = ToolkitPage.Overview;
 
     public MainWindow(Plugin plugin) : base("CelinesToolkit##MainWindow")
@@ -33,6 +35,7 @@ internal sealed class MainWindow : Window
         quickBarPage = new QuickBarPage(plugin);
         orchestrionPage = new OrchestrionPage(plugin);
         previewManagerPage = new PreviewManagerPage(plugin, plugin.ModPreviewScanner, plugin.PreviewImageService, plugin.PreviewTextureCache, plugin.FileDialogManager);
+        shoppingListPage = new ShoppingListPage(plugin.ItemLookupService, plugin.ShoppingListPricingService, plugin.FileDialogManager);
     }
 
     public override void Draw()
@@ -44,6 +47,7 @@ internal sealed class MainWindow : Window
         ImGui.Separator();
         DrawNavEntry(Loc.T("Nav.Orchestrion"), ToolkitPage.Orchestrion);
         DrawNavEntry(Loc.T("Nav.PreviewManager"), ToolkitPage.PreviewManager);
+        DrawNavEntry(Loc.T("Nav.ShoppingList"), ToolkitPage.ShoppingList);
         ImGui.EndChild();
 
         ImGui.SameLine();
@@ -65,6 +69,9 @@ internal sealed class MainWindow : Window
                 break;
             case ToolkitPage.PreviewManager:
                 previewManagerPage.Draw();
+                break;
+            case ToolkitPage.ShoppingList:
+                shoppingListPage.Draw();
                 break;
         }
         ImGui.EndChild();
