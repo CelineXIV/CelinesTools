@@ -32,7 +32,7 @@ internal sealed class MainWindow : Window
         commandToolPage = new CommandToolPage(plugin);
         quickBarPage = new QuickBarPage(plugin);
         orchestrionPage = new OrchestrionPage(plugin);
-        previewManagerPage = new PreviewManagerPage(plugin, plugin.ModPreviewScanner, plugin.PreviewImageService, plugin.TextureProvider, plugin.FileDialogManager);
+        previewManagerPage = new PreviewManagerPage(plugin, plugin.ModPreviewScanner, plugin.PreviewImageService, plugin.PreviewTextureCache, plugin.FileDialogManager);
     }
 
     public override void Draw()

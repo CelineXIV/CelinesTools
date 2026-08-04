@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.ImGuiFileDialog;
-using Dalamud.Plugin.Services;
 using CelinesToolkit.Services;
 
 namespace CelinesToolkit.Windows.Pages;
@@ -13,7 +12,7 @@ internal sealed class PreviewManagerPage
     private readonly Plugin plugin;
     private readonly ModPreviewScanner scanner;
     private readonly PreviewImageService imageService;
-    private readonly ITextureProvider textureProvider;
+    private readonly PreviewTextureCache textureCache;
     private readonly FileDialogManager fileDialogManager;
 
     private List<ModPreviewInfo> mods = new();
@@ -28,12 +27,12 @@ internal sealed class PreviewManagerPage
     private System.Threading.Tasks.Task<(bool Success, string? Error)>? pendingUrlTask;
     private bool scanned;
 
-    public PreviewManagerPage(Plugin plugin, ModPreviewScanner scanner, PreviewImageService imageService, ITextureProvider textureProvider, FileDialogManager fileDialogManager)
+    public PreviewManagerPage(Plugin plugin, ModPreviewScanner scanner, PreviewImageService imageService, PreviewTextureCache textureCache, FileDialogManager fileDialogManager)
     {
         this.plugin = plugin;
         this.scanner = scanner;
         this.imageService = imageService;
-        this.textureProvider = textureProvider;
+        this.textureCache = textureCache;
         this.fileDialogManager = fileDialogManager;
     }
 
@@ -159,10 +158,13 @@ internal sealed class PreviewManagerPage
 
         if (mod.PreviewImagePath != null)
         {
-            var texture = textureProvider.GetFromFileAbsolute(mod.PreviewImagePath).GetWrapOrEmpty();
-            var maxWidth = 256f;
-            var scale = texture.Width > 0 ? Math.Min(1f, maxWidth / texture.Width) : 1f;
-            ImGui.Image(texture.Handle, new Vector2(texture.Width * scale, texture.Height * scale));
+            var texture = textureCache.GetOrLoad(mod.PreviewImagePath);
+            if (texture != null)
+            {
+                var maxWidth = 256f;
+                var scale = texture.Width > 0 ? Math.Min(1f, maxWidth / texture.Width) : 1f;
+                ImGui.Image(texture.Handle, new Vector2(texture.Width * scale, texture.Height * scale));
+            }
         }
         else
         {

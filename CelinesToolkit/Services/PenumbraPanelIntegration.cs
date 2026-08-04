@@ -3,7 +3,6 @@ using System.IO;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Plugin;
-using Dalamud.Plugin.Services;
 
 namespace CelinesToolkit.Services;
 
@@ -11,16 +10,16 @@ public sealed class PenumbraPanelIntegration : IDisposable
 {
     private readonly IDalamudPluginInterface pluginInterface;
     private readonly PenumbraIpcService penumbraIpc;
-    private readonly ITextureProvider textureProvider;
+    private readonly PreviewTextureCache textureCache;
     private readonly Configuration configuration;
     private readonly Action<string, float, float> onPreSettingsTabBarDraw;
     private string? cachedModDirectory;
 
-    public PenumbraPanelIntegration(IDalamudPluginInterface pluginInterface, PenumbraIpcService penumbraIpc, ITextureProvider textureProvider, Configuration configuration)
+    public PenumbraPanelIntegration(IDalamudPluginInterface pluginInterface, PenumbraIpcService penumbraIpc, PreviewTextureCache textureCache, Configuration configuration)
     {
         this.pluginInterface = pluginInterface;
         this.penumbraIpc = penumbraIpc;
-        this.textureProvider = textureProvider;
+        this.textureCache = textureCache;
         this.configuration = configuration;
         onPreSettingsTabBarDraw = OnPreSettingsTabBarDraw;
 
@@ -58,8 +57,8 @@ public sealed class PenumbraPanelIntegration : IDisposable
             return;
         }
 
-        var texture = textureProvider.GetFromFileAbsolute(previewPath).GetWrapOrEmpty();
-        if (texture.Width <= 0 || texture.Height <= 0)
+        var texture = textureCache.GetOrLoad(previewPath);
+        if (texture == null || texture.Width <= 0 || texture.Height <= 0)
         {
             return;
         }

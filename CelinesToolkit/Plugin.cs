@@ -35,7 +35,7 @@ public sealed class Plugin : IDalamudPlugin
 
     public PreviewImageService PreviewImageService { get; }
 
-    public ITextureProvider TextureProvider { get; }
+    public PreviewTextureCache PreviewTextureCache { get; }
 
     public FileDialogManager FileDialogManager { get; } = new();
 
@@ -52,7 +52,6 @@ public sealed class Plugin : IDalamudPlugin
         this.commandManager = commandManager;
         this.log = log;
         this.clientState = clientState;
-        TextureProvider = textureProvider;
 
         Loc.SetLanguage(this.pluginInterface.UiLanguage);
 
@@ -63,7 +62,8 @@ public sealed class Plugin : IDalamudPlugin
         var penumbraIpc = new PenumbraIpcService(this.pluginInterface);
         ModPreviewScanner = new ModPreviewScanner(penumbraIpc);
         PreviewImageService = new PreviewImageService();
-        penumbraPanelIntegration = new PenumbraPanelIntegration(this.pluginInterface, penumbraIpc, textureProvider, Configuration);
+        PreviewTextureCache = new PreviewTextureCache(textureProvider);
+        penumbraPanelIntegration = new PenumbraPanelIntegration(this.pluginInterface, penumbraIpc, PreviewTextureCache, Configuration);
 
         mainWindow = new MainWindow(this);
         windowSystem.AddWindow(mainWindow);
@@ -161,6 +161,7 @@ public sealed class Plugin : IDalamudPlugin
         runner.Dispose();
         orchestrionMuteService.Dispose();
         PreviewImageService.Dispose();
+        PreviewTextureCache.Dispose();
         penumbraPanelIntegration.Dispose();
     }
 }

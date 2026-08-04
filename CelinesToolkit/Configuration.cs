@@ -29,7 +29,7 @@ public class Configuration : IPluginConfiguration
 
     public bool MuteOrchestrion { get; set; }
 
-    public bool ShowPreviewInPenumbra { get; set; } = true;
+    public bool ShowPreviewInPenumbra { get; set; }
 
     public bool QuickBarEnabled { get; set; }
 
