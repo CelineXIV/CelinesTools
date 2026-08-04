@@ -25,6 +25,7 @@ internal sealed class ShoppingListPage
     private DateTime? lastUpdated;
     private Task<List<PricedShoppingListItem>>? pendingPriceTask;
     private CancellationTokenSource? pendingCts;
+    private string searchFilter = string.Empty;
 
     public ShoppingListPage(ItemLookupService itemLookup, ShoppingListPricingService pricingService, FileDialogManager fileDialogManager)
     {
@@ -139,7 +140,26 @@ internal sealed class ShoppingListPage
 
     private void DrawResultsTable(List<PricedShoppingListItem> items)
     {
-        const ImGuiTableFlags flags = ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders | ImGuiTableFlags.ScrollY | ImGuiTableFlags.Resizable;
+        ImGui.SetNextItemWidth(260);
+        ImGui.InputTextWithHint("##shoppingListSearch", Loc.T("ShoppingList.SearchHint"), ref searchFilter, 200);
+        ImGui.Spacing();
+
+        long grandTotal = 0;
+        var warningCount = 0;
+        foreach (var item in items)
+        {
+            if (item.Status == PriceStatus.Ok)
+            {
+                grandTotal += item.Total;
+            }
+            else if (item.Status is PriceStatus.NotFound or PriceStatus.NoListings or PriceStatus.Error)
+            {
+                warningCount++;
+            }
+        }
+
+        const ImGuiTableFlags flags = ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders | ImGuiTableFlags.ScrollY
+            | ImGuiTableFlags.Resizable | ImGuiTableFlags.Sortable;
         if (!ImGui.BeginTable("##shoppingListTable", 6, flags, new Vector2(0, -60)))
         {
             return;
@@ -153,11 +173,20 @@ internal sealed class ShoppingListPage
         ImGui.TableSetupColumn(Loc.T("ShoppingList.ColumnTotal"), ImGuiTableColumnFlags.WidthFixed, 150f);
         ImGui.TableHeadersRow();
 
-        long grandTotal = 0;
-        var warningCount = 0;
+        var sortSpecs = ImGui.TableGetSortSpecs();
+        if (!sortSpecs.IsNull && sortSpecs.SpecsCount > 0 && sortSpecs.SpecsDirty)
+        {
+            SortItems(items, sortSpecs.Specs[0]);
+            sortSpecs.SpecsDirty = false;
+        }
 
         foreach (var item in items)
         {
+            if (searchFilter.Length > 0 && item.Name.IndexOf(searchFilter, StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                continue;
+            }
+
             ImGui.TableNextRow();
             ImGui.TableNextColumn();
             ImGui.TextUnformatted(item.Category);
@@ -175,7 +204,6 @@ internal sealed class ShoppingListPage
                     ImGui.TextUnformatted(item.DataCenterName != null ? $"{item.WorldName} ({item.DataCenterName})" : item.WorldName ?? "-");
                     ImGui.TableNextColumn();
                     ImGui.TextUnformatted(FormatGil(item.Total));
-                    grandTotal += item.Total;
                     break;
                 case PriceStatus.NotFound:
                     ImGui.TextColored(new Vector4(1f, 0.5f, 0.5f, 1f), Loc.T("ShoppingList.StatusNotFound"));
@@ -183,7 +211,6 @@ internal sealed class ShoppingListPage
                     ImGui.TextUnformatted("-");
                     ImGui.TableNextColumn();
                     ImGui.TextUnformatted("-");
-                    warningCount++;
                     break;
                 case PriceStatus.NotTradable:
                     ImGui.TextColored(new Vector4(0.7f, 0.7f, 0.7f, 1f), Loc.T("ShoppingList.StatusNotTradable"));
@@ -198,7 +225,6 @@ internal sealed class ShoppingListPage
                     ImGui.TextUnformatted("-");
                     ImGui.TableNextColumn();
                     ImGui.TextUnformatted("-");
-                    warningCount++;
                     break;
                 case PriceStatus.Error:
                     ImGui.TextColored(new Vector4(1f, 0.5f, 0.5f, 1f), Loc.T("ShoppingList.StatusError"));
@@ -206,7 +232,6 @@ internal sealed class ShoppingListPage
                     ImGui.TextUnformatted("-");
                     ImGui.TableNextColumn();
                     ImGui.TextUnformatted("-");
-                    warningCount++;
                     break;
                 default:
                     ImGui.TextUnformatted("-");
@@ -231,6 +256,26 @@ internal sealed class ShoppingListPage
         if (lastUpdated is { } updated)
         {
             ImGui.TextDisabled(Loc.T("ShoppingList.LastUpdated", updated.ToString("t")));
+        }
+    }
+
+    private static void SortItems(List<PricedShoppingListItem> items, ImGuiTableColumnSortSpecs spec)
+    {
+        Comparison<PricedShoppingListItem> comparison = spec.ColumnIndex switch
+        {
+            0 => (a, b) => string.Compare(a.Category, b.Category, StringComparison.OrdinalIgnoreCase),
+            1 => (a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase),
+            2 => (a, b) => a.Quantity.CompareTo(b.Quantity),
+            3 => (a, b) => a.UnitPrice.CompareTo(b.UnitPrice),
+            4 => (a, b) => string.Compare(a.WorldName, b.WorldName, StringComparison.OrdinalIgnoreCase),
+            5 => (a, b) => a.Total.CompareTo(b.Total),
+            _ => (_, _) => 0,
+        };
+
+        items.Sort(comparison);
+        if (spec.SortDirection == ImGuiSortDirection.Descending)
+        {
+            items.Reverse();
         }
     }
 

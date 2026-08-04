@@ -45,7 +45,10 @@ Language). Andere Sprachen fallen auf Englisch zurück.
   eigenen Spielgebiets) nach dem guenstigsten Angebot gesucht und angezeigt, auf
   welcher Welt/welchem Rechenzentrum es zu finden ist. Items, die auf dem
   Marktbrett nicht handelbar sind (z.B. manche Event-Belohnungen), werden als
-  solche gekennzeichnet statt in die Summe einzufliessen.
+  solche gekennzeichnet statt in die Summe einzufliessen. Die Ergebnistabelle
+  laesst sich per Klick auf die Spaltenkoepfe nach Kategorie, Name, Menge,
+  Preis, Welt oder Gesamtsumme sortieren; ein Suchfeld filtert die Liste nach
+  Item-Namen.
 
 ## Bauen
 

@@ -94,6 +94,7 @@ internal static class Loc
         ["ShoppingList.ItemCount"] = ("{0}x", "{0}x"),
         ["ShoppingList.WarningCount"] = ("{0} item(s) without a valid price", "{0} Item(s) ohne gueltigen Preis"),
         ["ShoppingList.LastUpdated"] = ("Last updated: {0}", "Zuletzt aktualisiert: {0}"),
+        ["ShoppingList.SearchHint"] = ("Search item name...", "Item-Name suchen..."),
     };
 
     public static void SetLanguage(string uiLanguage)
