@@ -14,6 +14,7 @@ internal enum ToolkitPage
     Orchestrion,
     PreviewManager,
     ShoppingList,
+    HousingTracker,
 }
 
 internal sealed class MainWindow : Window
@@ -24,6 +25,7 @@ internal sealed class MainWindow : Window
     private readonly OrchestrionPage orchestrionPage;
     private readonly PreviewManagerPage previewManagerPage;
     private readonly ShoppingListPage shoppingListPage;
+    private readonly HousingTrackerPage housingTrackerPage;
     private ToolkitPage currentPage = ToolkitPage.Overview;
 
     public MainWindow(Plugin plugin) : base("CelinesToolkit##MainWindow")
@@ -37,6 +39,7 @@ internal sealed class MainWindow : Window
         orchestrionPage = new OrchestrionPage(plugin);
         previewManagerPage = new PreviewManagerPage(plugin, plugin.ModPreviewScanner, plugin.PreviewImageService, plugin.PreviewTextureCache, plugin.FileDialogManager);
         shoppingListPage = new ShoppingListPage(plugin.ItemLookupService, plugin.ShoppingListPricingService, plugin.FileDialogManager);
+        housingTrackerPage = new HousingTrackerPage(plugin.HousingTrackerService);
     }
 
     public override void Draw()
@@ -52,6 +55,7 @@ internal sealed class MainWindow : Window
         DrawNavEntry(Loc.T("Nav.Orchestrion"), FontAwesomeIcon.Music, ToolkitPage.Orchestrion);
         DrawNavEntry(Loc.T("Nav.PreviewManager"), FontAwesomeIcon.Image, ToolkitPage.PreviewManager);
         DrawNavEntry(Loc.T("Nav.ShoppingList"), FontAwesomeIcon.ShoppingCart, ToolkitPage.ShoppingList);
+        DrawNavEntry(Loc.T("Nav.HousingTracker"), FontAwesomeIcon.Building, ToolkitPage.HousingTracker);
         ImGui.EndChild();
 
         ImGui.SameLine();
@@ -76,6 +80,9 @@ internal sealed class MainWindow : Window
                 break;
             case ToolkitPage.ShoppingList:
                 shoppingListPage.Draw();
+                break;
+            case ToolkitPage.HousingTracker:
+                housingTrackerPage.Draw();
                 break;
         }
         ImGui.EndChild();

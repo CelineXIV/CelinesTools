@@ -5,6 +5,7 @@ using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using CelinesToolkit.Services;
+using CelinesToolkit.Services.HousingTracker;
 using CelinesToolkit.Services.ShoppingList;
 using CelinesToolkit.Windows;
 
@@ -28,6 +29,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly CommandInfo runCommandInfo;
     private readonly PenumbraPanelIntegration penumbraPanelIntegration;
     private readonly UniversalisClient universalisClient;
+    private readonly PaissaClient paissaClient;
 
     private const int LoginInitialDelayMs = 3000;
 
@@ -42,6 +44,8 @@ public sealed class Plugin : IDalamudPlugin
     public ItemLookupService ItemLookupService { get; }
 
     public ShoppingListPricingService ShoppingListPricingService { get; }
+
+    public HousingTrackerService HousingTrackerService { get; }
 
     public FileDialogManager FileDialogManager { get; } = new();
 
@@ -75,6 +79,8 @@ public sealed class Plugin : IDalamudPlugin
         ItemLookupService = new ItemLookupService(dataManager, log);
         universalisClient = new UniversalisClient(log);
         ShoppingListPricingService = new ShoppingListPricingService(ItemLookupService, universalisClient, objectTable);
+        paissaClient = new PaissaClient(log);
+        HousingTrackerService = new HousingTrackerService(paissaClient, objectTable);
 
         mainWindow = new MainWindow(this);
         windowSystem.AddWindow(mainWindow);
@@ -175,5 +181,6 @@ public sealed class Plugin : IDalamudPlugin
         PreviewTextureCache.Dispose();
         penumbraPanelIntegration.Dispose();
         universalisClient.Dispose();
+        paissaClient.Dispose();
     }
 }
