@@ -5,6 +5,8 @@ using System.Numerics;
 using System.Threading;
 using System.Threading.Tasks;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface;
+using Dalamud.Interface.Components;
 using Dalamud.Interface.ImGuiFileDialog;
 using CelinesToolkit.Services.ShoppingList;
 
@@ -12,6 +14,9 @@ namespace CelinesToolkit.Windows.Pages;
 
 internal sealed class ShoppingListPage
 {
+    private static readonly Vector4 FetchButtonColor = new(0.16f, 0.45f, 0.24f, 1f);
+    private static readonly Vector4 FetchButtonHoveredColor = new(0.20f, 0.56f, 0.30f, 1f);
+
     private readonly ItemLookupService itemLookup;
     private readonly ShoppingListPricingService pricingService;
     private readonly FileDialogManager fileDialogManager;
@@ -42,7 +47,7 @@ internal sealed class ShoppingListPage
         ImGui.TextWrapped(Loc.T("ShoppingList.Description"));
         ImGui.Spacing();
 
-        if (ImGui.Button(Loc.T("ShoppingList.ImportButton")))
+        if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.FileImport, Loc.T("ShoppingList.ImportButton")))
         {
             fileDialogManager.OpenFileDialog(
                 Loc.T("ShoppingList.ImportButton"),
@@ -69,7 +74,7 @@ internal sealed class ShoppingListPage
 
         ImGui.SameLine();
 
-        if (ImGui.Button(Loc.T("ShoppingList.PasteButton")))
+        if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.Paste, Loc.T("ShoppingList.PasteButton")))
         {
             try
             {
@@ -95,7 +100,7 @@ internal sealed class ShoppingListPage
         {
             ImGui.SameLine();
             ImGui.BeginDisabled(pendingPriceTask != null);
-            if (ImGui.Button(Loc.T("ShoppingList.ClearButton")))
+            if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.Eraser, Loc.T("ShoppingList.ClearButton")))
             {
                 entries = new List<ShoppingListEntry>();
                 importedSourceLabels.Clear();
@@ -123,7 +128,7 @@ internal sealed class ShoppingListPage
         var fetchBusy = pendingPriceTask != null;
         var lookupReady = itemLookup.IsReady;
         ImGui.BeginDisabled(entries.Count == 0 || fetchBusy || !lookupReady);
-        if (ImGui.Button(Loc.T("ShoppingList.FetchPrices")))
+        if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.DollarSign, Loc.T("ShoppingList.FetchPrices"), FetchButtonColor, FetchButtonColor, FetchButtonHoveredColor))
         {
             var cts = new CancellationTokenSource();
             pendingCts = cts;

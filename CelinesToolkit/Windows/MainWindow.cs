@@ -1,5 +1,6 @@
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface;
 using Dalamud.Interface.Windowing;
 using CelinesToolkit.Windows.Pages;
 
@@ -40,14 +41,17 @@ internal sealed class MainWindow : Window
 
     public override void Draw()
     {
-        ImGui.BeginChild("##toolkitNav", new Vector2(150, 0), true);
-        DrawNavEntry(Loc.T("Nav.Overview"), ToolkitPage.Overview);
-        DrawNavEntry(Loc.T("Nav.CommandTool"), ToolkitPage.CommandTool);
-        DrawNavEntry(Loc.T("Nav.QuickBar"), ToolkitPage.QuickBar);
+        ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 4f);
+        ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(6f, 4f));
+
+        ImGui.BeginChild("##toolkitNav", new Vector2(160, 0), true);
+        DrawNavEntry(Loc.T("Nav.Overview"), FontAwesomeIcon.Home, ToolkitPage.Overview);
+        DrawNavEntry(Loc.T("Nav.CommandTool"), FontAwesomeIcon.ListOl, ToolkitPage.CommandTool);
+        DrawNavEntry(Loc.T("Nav.QuickBar"), FontAwesomeIcon.Bolt, ToolkitPage.QuickBar);
         ImGui.Separator();
-        DrawNavEntry(Loc.T("Nav.Orchestrion"), ToolkitPage.Orchestrion);
-        DrawNavEntry(Loc.T("Nav.PreviewManager"), ToolkitPage.PreviewManager);
-        DrawNavEntry(Loc.T("Nav.ShoppingList"), ToolkitPage.ShoppingList);
+        DrawNavEntry(Loc.T("Nav.Orchestrion"), FontAwesomeIcon.Music, ToolkitPage.Orchestrion);
+        DrawNavEntry(Loc.T("Nav.PreviewManager"), FontAwesomeIcon.Image, ToolkitPage.PreviewManager);
+        DrawNavEntry(Loc.T("Nav.ShoppingList"), FontAwesomeIcon.ShoppingCart, ToolkitPage.ShoppingList);
         ImGui.EndChild();
 
         ImGui.SameLine();
@@ -75,13 +79,34 @@ internal sealed class MainWindow : Window
                 break;
         }
         ImGui.EndChild();
+
+        ImGui.PopStyleVar(2);
     }
 
-    private void DrawNavEntry(string label, ToolkitPage page)
+    private void DrawNavEntry(string label, FontAwesomeIcon icon, ToolkitPage page)
     {
-        if (ImGui.Selectable(label, currentPage == page))
+        var isSelected = currentPage == page;
+        var startPos = ImGui.GetCursorScreenPos();
+        var width = ImGui.GetContentRegionAvail().X;
+        var lineHeight = ImGui.GetFrameHeight();
+
+        if (ImGui.Selectable("##nav" + page, isSelected, ImGuiSelectableFlags.None, new Vector2(width, lineHeight)))
         {
             currentPage = page;
         }
+
+        var drawList = ImGui.GetWindowDrawList();
+        var textColor = ImGui.GetColorU32(ImGuiCol.Text);
+
+        ImGui.PushFont(UiBuilder.IconFont);
+        var iconText = icon.ToIconString();
+        var iconSize = ImGui.CalcTextSize(iconText);
+        var iconPos = startPos + new Vector2(6f, (lineHeight - iconSize.Y) / 2f);
+        drawList.AddText(iconPos, textColor, iconText);
+        ImGui.PopFont();
+
+        var textSize = ImGui.CalcTextSize(label);
+        var textPos = startPos + new Vector2(6f + iconSize.X + 8f, (lineHeight - textSize.Y) / 2f);
+        drawList.AddText(textPos, textColor, label);
     }
 }

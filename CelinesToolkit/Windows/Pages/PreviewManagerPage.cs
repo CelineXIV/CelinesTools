@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface;
+using Dalamud.Interface.Components;
 using Dalamud.Interface.ImGuiFileDialog;
 using CelinesToolkit.Services;
 
@@ -45,7 +47,7 @@ internal sealed class PreviewManagerPage
 
         PollPendingUrlTask();
 
-        if (ImGui.Button(Loc.T("PreviewManager.Refresh")))
+        if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.Sync, Loc.T("PreviewManager.Refresh")))
         {
             Refresh();
         }
@@ -180,7 +182,7 @@ internal sealed class PreviewManagerPage
         ImGui.InputText("##previewUrlInput", ref urlInput, 512);
         var urlBusy = pendingUrlTask != null;
         ImGui.BeginDisabled(urlBusy || string.IsNullOrWhiteSpace(urlInput));
-        if (ImGui.Button(Loc.T("PreviewManager.GrabFromUrl")))
+        if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.CloudDownloadAlt, Loc.T("PreviewManager.GrabFromUrl")))
         {
             pendingUrlTask = imageService.SaveFromUrlAsync(urlInput, mod.FullPath);
         }
@@ -200,7 +202,7 @@ internal sealed class PreviewManagerPage
         ImGui.SetNextItemWidth(-80);
         ImGui.InputText("##previewFileInput", ref fileInput, 1024);
         ImGui.SameLine();
-        if (ImGui.Button(Loc.T("PreviewManager.Browse")))
+        if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.FolderOpen, Loc.T("PreviewManager.Browse")))
         {
             fileDialogManager.OpenFileDialog(
                 Loc.T("PreviewManager.Browse"),
@@ -215,7 +217,7 @@ internal sealed class PreviewManagerPage
         }
 
         ImGui.BeginDisabled(string.IsNullOrWhiteSpace(fileInput));
-        if (ImGui.Button(Loc.T("PreviewManager.SetLocalImage")))
+        if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.Check, Loc.T("PreviewManager.SetLocalImage")))
         {
             if (imageService.TrySaveFromFile(fileInput, mod.FullPath, out var error))
             {
@@ -234,7 +236,7 @@ internal sealed class PreviewManagerPage
         ImGui.Spacing();
 
         ImGui.BeginDisabled(!PreviewImageService.IsImageInClipboard());
-        if (ImGui.Button(Loc.T("PreviewManager.PasteFromClipboard")))
+        if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.Paste, Loc.T("PreviewManager.PasteFromClipboard")))
         {
             if (imageService.TrySaveFromClipboard(mod.FullPath, out var error))
             {

@@ -1,6 +1,8 @@
 using System;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface;
+using Dalamud.Interface.Components;
 
 namespace CelinesToolkit.Windows.Pages;
 
@@ -50,7 +52,7 @@ internal sealed class CommandToolPage
         }
         ImGui.EndChild();
 
-        if (ImGui.Button(Loc.T("Macro.New")))
+        if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.Plus, Loc.T("Macro.New")))
         {
             config.Macros.Add(new MacroSequence { Name = Loc.T("Macro.NewDefaultName", config.Macros.Count + 1) });
             selectedIndex = config.Macros.Count - 1;
@@ -82,13 +84,13 @@ internal sealed class CommandToolPage
         }
 
         ImGui.SameLine();
-        if (ImGui.Button(Loc.T("Macro.Run")))
+        if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.Play, Loc.T("Macro.Run")))
         {
             plugin.RunMacro(macro);
         }
 
         ImGui.SameLine();
-        if (ImGui.Button(Loc.T("Macro.Delete")))
+        if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.TrashAlt, Loc.T("Macro.Delete")))
         {
             config.Macros.RemoveAt(selectedIndex);
             selectedIndex = -1;
@@ -123,23 +125,38 @@ internal sealed class CommandToolPage
             }
 
             ImGui.SameLine();
-            if (ImGui.SmallButton(Loc.T("Macro.Up")) && i > 0)
+            if (ImGuiComponents.IconButton(FontAwesomeIcon.ChevronUp) && i > 0)
             {
                 (macro.Commands[i - 1], macro.Commands[i]) = (macro.Commands[i], macro.Commands[i - 1]);
                 plugin.SaveConfiguration();
             }
 
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(Loc.T("Macro.Up"));
+            }
+
             ImGui.SameLine();
-            if (ImGui.SmallButton(Loc.T("Macro.Down")) && i < macro.Commands.Count - 1)
+            if (ImGuiComponents.IconButton(FontAwesomeIcon.ChevronDown) && i < macro.Commands.Count - 1)
             {
                 (macro.Commands[i + 1], macro.Commands[i]) = (macro.Commands[i], macro.Commands[i + 1]);
                 plugin.SaveConfiguration();
             }
 
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(Loc.T("Macro.Down"));
+            }
+
             ImGui.SameLine();
-            if (ImGui.SmallButton(Loc.T("Macro.Remove")))
+            if (ImGuiComponents.IconButton(FontAwesomeIcon.Times))
             {
                 removeIndex = i;
+            }
+
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(Loc.T("Macro.Remove"));
             }
 
             ImGui.PopID();
@@ -151,7 +168,7 @@ internal sealed class CommandToolPage
             plugin.SaveConfiguration();
         }
 
-        if (ImGui.Button(Loc.T("Macro.AddCommand")))
+        if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.Plus, Loc.T("Macro.AddCommand")))
         {
             macro.Commands.Add(new MacroCommandEntry());
             plugin.SaveConfiguration();
