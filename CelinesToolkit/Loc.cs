@@ -79,6 +79,7 @@ internal static class Loc
         ["ShoppingList.ClearButton"] = ("Clear List", "Liste leeren"),
         ["ShoppingList.ClipboardSourceLabel"] = ("Clipboard", "Zwischenablage"),
         ["ShoppingList.Error.ClipboardEmpty"] = ("The clipboard is empty.", "Die Zwischenablage ist leer."),
+        ["ShoppingList.Error.TimedOut"] = ("Timed out while fetching prices from Universalis. Please try again.", "Zeituberschreitung beim Abrufen der Preise von Universalis. Bitte erneut versuchen."),
         ["ShoppingList.NoListLoaded"] = ("No list imported yet.", "Noch keine Liste importiert."),
         ["ShoppingList.HomeWorldOnlyCheckbox"] = ("Only consider offers on my home world", "Nur Angebote auf meiner Heimatwelt beruecksichtigen"),
         ["ShoppingList.FetchPrices"] = ("Fetch Prices", "Preise abrufen"),

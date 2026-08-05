@@ -36,9 +36,26 @@ internal sealed class UniversalisClient : IDisposable
         };
     }
 
-    public Task EnsureWorldDataLoadedAsync()
+    public async Task EnsureWorldDataLoadedAsync()
     {
-        return worldDataTask ??= LoadWorldDataAsync();
+        // Cached so repeated fetches don't reload world/DC data every time, but if the underlying
+        // fetch failed (e.g. a transient network hiccup) the failed task must not be cached forever -
+        // otherwise the very first failure permanently breaks price fetching for the rest of the
+        // session, since every future call would just rethrow that same stale failure.
+        var task = worldDataTask ??= LoadWorldDataAsync();
+        try
+        {
+            await task;
+        }
+        catch
+        {
+            if (worldDataTask == task)
+            {
+                worldDataTask = null;
+            }
+
+            throw;
+        }
     }
 
     public string? GetRegionForWorld(string worldName)
@@ -73,7 +90,12 @@ internal sealed class UniversalisClient : IDisposable
             {
                 json = await httpClient.GetStringAsync(url, cancellationToken);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            // A caught OperationCanceledException here almost always means the HttpClient's own
+            // 20s request timeout fired (a TaskCanceledException, which is an OperationCanceledException),
+            // not that our own cancellationToken was cancelled - only the latter should be allowed to
+            // propagate and cancel the whole fetch; a plain timeout should just mark this chunk as
+            // having no data and let the rest of the fetch continue/complete normally.
+            catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
             {
                 log.Warning(ex, $"[CelinesToolkit] Universalis-Abfrage fehlgeschlagen fuer {chunk.Length} Item(s).");
                 foreach (var id in requestedSet)

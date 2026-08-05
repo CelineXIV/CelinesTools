@@ -349,6 +349,8 @@ internal sealed class ShoppingListPage
 
         if (task.IsCanceled)
         {
+            statusMessage = Loc.T("ShoppingList.Error.TimedOut");
+            statusIsError = true;
             return;
         }
 

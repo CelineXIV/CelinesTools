@@ -23,7 +23,7 @@
     "Author": "CelineXIV",
     "Name": "CelinesToolkit",
     "InternalName": "CelinesToolkit",
-    "AssemblyVersion": "1.7.0.0",
+    "AssemblyVersion": "1.7.1.0",
     "Description": "Persoenliches Werkzeugkasten-Plugin mit mehreren Werkzeugen: Commandtool speichert Befehlsfolgen (z.B. \"/porch play 1\") als Makros und fuehrt sie per Chat-Befehl oder Klick aus. Quickbar ist eine kleine immer sichtbare Leiste, um ein gespeichertes Makro per Dropdown und Play-Button sofort auszufuehren. Orchestrion schaltet das Porch-Plugin bei Login/Gebietswechsel automatisch stumm. Preview Manager ergaenzt fehlende Vorschaubilder bei Penumbra-Mods, speichert sie direkt im jeweiligen Mod-Ordner und zeigt sie auch direkt in Penumbras eigenem Mod-Fenster an. Einkaufsliste importiert MakePlace-Einkaufslisten und zeigt fuer jedes Item den guenstigsten Marktpreis (ueber Universalis) sowie die Gesamtsumme. Oberflaeche auf Deutsch/Englisch je nach Dalamud-Spracheinstellung.",
     "Punchline": "Eigene Makro-Sequenzen anlegen, per Quickbar sofort ausfuehren, Porch stummschalten, Mod-Vorschaubilder verwalten und MakePlace-Einkaufslisten bepreisen.",
     "ApplicableVersion": "any",
@@ -35,8 +35,8 @@
     ],
     "DalamudApiLevel": 15,
     "IconUrl": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesToolkit/images/icon.png",
-    "DownloadLinkInstall": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesToolkit/dist/CelinesToolkit-1.7.0.0.zip",
-    "DownloadLinkUpdate": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesToolkit/dist/CelinesToolkit-1.7.0.0.zip",
-    "DownloadLinkTesting": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesToolkit/dist/CelinesToolkit-1.7.0.0.zip"
+    "DownloadLinkInstall": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesToolkit/dist/CelinesToolkit-1.7.1.0.zip",
+    "DownloadLinkUpdate": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesToolkit/dist/CelinesToolkit-1.7.1.0.zip",
+    "DownloadLinkTesting": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesToolkit/dist/CelinesToolkit-1.7.1.0.zip"
   }
 ]
