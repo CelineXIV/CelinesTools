@@ -55,7 +55,7 @@ internal sealed class ChatLogService : IDisposable
 
         var entry = new ChatLogEntry
         {
-            Sender = message.Sender.TextValue,
+            Sender = SanitizeSenderName(message.Sender.TextValue),
             SenderWorld = playerPayload?.World.ValueNullable?.Name.ExtractText(),
             Text = message.Message.TextValue,
             ChatType = message.LogKind,
@@ -91,6 +91,24 @@ internal sealed class ChatLogService : IDisposable
         {
             log.Warning(ex, "Konnte Chatnachricht nicht in Logdatei schreiben.");
         }
+    }
+
+    /// <summary>
+    /// Strips leading decoration characters (e.g. the ★/circle/heart icons the game prepends when
+    /// the sender is tagged with a friend list group marker) that aren't part of the actual
+    /// character name. Names always start with a letter, so anything before the first letter is
+    /// safe to drop - otherwise it ends up baked into the whisper target (e.g. "★Name@World"),
+    /// which the game doesn't recognize as a valid /tell target.
+    /// </summary>
+    private static string SanitizeSenderName(string rawName)
+    {
+        var start = 0;
+        while (start < rawName.Length && !char.IsLetter(rawName[start]))
+        {
+            start++;
+        }
+
+        return start > 0 ? rawName[start..] : rawName;
     }
 
     private static bool IsKnownChannel(XivChatType type) => type switch
@@ -217,6 +235,8 @@ internal sealed class ChatLogService : IDisposable
             sender = senderPart;
             senderWorld = null;
         }
+
+        sender = SanitizeSenderName(sender);
 
         if (!DateTime.TryParse($"{dateName} {timeText}", out var timestamp))
         {
