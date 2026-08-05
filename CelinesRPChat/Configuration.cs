@@ -99,6 +99,10 @@ public class Configuration : IPluginConfiguration
     // the chat window, dragged via the splitter between it and the chat log above.
     public float ComposeAreaHeight { get; set; } = 130f;
 
+    // true (default): Enter sends the message, Shift+Enter inserts a newline.
+    // false: Enter inserts a newline (multiline default), Ctrl+Enter sends.
+    public bool SendOnEnter { get; set; } = true;
+
     // Legacy global template list from before templates became per-character. Kept only so
     // existing saved templates survive the update; Plugin.GetCharacterState() copies them into
     // each character once (see CharacterState.SnippetsMigrated) and new templates are saved

@@ -3,7 +3,7 @@
     "Author": "CelineXIV",
     "Name": "CelinesRPChat",
     "InternalName": "CelinesRPChat",
-    "AssemblyVersion": "1.5.1.0",
+    "AssemblyVersion": "1.5.2.0",
     "Description": "Hello there! General Kenobi! This plugin is designed to replace the existing RP chat plugins. It ignores the character limit, allowing you to write as much as you want. Once you're finished, simply click **\"Send\"**, and the plugin will automatically post all paragraphs. Colors, font size, and many other settings can be customized to suit your preferences.",
     "Punchline": "Lange RP-Emotes automatisch in nummerierte Nachrichten aufteilen und senden.",
     "ApplicableVersion": "any",
@@ -15,9 +15,9 @@
     ],
     "DalamudApiLevel": 15,
     "IconUrl": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesRPChat/images/icon-v2.png",
-    "DownloadLinkInstall": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesRPChat/dist/CelinesRPChat-1.5.1.0.zip",
-    "DownloadLinkUpdate": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesRPChat/dist/CelinesRPChat-1.5.1.0.zip",
-    "DownloadLinkTesting": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesRPChat/dist/CelinesRPChat-1.5.1.0.zip"
+    "DownloadLinkInstall": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesRPChat/dist/CelinesRPChat-1.5.2.0.zip",
+    "DownloadLinkUpdate": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesRPChat/dist/CelinesRPChat-1.5.2.0.zip",
+    "DownloadLinkTesting": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesRPChat/dist/CelinesRPChat-1.5.2.0.zip"
   },
   {
     "Author": "CelineXIV",

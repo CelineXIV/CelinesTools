@@ -6,5 +6,6 @@ internal static class Changelog
     {
         ("1.5.0", "Release: Hello World"),
         ("1.5.1", "Fixed Whisper so the Target is set correctly"),
+        ("1.5.2", "Fixed Compose Area & Hotkeys"),
     };
 }

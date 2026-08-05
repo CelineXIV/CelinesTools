@@ -107,6 +107,23 @@ internal sealed class SettingsWindow : Window
         ImGui.PopStyleColor();
 
         ImGui.Separator();
+        ImGui.TextUnformatted(Loc.T("Settings.HotkeysHeader"));
+
+        var sendOnEnter = config.SendOnEnter;
+        if (ImGui.Checkbox(Loc.T("Settings.SendOnEnter"), ref sendOnEnter))
+        {
+            config.SendOnEnter = sendOnEnter;
+            plugin.SaveConfiguration();
+        }
+
+        if (!sendOnEnter)
+        {
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);
+            ImGui.TextWrapped(Loc.T("Settings.SendOnEnterOff"));
+            ImGui.PopStyleColor();
+        }
+
+        ImGui.Separator();
         ImGui.TextUnformatted(Loc.T("Settings.FileLogHeader"));
 
         var fileLogSay = config.FileLogSay;
@@ -289,6 +306,7 @@ internal sealed class SettingsWindow : Window
             config.UnfocusedWindowOpacity = 0.35f;
             config.ChatLogBackgroundOpacity = 0.15f;
             config.ComposeAreaHeight = 130f;
+            config.SendOnEnter = true;
             plugin.SaveConfiguration();
         }
 

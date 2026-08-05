@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
+using System.Text;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Components;
@@ -16,8 +17,6 @@ internal sealed class ChatWindow : Window
     private const float SplitterHeight = 6f;
     private const float MinComposeAreaHeight = 70f;
     private const float MaxComposeAreaHeight = 400f;
-    private const float ActionRowHeight = 30f;
-    private const float PreviewToggleLineHeight = 24f;
     private static readonly Vector4 SearchHighlightColor = new(1f, 0.65f, 0.15f, 1f);
 
     private static readonly (ChatChannel Channel, FontAwesomeIcon Icon)[] ChannelIcons =
@@ -48,6 +47,7 @@ internal sealed class ChatWindow : Window
     private int cachedMaxLength = -1;
     private List<string> cachedChunks = new();
     private bool splitterDragging;
+    private bool pendingSendFromEnter;
 
     // Log state
     private int lastEntryCount;
@@ -61,6 +61,12 @@ internal sealed class ChatWindow : Window
         this.plugin = plugin;
         Size = new Vector2(480, 620);
         SizeCondition = ImGuiCond.FirstUseEver;
+
+        // Only the "##chatLogScroll" child in the middle should ever scroll - the channel row,
+        // toolbar and compose area above/below it are meant to stay fixed. Without these flags,
+        // even a tiny (few-pixel) mismatch in the compose-area height math turns the whole window
+        // scrollable, which drags the top toolbar and bottom action row along with it.
+        Flags |= ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse;
 
         var initialState = plugin.GetCharacterState();
         if (initialState.LastChannel == ChatChannel.Whisper)
@@ -127,16 +133,36 @@ internal sealed class ChatWindow : Window
 
         DrawSplitter(config);
 
-        var inputBoxHeight = Math.Max(30f, composeAreaHeight - PreviewToggleLineHeight - ActionRowHeight - 16f);
+        // The preview-toggle row and the action row are each a single line of icon
+        // buttons/text, so each one's real footprint is exactly GetFrameHeightWithSpacing()
+        // (current font size + FramePadding + the spacing gap that follows the row) - using the
+        // live value instead of a hardcoded guess keeps the action row from spilling past the
+        // window edge when the user increases Dalamud's UI font size or this plugin's own
+        // font-scale slider. GetFrameHeightWithSpacing() only bundles the gap AFTER each row
+        // though, not the gap BEFORE it (i.e. the one between the splitter and the input box,
+        // and the one between the input box and the preview-toggle row) - those two leading
+        // gaps have to be subtracted separately, otherwise the compose area quietly grows a few
+        // pixels taller than composeAreaHeight every frame and the whole window ends up needing
+        // to scroll to show it.
+        var itemSpacingY = ImGui.GetStyle().ItemSpacing.Y;
+        var footerRowHeight = ImGui.GetFrameHeightWithSpacing();
+        var inputBoxHeight = Math.Max(30f, composeAreaHeight - (footerRowHeight * 2f) - (itemSpacingY * 2f));
 
         ImGui.SetNextItemWidth(-1);
-        if (ImGui.InputTextMultiline("##composeText", ref inputText, 4000, new Vector2(-1, inputBoxHeight), ImGuiInputTextFlags.CallbackAlways, TrackTextState))
+        const ImGuiInputTextFlags composeFlags = ImGuiInputTextFlags.CallbackAlways | ImGuiInputTextFlags.CallbackCharFilter;
+        if (ImGui.InputTextMultiline("##composeText", ref inputText, 4000, new Vector2(-1, inputBoxHeight), composeFlags, TrackTextState))
         {
             state.Drafts[currentDraftKey] = inputText;
             plugin.SaveConfiguration();
         }
 
-        HandleSendHotkey(state);
+        if (pendingSendFromEnter)
+        {
+            pendingSendFromEnter = false;
+            TrySend(state);
+        }
+
+        HandleSendHotkey(state, config);
 
         DrawPreviewToggle(chunks);
 
@@ -450,16 +476,51 @@ internal sealed class ChatWindow : Window
         currentDraftKey = key;
     }
 
-    private int TrackTextState(ref ImGuiInputTextCallbackData data)
+    private unsafe int TrackTextState(ref ImGuiInputTextCallbackData data)
     {
-        selectionStart = data.SelectionStart;
-        selectionEnd = data.SelectionEnd;
-        cursorPos = data.CursorPos;
+        if (data.EventFlag == ImGuiInputTextFlags.CallbackCharFilter)
+        {
+            // Enter always reaches this filter as a plain '\n' character (ImGui inserts newlines
+            // in multiline inputs through the same char-insertion path as typed characters) -
+            // rejecting it here (return 1) stops it from ever being inserted, which is far more
+            // reliable than letting it in and trying to strip it back out afterwards. Shift+Enter
+            // is left alone so it still inserts a real paragraph break.
+            if (data.EventChar == '\n' && plugin.Configuration.SendOnEnter && !ImGui.GetIO().KeyShift)
+            {
+                pendingSendFromEnter = true;
+                return 1;
+            }
+
+            return 0;
+        }
+
+        // data.CursorPos/SelectionStart/SelectionEnd are byte offsets into ImGui's internal
+        // UTF8 text buffer, not char indices into the C# (UTF16) inputText string - with any
+        // multi-byte character before the cursor (e.g. ae/oe/ue/ss in German text) the two
+        // diverge, so every inputText[cursorPos] lookup elsewhere silently reads the wrong
+        // character unless it's converted here first.
+        selectionStart = ByteOffsetToCharIndex(data, data.SelectionStart);
+        selectionEnd = ByteOffsetToCharIndex(data, data.SelectionEnd);
+        cursorPos = ByteOffsetToCharIndex(data, data.CursorPos);
         return 0;
     }
 
-    private void HandleSendHotkey(CharacterState state)
+    private static unsafe int ByteOffsetToCharIndex(ImGuiInputTextCallbackData data, int byteOffset)
     {
+        var length = Math.Clamp(byteOffset, 0, data.BufTextLen);
+        return Encoding.UTF8.GetCharCount(data.Buf, length);
+    }
+
+    private void HandleSendHotkey(CharacterState state, Configuration config)
+    {
+        // When SendOnEnter is active, Enter is handled in TrackTextState's CallbackCharFilter
+        // branch instead (it has to run there, before the '\n' is ever inserted - see
+        // pendingSendFromEnter). This method only covers the legacy Ctrl+Enter-to-send hotkey.
+        if (config.SendOnEnter)
+        {
+            return;
+        }
+
         if (!ImGui.IsItemFocused())
         {
             return;
@@ -505,6 +566,13 @@ internal sealed class ChatWindow : Window
         inputText = string.Empty;
         state.Drafts[currentDraftKey] = string.Empty;
         plugin.SaveConfiguration();
+
+        // While the multiline input keeps keyboard focus (always true for a keyboard-only send
+        // like Enter or Ctrl+Enter, unlike clicking the Send button), ImGui's InputText widget
+        // ignores external changes to its bound string and keeps rendering its own internal
+        // buffer - clearing inputText above has no visible effect until the widget deactivates
+        // and re-reads it. Forcing that here is what actually makes the field clear on screen.
+        ImGuiP.ClearActiveID();
     }
 
     private void DrawPreviewToggle(List<string> chunks)
