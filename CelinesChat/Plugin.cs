@@ -914,6 +914,26 @@ public sealed class Plugin : IDalamudPlugin
     {
         SetNativeChatVisible(false);
 
+        // Dalamud's own ImGui overlay always draws on top of native game UI - there's no
+        // supported way to make this window render behind, say, the Friend List while it's open.
+        // Auto-hiding it instead is the practical equivalent: gets out of the way of whatever
+        // native menu the player is actually using, without permanently losing the chat (Enter,
+        // handled below, brings it straight back to type - even while that menu stays open).
+        // AtkStage.GetFocus() is the game's own concept of "some native UI element currently has
+        // interaction focus" (distinct from merely being visible, e.g. the HUD/hotbars don't set
+        // it) - the best available general signal for "a menu is actively in use" rather than
+        // hardcoding specific addon names like "FriendList". This runs before the Enter handling
+        // below on purpose: if Enter is also pressed this same frame, that reopens the window
+        // afterwards, overriding the tentative close from this check.
+        if (!IsChatInputActive && chatWindow.IsOpen)
+        {
+            var atkStage = AtkStage.Instance();
+            if (atkStage != null && atkStage->GetFocus() != null)
+            {
+                chatWindow.IsOpen = false;
+            }
+        }
+
         if (!keyState[VirtualKey.RETURN])
         {
             return;

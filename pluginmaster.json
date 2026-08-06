@@ -43,7 +43,7 @@
     "Author": "CelineXIV",
     "Name": "CelinesChat",
     "InternalName": "CelinesChat",
-    "AssemblyVersion": "1.0.0.0",
+    "AssemblyVersion": "1.0.1.0",
     "Description": "Just a Beta Version of a Chatbox",
     "Punchline": "Konfigurierbare Chat-Tabs, freie Farben je Nachrichtentyp und automatische Nachrichtenaufteilung.",
     "ApplicableVersion": "any",
@@ -55,8 +55,8 @@
     ],
     "DalamudApiLevel": 15,
     "IconUrl": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesChat/images/icon-v2.png",
-    "DownloadLinkInstall": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesChat/dist/CelinesChat-1.0.0.0.zip",
-    "DownloadLinkUpdate": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesChat/dist/CelinesChat-1.0.0.0.zip",
-    "DownloadLinkTesting": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesChat/dist/CelinesChat-1.0.0.0.zip"
+    "DownloadLinkInstall": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesChat/dist/CelinesChat-1.0.1.0.zip",
+    "DownloadLinkUpdate": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesChat/dist/CelinesChat-1.0.1.0.zip",
+    "DownloadLinkTesting": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesChat/dist/CelinesChat-1.0.1.0.zip"
   }
 ]
