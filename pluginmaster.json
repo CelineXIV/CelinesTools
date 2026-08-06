@@ -38,5 +38,25 @@
     "DownloadLinkInstall": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesToolkit/dist/CelinesToolkit-1.8.0.0.zip",
     "DownloadLinkUpdate": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesToolkit/dist/CelinesToolkit-1.8.0.0.zip",
     "DownloadLinkTesting": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesToolkit/dist/CelinesToolkit-1.8.0.0.zip"
+  },
+  {
+    "Author": "CelineXIV",
+    "Name": "CelinesChat",
+    "InternalName": "CelinesChat",
+    "AssemblyVersion": "1.0.0.0",
+    "Description": "Just a Beta Version of a Chatbox",
+    "Punchline": "Konfigurierbare Chat-Tabs, freie Farben je Nachrichtentyp und automatische Nachrichtenaufteilung.",
+    "ApplicableVersion": "any",
+    "RepoUrl": "https://github.com/CelineXIV/CelinesTools",
+    "Tags": [
+      "roleplay",
+      "chat",
+      "utility"
+    ],
+    "DalamudApiLevel": 15,
+    "IconUrl": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesChat/images/icon-v2.png",
+    "DownloadLinkInstall": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesChat/dist/CelinesChat-1.0.0.0.zip",
+    "DownloadLinkUpdate": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesChat/dist/CelinesChat-1.0.0.0.zip",
+    "DownloadLinkTesting": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesChat/dist/CelinesChat-1.0.0.0.zip"
   }
 ]
