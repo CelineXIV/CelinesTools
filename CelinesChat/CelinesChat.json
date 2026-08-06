@@ -1,0 +1,17 @@
+{
+  "Author": "CelineXIV",
+  "Name": "CelinesChat",
+  "InternalName": "CelinesChat",
+  "AssemblyVersion": "1.0.0.0",
+  "Description": "Just a Beta Version of a Chatbox",
+  "ApplicableVersion": "any",
+  "RepoUrl": "https://github.com/CelineXIV/CelinesTools",
+  "IconUrl": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesChat/images/icon-v2.png",
+  "Punchline": "Konfigurierbare Chat-Tabs, freie Farben je Nachrichtentyp und automatische Nachrichtenaufteilung.",
+  "Tags": [
+    "roleplay",
+    "chat",
+    "utility"
+  ],
+  "DalamudApiLevel": 15
+}
