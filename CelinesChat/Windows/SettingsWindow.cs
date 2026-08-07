@@ -51,11 +51,9 @@ internal sealed class SettingsWindow : Window
 
     public override void Draw()
     {
-        // A consistent, slightly-rounded corner radius everywhere (buttons, child panes, popups,
-        // the scrollbar) reads as a lot more "designed" than ImGui's sharp-cornered defaults for
-        // barely any code - this is the single cheapest, broadest part of a modernization pass.
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 0f);
         ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 4f);
-        ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(8f, 4f));
+        ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(6f, 4f));
         ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 6f);
         ImGui.PushStyleVar(ImGuiStyleVar.PopupRounding, 6f);
         ImGui.PushStyleVar(ImGuiStyleVar.ScrollbarRounding, 6f);
@@ -101,7 +99,7 @@ internal sealed class SettingsWindow : Window
         }
         ImGui.EndChild();
 
-        ImGui.PopStyleVar(6);
+        ImGui.PopStyleVar(7);
     }
 
     private void DrawNavEntry(string label, FontAwesomeIcon icon, SettingsPage page)

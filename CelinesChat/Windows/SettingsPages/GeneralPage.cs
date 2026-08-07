@@ -90,6 +90,27 @@ internal sealed class GeneralPage
         DrawSoundEffectPicker("##mentionSfx", config.MentionSoundEffect, value => config.MentionSoundEffect = value, !mentionSoundEnabled);
 
         ImGui.EndDisabled();
+
+        ImGui.Separator();
+        ImGui.TextUnformatted(Loc.T("Settings.VisibilityHeader"));
+
+        ImGui.PushStyleColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);
+        ImGui.TextWrapped(Loc.T("Settings.VisibilityHint"));
+        ImGui.PopStyleColor();
+
+        var showDuringCutscenes = config.ShowChatDuringCutscenes;
+        if (ImGui.Checkbox(Loc.T("Settings.ShowDuringCutscenes"), ref showDuringCutscenes))
+        {
+            config.ShowChatDuringCutscenes = showDuringCutscenes;
+            plugin.SaveConfiguration();
+        }
+
+        var showDuringLoadingScreens = config.ShowChatDuringLoadingScreens;
+        if (ImGui.Checkbox(Loc.T("Settings.ShowDuringLoadingScreens"), ref showDuringLoadingScreens))
+        {
+            config.ShowChatDuringLoadingScreens = showDuringLoadingScreens;
+            plugin.SaveConfiguration();
+        }
     }
 
     /// <summary>

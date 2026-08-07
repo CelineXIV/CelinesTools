@@ -190,6 +190,19 @@ public class Configuration : IPluginConfiguration
     /// </summary>
     public bool ChatWindowLocked { get; set; }
 
+    /// <summary>
+    /// Off by default - the window auto-hides during cutscenes (Enter still brings it back for
+    /// that cutscene, see Plugin.OnFrameworkUpdate/ApplyGameStateVisibility), matching how the
+    /// game's own chat log behaves. Turning this on keeps it showing through cutscenes instead.
+    /// </summary>
+    public bool ShowChatDuringCutscenes { get; set; }
+
+    /// <summary>
+    /// Off by default - same idea as <see cref="ShowChatDuringCutscenes"/> but for zone/loading
+    /// transitions, which have nothing worth reading or typing into a chat window during anyway.
+    /// </summary>
+    public bool ShowChatDuringLoadingScreens { get; set; }
+
     public float WindowOpacity { get; set; } = 0.661f;
 
     public float UnfocusedWindowOpacity { get; set; } = 0.62f;

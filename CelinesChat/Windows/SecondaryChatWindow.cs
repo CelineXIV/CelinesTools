@@ -50,14 +50,16 @@ internal sealed class SecondaryChatWindow : Window
         // drawn here, popped automatically whenever Draw returns.
         using var chatFontScope = plugin.PushChatFont();
 
-        // Same rounding theme as the main ChatWindow, so this doesn't look like a different,
-        // older plugin once it's torn off into its own window.
+        var config = plugin.Configuration;
+
+        // Same chrome as the main ChatWindow, so this doesn't look like a different, older plugin
+        // once it's torn off into its own window.
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 0f);
         ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 4f);
         ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 6f);
         ImGui.PushStyleVar(ImGuiStyleVar.TabRounding, 4f);
         ImGui.PushStyleVar(ImGuiStyleVar.ScrollbarRounding, 6f);
 
-        var config = plugin.Configuration;
         var state = plugin.GetCharacterState();
 
         DrawTabBar(config, state);
@@ -67,7 +69,7 @@ internal sealed class SecondaryChatWindow : Window
         DrawFilteredEntries(config, availableWidth);
         ImGui.EndChild();
 
-        ImGui.PopStyleVar(4);
+        ImGui.PopStyleVar(5);
     }
 
     private void DrawTabBar(Configuration config, CharacterState state)

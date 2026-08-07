@@ -6,5 +6,6 @@ internal static class Changelog
     {
         ("1.0.0", "Release: Hello World"),
         ("1.0.3", "Beta Update"),
+        ("1.0.4", "Chatbug fixed, now hide by default during Cutscenes"),
     };
 }

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
+using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Keys;
 using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Game.ClientState.Objects.SubKinds;
@@ -48,7 +49,10 @@ public sealed class Plugin : IDalamudPlugin
     private readonly IFramework framework;
     private readonly IDataManager dataManager;
     private readonly IGameGui gameGui;
+    private readonly IClientState clientState;
+    private readonly ICondition condition;
     internal ITextureProvider TextureProvider { get; }
+
     private readonly IChatGui chatGui;
     private readonly IPluginLog log;
     private readonly MessageQueueSender sender;
@@ -137,7 +141,9 @@ public sealed class Plugin : IDalamudPlugin
         IGameGui gameGui,
         ITextureProvider textureProvider,
         IGameInteropProvider gameInteropProvider,
-        IFramework framework)
+        IFramework framework,
+        IClientState clientState,
+        ICondition condition)
     {
         this.pluginInterface = pluginInterface;
         this.commandManager = commandManager;
@@ -149,6 +155,8 @@ public sealed class Plugin : IDalamudPlugin
         this.framework = framework;
         this.dataManager = dataManager;
         this.gameGui = gameGui;
+        this.clientState = clientState;
+        this.condition = condition;
         TextureProvider = textureProvider;
         this.chatGui = chatGui;
         this.log = log;
@@ -237,9 +245,20 @@ public sealed class Plugin : IDalamudPlugin
     /// </summary>
     internal void HideChatWindow()
     {
+        chatManuallyHidden = true;
         chatWindow.IsOpen = false;
         IsChatInputActive = false;
     }
+
+    /// <summary>
+    /// True once the user explicitly hides the chat window (the toolbar's EyeSlash button) -
+    /// distinct from <see cref="ChatWindow"/>.IsOpen itself, which <see cref="ApplyGameStateVisibility"/>
+    /// also flips off automatically outside actual gameplay. Keeping this separate is what lets
+    /// gameplay-driven hiding auto-restore the window once you're back in the game, while a
+    /// manual hide stays hidden until the user (or Enter, matching vanilla) explicitly says
+    /// otherwise - the two reasons for being hidden shouldn't undo each other.
+    /// </summary>
+    private bool chatManuallyHidden;
 
     public void TogglePreviewWindow() => previewWindow.Toggle();
 
@@ -594,6 +613,7 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         SaveConfiguration();
+        chatManuallyHidden = false;
         chatWindow.IsOpen = true;
     }
 
@@ -820,6 +840,7 @@ public sealed class Plugin : IDalamudPlugin
         state.LastChannel = ChatChannel.Whisper;
         PendingWhisperTarget = target;
         SaveConfiguration();
+        chatManuallyHidden = false;
         chatWindow.IsOpen = true;
     }
 
@@ -935,6 +956,7 @@ public sealed class Plugin : IDalamudPlugin
     private unsafe void OnFrameworkUpdate(IFramework _)
     {
         SetNativeChatVisible(false);
+        ApplyGameStateVisibility();
 
         if (!keyState[VirtualKey.RETURN])
         {
@@ -954,8 +976,44 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         keyState[VirtualKey.RETURN] = false;
+        chatManuallyHidden = false;
         chatWindow.IsOpen = true;
         pendingChatActivation = true;
+    }
+
+    /// <summary>
+    /// Drives the chat window's visibility from two independent things: whether the user has
+    /// explicitly hidden it (<see cref="chatManuallyHidden"/>) and whether there's anything
+    /// meaningful to chat about right now - not logged into a character at all (title/character
+    /// select), watching a cutscene, or between areas (loading screen), each opt-out-able for
+    /// cutscenes/loading via Configuration. Recomputing both sides every frame (rather than only
+    /// ever forcing it closed) is what makes it come back on its own once you're back in actual
+    /// gameplay, instead of needing Enter again after every single cutscene.
+    ///
+    /// Runs before the Enter-activation check above, not after, specifically so a same-frame
+    /// Enter press still wins and reopens it - that's what lets someone type a message
+    /// mid-cutscene even with cutscenes hidden by default, exactly like the game's own chat log
+    /// allows. Skipped entirely while the compose box already has focus, so it can never yank
+    /// focus away from an in-progress message (e.g. a loading screen starting mid-sentence) - the
+    /// window re-evaluates on its own the next frame after focus is given up.
+    /// </summary>
+    private void ApplyGameStateVisibility()
+    {
+        if (IsChatInputActive)
+        {
+            return;
+        }
+
+        var inCutscene = condition[ConditionFlag.WatchingCutscene]
+            || condition[ConditionFlag.WatchingCutscene78]
+            || condition[ConditionFlag.OccupiedInCutSceneEvent];
+        var inLoadingScreen = condition[ConditionFlag.BetweenAreas] || condition[ConditionFlag.BetweenAreas51];
+
+        var suppressedByGameState = !clientState.IsLoggedIn
+            || (inCutscene && !Configuration.ShowChatDuringCutscenes)
+            || (inLoadingScreen && !Configuration.ShowChatDuringLoadingScreens);
+
+        chatWindow.IsOpen = !chatManuallyHidden && !suppressedByGameState;
     }
 
     /// <summary>
@@ -989,7 +1047,7 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
-    private void OnOpenCommand(string command, string args) => chatWindow.Toggle();
+    private void OnOpenCommand(string command, string args) => ToggleChatWindow();
 
     private void OnLanguageChanged(string langCode)
     {
@@ -1008,7 +1066,15 @@ public sealed class Plugin : IDalamudPlugin
         ReconcileItemTooltip();
     }
 
-    private void ToggleChatWindow() => chatWindow.Toggle();
+    // Keeps chatManuallyHidden in sync with whichever way this just toggled it, so
+    // ApplyGameStateVisibility's own per-frame recompute doesn't immediately fight this - e.g.
+    // toggling it open from a fully-suppressed state (chatManuallyHidden was true) has to clear
+    // that flag or the very next frame would just close it again.
+    private void ToggleChatWindow()
+    {
+        chatWindow.Toggle();
+        chatManuallyHidden = !chatWindow.IsOpen;
+    }
 
     public void Dispose()
     {

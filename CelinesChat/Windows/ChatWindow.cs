@@ -182,10 +182,9 @@ internal sealed class ChatWindow : Window
         // confirmed source of shimmering/unstable text and caret placement while typing.
         using var chatFontScope = plugin.PushChatFont();
 
-        // A consistent, slightly-rounded corner radius everywhere (buttons, the log/whisper-badge
-        // child panes, popups, the scrollbar) reads as a lot more "designed" than ImGui's
-        // sharp-cornered defaults, for barely any code - the cheapest, broadest part of a
-        // modernization pass. Matches the same values SettingsWindow now uses.
+        var config = plugin.Configuration;
+
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 0f);
         ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 4f);
         ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(6f, 4f));
         ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 6f);
@@ -193,8 +192,6 @@ internal sealed class ChatWindow : Window
         ImGui.PushStyleVar(ImGuiStyleVar.ScrollbarRounding, 6f);
         ImGui.PushStyleVar(ImGuiStyleVar.GrabRounding, 4f);
         ImGui.PushStyleVar(ImGuiStyleVar.TabRounding, 4f);
-
-        var config = plugin.Configuration;
         var state = plugin.GetCharacterState();
 
         if (plugin.PendingWhisperTarget is { } pendingTarget)
@@ -366,7 +363,7 @@ internal sealed class ChatWindow : Window
         // normally, 3 whenever the validation message is showing) actually rendered.
         measuredFooterHeight = Math.Max(0f, ImGui.GetCursorScreenPos().Y - inputBoxBottom);
 
-        ImGui.PopStyleVar(7);
+        ImGui.PopStyleVar(8);
     }
 
     private void DrawSplitter(Configuration config, float minComposeAreaHeight)
@@ -700,7 +697,15 @@ internal sealed class ChatWindow : Window
         var viewChanged = viewKey != lastViewKey;
         lastViewKey = viewKey;
 
-        var nearBottomBeforeDraw = ImGui.GetScrollY() >= ImGui.GetScrollMaxY() - 5f;
+        // Was a flat 5px, which turned out too strict - a frame or two of height churn (a new
+        // entry wrapping to a slightly different line count, the footer's measured height
+        // settling, ...) could leave the scroll position a handful of pixels short of the exact
+        // max on the very frame a new message arrives, silently breaking auto-follow until the
+        // user nudged the scrollbar themselves. Widened to "within about a line or two" instead
+        // of "essentially exact", which still respects "scrolled up on purpose" for anything more
+        // than a nudge.
+        const float nearBottomThresholdPx = 60f;
+        var nearBottomBeforeDraw = ImGui.GetScrollY() >= ImGui.GetScrollMaxY() - nearBottomThresholdPx;
         var mentionTerm = plugin.MentionFirstName;
 
         // Measured once per frame, at the log area's left edge before any entry is drawn, so
@@ -711,6 +716,7 @@ internal sealed class ChatWindow : Window
         var activeTab = showingWhisper ? null : GetActiveFixedTab(config);
 
         var hasNewEntries = false;
+        var hasNewOwnMessageInView = false;
 
         var index = 0;
         foreach (var entry in entries)
@@ -718,7 +724,8 @@ internal sealed class ChatWindow : Window
             // Sequence-based (not count-based) so this still works once the buffer fills up and
             // starts evicting from the front - at that point the count stops changing at all,
             // which would otherwise permanently break auto-scroll and unread tracking below.
-            if (!viewingHistory && entry.Sequence > lastSeenSequence)
+            var isNew = !viewingHistory && entry.Sequence > lastSeenSequence;
+            if (isNew)
             {
                 hasNewEntries = true;
                 TrackUnreadForNewEntry(config, state, entry, showingWhisper, activeTab?.Id);
@@ -743,6 +750,14 @@ internal sealed class ChatWindow : Window
                 continue;
             }
 
+            // A message you just sent yourself should always scroll into view regardless of where
+            // you'd scrolled to - unlike someone else's message, there's no "reading history on
+            // purpose" case where you wouldn't want to see your own reply land.
+            if (isNew && IsSelfAuthored(entry))
+            {
+                hasNewOwnMessageInView = true;
+            }
+
             DrawLogEntry(entry, config, mentionTerm, index, availableWidth);
             index++;
         }
@@ -750,8 +765,9 @@ internal sealed class ChatWindow : Window
         // Opening/switching to a tab always jumps to the bottom, unconditionally. Otherwise, new
         // messages only pull the view down if it was already at (or very near) the bottom - if
         // the user has scrolled up to read something older, a new message doesn't yank them back
-        // down; scrolling to the bottom themselves is what re-enables auto-follow again.
-        if (viewChanged || (!viewingHistory && hasNewEntries && nearBottomBeforeDraw))
+        // down; scrolling to the bottom themselves is what re-enables auto-follow again. A new
+        // message from yourself is the one exception - see hasNewOwnMessageInView above.
+        if (viewChanged || hasNewOwnMessageInView || (!viewingHistory && hasNewEntries && nearBottomBeforeDraw))
         {
             ImGui.SetScrollHereY(1f);
         }
@@ -762,6 +778,10 @@ internal sealed class ChatWindow : Window
         }
     }
 
+    private bool IsSelfAuthored(ChatLogEntry entry) =>
+        entry.ChatType == XivChatType.TellOutgoing
+        || string.Equals(entry.Sender, plugin.OwnCharacterName, StringComparison.OrdinalIgnoreCase);
+
     /// <summary>
     /// Bumps the unread badge on every tab a freshly-arrived message would show up in, except
     /// whichever one you're currently looking at. Your own outgoing messages never count as
@@ -769,9 +789,7 @@ internal sealed class ChatWindow : Window
     /// </summary>
     private void TrackUnreadForNewEntry(Configuration config, CharacterState state, ChatLogEntry entry, bool showingWhisper, Guid? activeFixedTabId)
     {
-        var isSelfAuthored = entry.ChatType == XivChatType.TellOutgoing
-            || string.Equals(entry.Sender, plugin.OwnCharacterName, StringComparison.OrdinalIgnoreCase);
-        if (isSelfAuthored)
+        if (IsSelfAuthored(entry))
         {
             return;
         }
@@ -1579,16 +1597,29 @@ internal sealed class ChatWindow : Window
     {
         var color = ChannelDisplay.WhisperColor(target, config);
 
+        // A couple px more than the tightest single-line value, not a big flat pad - the real fix
+        // for baseline misalignment is the per-font AlignTextToFramePadding() calls below, not
+        // extra height. Padding this generously has a real cost here (unlike a one-off UI element):
+        // the window's total height is fixed, so anything this row grows by is space taken
+        // directly from the compose area at the bottom, which showed up as the send-channel
+        // button/footer getting pushed to (or past) the window's bottom edge.
+        var lineHeight = MathF.Max(ImGui.GetTextLineHeight(), ImGui.GetFrameHeight()) + 2f;
         ImGui.PushStyleColor(ImGuiCol.ChildBg, new Vector4(color.X, color.Y, color.Z, 0.16f));
         ImGui.PushStyleColor(ImGuiCol.Border, new Vector4(color.X, color.Y, color.Z, 0.75f));
         ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 4f);
-        ImGui.BeginChild("##activeWhisperIndicator", new Vector2(-1, ImGui.GetFrameHeight()), true, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
+        ImGui.BeginChild("##activeWhisperIndicator", new Vector2(-1, lineHeight), true, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
 
-        ImGui.AlignTextToFramePadding();
+        // AlignTextToFramePadding() has to run once *per font* right before that font's own text
+        // call, not once up front - it bases its baseline math on whichever font is active at the
+        // moment it's called, so calling it only before the icon (in the old version) aligned the
+        // icon to the icon font's baseline but left the plain-text call after it with no alignment
+        // of its own.
         ImGui.PushFont(UiBuilder.IconFont);
+        ImGui.AlignTextToFramePadding();
         ImGui.TextColored(color, FontAwesomeIcon.EnvelopeOpen.ToIconString());
         ImGui.PopFont();
         ImGui.SameLine();
+        ImGui.AlignTextToFramePadding();
         ImGui.TextColored(color, Loc.T("Whisper.ActiveIndicator", target));
 
         ImGui.EndChild();
