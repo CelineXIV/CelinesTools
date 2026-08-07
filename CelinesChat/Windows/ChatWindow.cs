@@ -66,11 +66,18 @@ internal sealed class ChatWindow : Window
     private readonly Dictionary<string, int> whisperUnreadCounts = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<Guid, int> fixedTabUnreadCounts = new();
 
-    // Recorded when a whisper tab is closed (the newest sequence number at that moment) so that
-    // if the same conversation later gets a fresh tab (new incoming/outgoing message), it only
-    // shows what's been said since the close - not the entire history still sitting in the
-    // shared buffer.
+    // Recorded when a whisper tab is closed *or* explicitly cleared (the newest sequence number
+    // at that moment) so that conversation's view only shows what's been said since then - not
+    // the entire history still sitting in the shared buffer. Both events mean the same thing to a
+    // reader ("hide everything up to here"), so one cutoff serves both rather than tracking them
+    // separately - whichever happened most recently naturally wins, since sequence only grows.
     private readonly Dictionary<string, long> whisperCloseCutoff = new(StringComparer.OrdinalIgnoreCase);
+
+    // Same idea as whisperCloseCutoff, but for the "Alle"/custom fixed tabs - set when the
+    // Eraser button is confirmed on one of them. The shared entry buffer itself is never
+    // touched, so clearing one tab can't blank out another tab's (or "Alle"'s) view of the same
+    // underlying messages.
+    private readonly Dictionary<Guid, long> fixedTabClearCutoff = new();
 
     // Whether the most recent right-click on a log entry's group landed specifically on the
     // sender name (vs. elsewhere in the row) - see DrawLogEntry's merged "##logEntryContext"
@@ -235,7 +242,7 @@ internal sealed class ChatWindow : Window
             }
         }
 
-        DrawLogToolbar(state);
+        DrawLogToolbar(config, state);
 
         DrawLogTabBar(config, state);
 
@@ -506,7 +513,7 @@ internal sealed class ChatWindow : Window
         plugin.SaveConfiguration();
     }
 
-    private void DrawLogToolbar(CharacterState state)
+    private void DrawLogToolbar(Configuration config, CharacterState state)
     {
         // No left-click action on purpose - the search box used to sit inline here all the time;
         // now it only shows up in a small popup on right-click, to keep this row compact. The
@@ -563,13 +570,15 @@ internal sealed class ChatWindow : Window
         ImGui.SameLine();
         if (ImGuiComponents.IconButton(FontAwesomeIcon.Eraser))
         {
-            plugin.ChatLog.Clear();
+            ImGui.OpenPopup("##confirmClearTab");
         }
 
         if (ImGui.IsItemHovered())
         {
             ImGui.SetTooltip(Loc.T("Compose.Clear"));
         }
+
+        DrawClearTabConfirmationPopup(config);
 
         ImGui.SameLine();
         if (ImGuiComponents.IconButton(FontAwesomeIcon.EyeSlash))
@@ -677,6 +686,52 @@ internal sealed class ChatWindow : Window
         ImGui.EndPopup();
     }
 
+    /// <summary>
+    /// Confirms before the Eraser button takes effect - clearing used to nuke the entire shared
+    /// log instantly with no way back, which is exactly the kind of one-click-and-it's-gone
+    /// action worth a speed bump for. Only ever hides messages from *this* tab's view (see
+    /// whisperCloseCutoff/fixedTabClearCutoff) - the shared buffer itself, and every other tab's
+    /// view of it, is untouched.
+    /// </summary>
+    private void DrawClearTabConfirmationPopup(Configuration config)
+    {
+        if (!ImGui.BeginPopupModal("##confirmClearTab", ImGuiWindowFlags.AlwaysAutoResize))
+        {
+            return;
+        }
+
+        var showingWhisper = !string.IsNullOrEmpty(activeWhisperTabTarget);
+        var activeTab = showingWhisper ? null : GetActiveFixedTab(config);
+        var tabLabel = showingWhisper ? activeWhisperTabTarget : activeTab?.Name ?? string.Empty;
+
+        ImGui.TextUnformatted(Loc.T("ChatLog.ClearTabConfirm", tabLabel));
+
+        if (ImGui.Button(Loc.T("ChatLog.ClearTabConfirmYes")))
+        {
+            var entries = plugin.ChatLog.Entries;
+            var cutoff = entries.Count > 0 ? entries[^1].Sequence : 0;
+
+            if (showingWhisper)
+            {
+                whisperCloseCutoff[activeWhisperTabTarget] = cutoff;
+            }
+            else if (activeTab != null)
+            {
+                fixedTabClearCutoff[activeTab.Id] = cutoff;
+            }
+
+            ImGui.CloseCurrentPopup();
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button(Loc.T("ChatLog.ClearTabConfirmCancel")))
+        {
+            ImGui.CloseCurrentPopup();
+        }
+
+        ImGui.EndPopup();
+    }
+
     private void DrawChatLogEntries(Configuration config, CharacterState state)
     {
         var viewingHistory = loadedHistoryEntries != null;
@@ -738,9 +793,19 @@ internal sealed class ChatWindow : Window
                     continue;
                 }
             }
-            else if (activeTab != null && !activeTab.Matches(entry.ChatType))
+            else if (activeTab != null)
             {
-                continue;
+                if (!activeTab.Matches(entry.ChatType))
+                {
+                    continue;
+                }
+
+                // See fixedTabClearCutoff - hides everything up to whenever this tab was last
+                // cleared, without touching the shared buffer other tabs still read from.
+                if (fixedTabClearCutoff.TryGetValue(activeTab.Id, out var clearCutoff) && entry.Sequence <= clearCutoff)
+                {
+                    continue;
+                }
             }
 
             if (logSearchFilter.Length > 0
