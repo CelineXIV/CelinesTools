@@ -51,9 +51,15 @@ internal sealed class SettingsWindow : Window
 
     public override void Draw()
     {
-        ImGui.SetWindowFontScale(plugin.Configuration.FontScale);
+        // A consistent, slightly-rounded corner radius everywhere (buttons, child panes, popups,
+        // the scrollbar) reads as a lot more "designed" than ImGui's sharp-cornered defaults for
+        // barely any code - this is the single cheapest, broadest part of a modernization pass.
         ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 4f);
         ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(8f, 4f));
+        ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 6f);
+        ImGui.PushStyleVar(ImGuiStyleVar.PopupRounding, 6f);
+        ImGui.PushStyleVar(ImGuiStyleVar.ScrollbarRounding, 6f);
+        ImGui.PushStyleVar(ImGuiStyleVar.GrabRounding, 4f);
 
         ImGui.BeginChild("##settingsNav", new Vector2(140, 0), true);
         DrawNavEntry(Loc.T("Nav.General"), FontAwesomeIcon.SlidersH, SettingsPage.General);
@@ -95,7 +101,7 @@ internal sealed class SettingsWindow : Window
         }
         ImGui.EndChild();
 
-        ImGui.PopStyleVar(2);
+        ImGui.PopStyleVar(6);
     }
 
     private void DrawNavEntry(string label, FontAwesomeIcon icon, SettingsPage page)
@@ -113,15 +119,28 @@ internal sealed class SettingsWindow : Window
         var drawList = ImGui.GetWindowDrawList();
         var textColor = ImGui.GetColorU32(ImGuiCol.Text);
 
+        // A colored bar on the selected entry's left edge, using the same accent color the
+        // compose area's Send button uses - a small touch that makes that color choice feel like
+        // it applies to the plugin's whole identity instead of just one button, and reads as a
+        // much more current sidebar-nav pattern than relying on ImGui's flat selection fill alone.
+        if (isSelected)
+        {
+            var accent = plugin.Configuration.SendAccentColor;
+            drawList.AddRectFilled(
+                startPos,
+                startPos + new Vector2(3f, lineHeight),
+                ImGui.GetColorU32(accent));
+        }
+
         ImGui.PushFont(UiBuilder.IconFont);
         var iconText = icon.ToIconString();
         var iconSize = ImGui.CalcTextSize(iconText);
-        var iconPos = startPos + new Vector2(6f, (lineHeight - iconSize.Y) / 2f);
+        var iconPos = startPos + new Vector2(10f, (lineHeight - iconSize.Y) / 2f);
         drawList.AddText(iconPos, textColor, iconText);
         ImGui.PopFont();
 
         var textSize = ImGui.CalcTextSize(label);
-        var textPos = startPos + new Vector2(6f + iconSize.X + 8f, (lineHeight - textSize.Y) / 2f);
+        var textPos = startPos + new Vector2(10f + iconSize.X + 8f, (lineHeight - textSize.Y) / 2f);
         drawList.AddText(textPos, textColor, label);
     }
 }

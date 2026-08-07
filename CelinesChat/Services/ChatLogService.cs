@@ -8,6 +8,7 @@ using Dalamud.Game.Text.SeStringHandling.Payloads;
 using Dalamud.Hooking;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
+using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Client.UI.Misc;
 
 namespace CelinesChat.Services;
@@ -22,6 +23,7 @@ internal sealed class ChatLogService : IDisposable
     private readonly IChatGui chatGui;
     private readonly Configuration configuration;
     private readonly IPluginLog log;
+    private readonly IPlayerState playerState;
     private readonly List<ChatLogEntry> entries = new();
     private readonly Hook<RaptureLogModule.Delegates.AddMsgSourceEntry>? contentIdHook;
     private long nextSequence = 1;
@@ -37,11 +39,12 @@ internal sealed class ChatLogService : IDisposable
 
     public IReadOnlyList<ChatLogEntry> Entries => entries;
 
-    public unsafe ChatLogService(IChatGui chatGui, Configuration configuration, IDalamudPluginInterface pluginInterface, IPluginLog log, IGameInteropProvider gameInteropProvider)
+    public unsafe ChatLogService(IChatGui chatGui, Configuration configuration, IDalamudPluginInterface pluginInterface, IPluginLog log, IGameInteropProvider gameInteropProvider, IPlayerState playerState)
     {
         this.chatGui = chatGui;
         this.configuration = configuration;
         this.log = log;
+        this.playerState = playerState;
 
         LogsFolderPath = Path.Combine(pluginInterface.GetPluginConfigDirectory(), "Logs");
         try
@@ -135,9 +138,19 @@ internal sealed class ChatLogService : IDisposable
 
         var playerPayload = message.Sender.Payloads.OfType<PlayerPayload>().FirstOrDefault();
 
+        // A cross-world sender's raw text isn't one clean name string - the game puts the world
+        // name in its own separate TextPayload after an IconPayload (the little "different world"
+        // icon), both sitting right after the name's own TextPayload with nothing in between.
+        // message.Sender.TextValue flattens every ITextProvider payload it finds and IconPayload
+        // isn't one, so it silently drops the icon but keeps both text pieces - producing
+        // "Vorname NachnameWorldName" with no separator at all, which then got the world appended
+        // a *second* time once SenderWorld (extracted correctly below) was also displayed.
+        // PlayerPayload.PlayerName is Dalamud's own already-clean name - "does not contain the
+        // server name" per its own doc comment - so use that directly whenever a PlayerPayload
+        // exists instead of trying to reconstruct a clean name from the flattened text.
         var entry = new ChatLogEntry
         {
-            Sender = SanitizeSenderName(message.Sender.TextValue),
+            Sender = playerPayload != null ? playerPayload.PlayerName : SanitizeSenderName(message.Sender.TextValue),
             SenderWorld = playerPayload?.World.ValueNullable?.Name.ExtractText(),
             Text = message.Message.TextValue,
             ChatType = message.LogKind,
@@ -168,7 +181,72 @@ internal sealed class ChatLogService : IDisposable
         }
 
         lastDispatchedEntry = entry;
+
+        PlaySoundIfNeeded(entry);
     }
+
+    /// <summary>
+    /// Since this plugin fully replaces the native chat window (and hides it - see
+    /// Plugin.SetNativeChatVisible), it also has to reintroduce whatever audio cue a player would
+    /// otherwise rely on to notice a message without looking at the screen. Deliberately narrow:
+    /// only a whisper (on by default - the one thing you can't just catch by glancing at the log
+    /// later, since it also opens/keeps a conversation) and an opt-in "someone said your name"
+    /// mention, not a sound for every category, so this stays useful instead of becoming noise.
+    /// Goes through the game's own UIGlobals.PlayChatSoundEffect (the same 16 slots <se.1>-<se.16>
+    /// macros use), so it automatically respects the game's own SFX volume/mute settings.
+    /// </summary>
+    private unsafe void PlaySoundIfNeeded(ChatLogEntry entry)
+    {
+        if (!configuration.PlaySounds)
+        {
+            return;
+        }
+
+        if (configuration.WhisperSoundEnabled && entry.ChatType == XivChatType.TellIncoming)
+        {
+            UIGlobals.PlayChatSoundEffect((uint)Math.Clamp(configuration.WhisperSoundEffect, 1, 16));
+            return;
+        }
+
+        if (configuration.MentionSoundEnabled && IsSelfMentioned(entry))
+        {
+            UIGlobals.PlayChatSoundEffect((uint)Math.Clamp(configuration.MentionSoundEffect, 1, 16));
+        }
+    }
+
+    /// <summary>
+    /// A plain word match against the player's own first name (same identifier
+    /// ColoredTextRenderer highlights mentions with) - not used for own messages, so posting your
+    /// own name doesn't ping yourself.
+    /// </summary>
+    private bool IsSelfMentioned(ChatLogEntry entry)
+    {
+        if (!playerState.IsLoaded || string.IsNullOrEmpty(playerState.CharacterName))
+        {
+            return false;
+        }
+
+        if (string.Equals(entry.Sender, playerState.CharacterName, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var spaceIndex = playerState.CharacterName.IndexOf(' ');
+        var firstName = spaceIndex > 0 ? playerState.CharacterName[..spaceIndex] : playerState.CharacterName;
+
+        foreach (var word in entry.Text.Split(WordSeparators, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (string.Equals(word.Trim(PunctuationTrim), firstName, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static readonly char[] WordSeparators = { ' ', '\t', '\r', '\n' };
+    private static readonly char[] PunctuationTrim = { '.', ',', '!', '?', ':', ';', '"', '\'', '(', ')' };
 
     private unsafe void OnAddMsgSourceEntry(RaptureLogModule* module, ulong contentId, ulong accountId, int messageIndex, ushort worldId, ushort chatType)
     {

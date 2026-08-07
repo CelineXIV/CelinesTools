@@ -50,7 +50,12 @@ internal sealed class SecondaryChatWindow : Window
         // drawn here, popped automatically whenever Draw returns.
         using var chatFontScope = plugin.PushChatFont();
 
-        ImGui.SetWindowFontScale(plugin.Configuration.FontScale);
+        // Same rounding theme as the main ChatWindow, so this doesn't look like a different,
+        // older plugin once it's torn off into its own window.
+        ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 4f);
+        ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 6f);
+        ImGui.PushStyleVar(ImGuiStyleVar.TabRounding, 4f);
+        ImGui.PushStyleVar(ImGuiStyleVar.ScrollbarRounding, 6f);
 
         var config = plugin.Configuration;
         var state = plugin.GetCharacterState();
@@ -61,6 +66,8 @@ internal sealed class SecondaryChatWindow : Window
         ImGui.BeginChild("##secondaryChatLog", new Vector2(-1, -1), true);
         DrawFilteredEntries(config, availableWidth);
         ImGui.EndChild();
+
+        ImGui.PopStyleVar(4);
     }
 
     private void DrawTabBar(Configuration config, CharacterState state)
@@ -92,8 +99,13 @@ internal sealed class SecondaryChatWindow : Window
         foreach (var target in myWhispers)
         {
             var open = true;
-            var tabIsOpen = ImGui.BeginTabItem(target + "##secWhisper" + target, ref open);
+            var tabIsOpen = ImGui.BeginTabItem(ChatWindow.FirstName(target) + "##secWhisper" + target, ref open);
             TabDragHelper.HandleHoverAndTearOff(() => plugin.MoveWhisperToMainWindow(target));
+
+            if (ImGui.IsItemHovered() && !ImGui.IsMouseDragging(ImGuiMouseButton.Left))
+            {
+                ImGui.SetTooltip(target);
+            }
 
             if (tabIsOpen)
             {
@@ -190,7 +202,7 @@ internal sealed class SecondaryChatWindow : Window
         ImGui.SameLine(0, 0);
         prefixSize += ImGui.CalcTextSize(timestamp);
 
-        var tag = ChannelDisplay.Tag(entry.ChatType) + " ";
+        var tag = ChannelDisplay.DisplayTag(entry.ChatType) + " ";
         ImGui.TextColored(channelColor, tag);
         ImGui.SameLine(0, 0);
         prefixSize += ImGui.CalcTextSize(tag);
@@ -201,14 +213,18 @@ internal sealed class SecondaryChatWindow : Window
             prefixSize.X += StatusIconRenderer.Draw(plugin, entry.SenderPayloads);
         }
 
-        var namePart = (isOutgoingTell ? plugin.OwnCharacterName : entry.Sender) + ": ";
+        // See ChatWindow.DrawLogEntry's matching remarks - SanitizeSenderName strips the world
+        // back out of a cross-world sender's name, so it has to be appended back on here for the
+        // visible name.
+        var displayName = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
+        var namePart = (isOutgoingTell ? plugin.OwnCharacterName : displayName) + ": ";
 
         // Only the partner's own NAME picks up their per-conversation color override - see
         // ChatWindow.DrawLogEntry's matching remarks.
         var senderColor = isOutgoingTell
             ? config.SendAccentColor
             : entry.ChatType == XivChatType.TellIncoming
-                ? ChannelDisplay.WhisperColor(entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender, config)
+                ? ChannelDisplay.WhisperColor(displayName, config)
                 : channelColor;
         ImGui.TextColored(senderColor, namePart);
         var namePartSize = ImGui.CalcTextSize(namePart);

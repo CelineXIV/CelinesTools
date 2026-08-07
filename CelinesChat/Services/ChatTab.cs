@@ -84,15 +84,23 @@ public sealed class ChatTab
 
     public static ChatTab CreateDefaultAllTab()
     {
+        var included = new HashSet<ChatCategory>(ChannelDisplay.LegacyDefaultCategories);
+
+        // Plus Urgent/Error/System/Echo (see CoreAnnouncementDefaultCategories's remarks) - not
+        // every selectable category, though: Battle categories in particular (Damage, Miss,
+        // Action, ...) are extremely high-volume, and a brand new "Alle" tab flooding with combat
+        // spam by default would be a bad first impression. The rest of the Announcements group
+        // (loot, crafting, glamour, ...) and all of Battle are opt-in per tab via settings instead,
+        // matching the same choice made for existing tabs after an update (see Plugin's ctor).
+        foreach (var category in ChannelDisplay.CoreAnnouncementDefaultCategories)
+        {
+            included.Add(category);
+        }
+
         return new ChatTab
         {
             Name = Loc.T("Tabs.DefaultAllName"),
-            // Deliberately the conservative legacy set, not every selectable category - Battle
-            // categories in particular (Damage, Miss, Action, ...) are extremely high-volume, and
-            // a brand new "Alle" tab flooding with combat spam by default would be a bad first
-            // impression. Announcements/Battle categories are opt-in per tab via settings instead,
-            // matching the same choice made for existing tabs after an update (see Plugin's ctor).
-            IncludedChannels = new HashSet<ChatCategory>(ChannelDisplay.LegacyDefaultCategories),
+            IncludedChannels = included,
             Removable = false,
         };
     }

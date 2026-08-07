@@ -16,7 +16,6 @@ internal sealed class ChatWindow : Window
 {
     private const string GenericDraftKey = "*generic*";
     private const float SplitterHeight = 6f;
-    private const float MinComposeAreaHeight = 70f;
     private const float MaxComposeAreaHeight = 400f;
     private static readonly Vector4 SearchHighlightColor = new(1f, 0.65f, 0.15f, 1f);
     private static readonly Vector4 LinkColor = new(0.4f, 0.7f, 1f, 1f);
@@ -38,6 +37,17 @@ internal sealed class ChatWindow : Window
     private int cachedMaxLength = -1;
     private List<string> cachedChunks = new();
     private bool splitterDragging;
+
+    // How tall the preview-toggle row + action row + (sometimes) the validation message actually
+    // rendered last frame, in real screen pixels - measured after drawing them (see Draw()), not
+    // guessed from GetFrameHeightWithSpacing() formulas. Estimating that footprint from font
+    // metrics went through three different formulas across this file's history and each one was
+    // only right for some font/row-count combination, either starving the input box (jittery caret
+    // scroll-into-view) or over-reserving space for it (dead margin at the bottom of the window).
+    // A real, one-frame-stale measurement is exact for whatever's actually on screen and adapts to
+    // any font size or row count automatically. Seeded with a reasonable guess for the very first
+    // frame only; every frame after that overwrites it with the real value.
+    private float measuredFooterHeight = 60f;
     private bool pendingSendFromEnter;
     private bool pendingFocusInput;
     private bool composeBoxActive;
@@ -67,6 +77,10 @@ internal sealed class ChatWindow : Window
     // popup for why this can't just be two separate BeginPopupContextItem calls.
     private bool rightClickedOnName;
 
+    // The always-on window flags set once in the constructor - see PreDraw, which rebuilds Flags
+    // from this every frame plus NoMove/NoResize whenever the position-lock toggle is on.
+    private ImGuiWindowFlags baseFlags;
+
     public ChatWindow(Plugin plugin) : base(WindowTitles.Chat)
     {
         this.plugin = plugin;
@@ -86,6 +100,11 @@ internal sealed class ChatWindow : Window
         // chat itself remains on screen - the window is toggled via the plugin's own command/
         // hotkey instead of a close button.
         Flags |= ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.NoTitleBar;
+
+        // Remembered separately from Flags itself - PreDraw recomputes Flags every frame from
+        // this plus NoMove/NoResize (see the position-lock toggle), so the always-on set here
+        // can't get lost or duplicated across frames.
+        baseFlags = Flags;
 
         // Without this, Escape (while this window is focused) closes the whole chat window -
         // Dear ImGui's own text-input widgets already defocus themselves on Escape (reverting
@@ -126,6 +145,10 @@ internal sealed class ChatWindow : Window
     {
         var opacity = IsFocused ? plugin.Configuration.WindowOpacity : plugin.Configuration.UnfocusedWindowOpacity;
         ImGui.SetNextWindowBgAlpha(opacity);
+
+        Flags = plugin.Configuration.ChatWindowLocked
+            ? baseFlags | ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoResize
+            : baseFlags;
     }
 
     public override void Draw()
@@ -152,15 +175,24 @@ internal sealed class ChatWindow : Window
         }
 
         // Scoped to the whole method (disposed whenever Draw returns, including any early
-        // return) rather than manually finding every exit point to pop it - the chosen font (if
-        // any) applies to the entire window: log, compose box, everything. SetWindowFontScale
-        // below is a separate, pre-existing "zoom" multiplier on top of whatever font is active,
-        // not a font choice itself - the two are independent and both still apply together.
+        // return) rather than manually finding every exit point to pop it - the chosen font
+        // applies to the entire window: log, compose box, everything. Sizing is baked into the
+        // font itself (see ChatFontManager/FontsPage) rather than a runtime ImGui.SetWindowFontScale
+        // multiplier - that scale only stretches already-rasterized glyph bitmaps and was a
+        // confirmed source of shimmering/unstable text and caret placement while typing.
         using var chatFontScope = plugin.PushChatFont();
 
-        ImGui.SetWindowFontScale(plugin.Configuration.FontScale);
+        // A consistent, slightly-rounded corner radius everywhere (buttons, the log/whisper-badge
+        // child panes, popups, the scrollbar) reads as a lot more "designed" than ImGui's
+        // sharp-cornered defaults, for barely any code - the cheapest, broadest part of a
+        // modernization pass. Matches the same values SettingsWindow now uses.
         ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 4f);
         ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(6f, 4f));
+        ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 6f);
+        ImGui.PushStyleVar(ImGuiStyleVar.PopupRounding, 6f);
+        ImGui.PushStyleVar(ImGuiStyleVar.ScrollbarRounding, 6f);
+        ImGui.PushStyleVar(ImGuiStyleVar.GrabRounding, 4f);
+        ImGui.PushStyleVar(ImGuiStyleVar.TabRounding, 4f);
 
         var config = plugin.Configuration;
         var state = plugin.GetCharacterState();
@@ -202,7 +234,7 @@ internal sealed class ChatWindow : Window
             }
             else
             {
-                DrawActiveWhisperIndicator(activeWhisperTabTarget);
+                DrawActiveWhisperIndicator(config, activeWhisperTabTarget);
             }
         }
 
@@ -213,7 +245,24 @@ internal sealed class ChatWindow : Window
         var chunks = GetChunks(inputText, config.MaxMessageLength);
         plugin.CurrentPreviewChunks = chunks;
 
-        var composeAreaHeight = Math.Clamp(config.ComposeAreaHeight, MinComposeAreaHeight, MaxComposeAreaHeight);
+        // The input box's own minimum has to be at least one full visible line of the *currently
+        // active* font, not a flat guessed pixel value - GetFrameHeight() (line height + top/bottom
+        // FramePadding, using whatever font PushChatFont put in effect above) is exactly that,
+        // live. A flat constant here (previously 30px, chosen without regard to font/size) can end
+        // up smaller than a single real line once someone picks a bigger font size, and asking
+        // Dear ImGui's multiline InputText to fit less than one full line makes its internal
+        // scroll-into-view logic for the caret hunt between two slightly different states frame to
+        // frame - visible exactly as "the input field jitters, but only when it's dragged small".
+        var minInputBoxHeight = ImGui.GetFrameHeight();
+
+        // The lower bound on composeAreaHeight has to guarantee room for the footer (preview-toggle
+        // row + action row + sometimes the validation message) *plus* that minimum usable input
+        // box - using measuredFooterHeight (the real height that footer rendered at last frame,
+        // see its own remarks) instead of a formula, since every formula tried here so far was
+        // only correct for some specific font-size/row-count combination.
+        var minComposeAreaHeight = minInputBoxHeight + measuredFooterHeight;
+        var composeAreaHeight = Math.Clamp(config.ComposeAreaHeight, minComposeAreaHeight, MaxComposeAreaHeight);
+        var inputBoxHeight = Math.Max(minInputBoxHeight, composeAreaHeight - measuredFooterHeight);
 
         ImGui.PushStyleColor(ImGuiCol.ChildBg, new Vector4(0f, 0f, 0f, config.ChatLogBackgroundOpacity));
         ImGui.BeginChild("##chatLogScroll", new Vector2(-1, -(composeAreaHeight + SplitterHeight)), true);
@@ -221,22 +270,7 @@ internal sealed class ChatWindow : Window
         ImGui.EndChild();
         ImGui.PopStyleColor();
 
-        DrawSplitter(config);
-
-        // The preview-toggle row and the action row are each a single line of icon
-        // buttons/text, so each one's real footprint is exactly GetFrameHeightWithSpacing()
-        // (current font size + FramePadding + the spacing gap that follows the row) - using the
-        // live value instead of a hardcoded guess keeps the action row from spilling past the
-        // window edge when the user increases Dalamud's UI font size or this plugin's own
-        // font-scale slider. GetFrameHeightWithSpacing() only bundles the gap AFTER each row
-        // though, not the gap BEFORE it (i.e. the one between the splitter and the input box,
-        // and the one between the input box and the preview-toggle row) - those two leading
-        // gaps have to be subtracted separately, otherwise the compose area quietly grows a few
-        // pixels taller than composeAreaHeight every frame and the whole window ends up needing
-        // to scroll to show it.
-        var itemSpacingY = ImGui.GetStyle().ItemSpacing.Y;
-        var footerRowHeight = ImGui.GetFrameHeightWithSpacing();
-        var inputBoxHeight = Math.Max(30f, composeAreaHeight - (footerRowHeight * 2f) - (itemSpacingY * 2f));
+        DrawSplitter(config, minComposeAreaHeight);
 
         if (composeBoxActive && ImGui.IsKeyPressed(ImGuiKey.Escape))
         {
@@ -272,6 +306,10 @@ internal sealed class ChatWindow : Window
             state.Drafts[currentDraftKey] = inputText;
             plugin.SaveConfiguration();
         }
+
+        // Bottom edge of the input box itself, in screen space - the starting point for measuring
+        // the footer's real footprint below (see measuredFooterHeight's remarks).
+        var inputBoxBottom = ImGui.GetItemRectMax().Y;
 
         if (commandTint != null)
         {
@@ -322,10 +360,16 @@ internal sealed class ChatWindow : Window
             ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f), validationMessage);
         }
 
-        ImGui.PopStyleVar(2);
+        // The real, exact footprint of everything below the input box this frame - see
+        // measuredFooterHeight's remarks. Feeds next frame's inputBoxHeight/minComposeAreaHeight
+        // instead of a formula, so it's always right for whatever font size and row count (2 rows
+        // normally, 3 whenever the validation message is showing) actually rendered.
+        measuredFooterHeight = Math.Max(0f, ImGui.GetCursorScreenPos().Y - inputBoxBottom);
+
+        ImGui.PopStyleVar(7);
     }
 
-    private void DrawSplitter(Configuration config)
+    private void DrawSplitter(Configuration config, float minComposeAreaHeight)
     {
         ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(1f, 1f, 1f, 0.06f));
         ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(1f, 1f, 1f, 0.16f));
@@ -336,7 +380,7 @@ internal sealed class ChatWindow : Window
         if (ImGui.IsItemActive())
         {
             splitterDragging = true;
-            config.ComposeAreaHeight = Math.Clamp(config.ComposeAreaHeight - ImGui.GetIO().MouseDelta.Y, MinComposeAreaHeight, MaxComposeAreaHeight);
+            config.ComposeAreaHeight = Math.Clamp(config.ComposeAreaHeight - ImGui.GetIO().MouseDelta.Y, minComposeAreaHeight, MaxComposeAreaHeight);
         }
         else if (splitterDragging)
         {
@@ -550,6 +594,19 @@ internal sealed class ChatWindow : Window
         if (ImGui.IsItemHovered())
         {
             ImGui.SetTooltip(Loc.T("Compose.Settings"));
+        }
+
+        ImGui.SameLine();
+        var locked = plugin.Configuration.ChatWindowLocked;
+        if (ImGuiComponents.IconButton(locked ? FontAwesomeIcon.Lock : FontAwesomeIcon.LockOpen))
+        {
+            plugin.Configuration.ChatWindowLocked = !locked;
+            plugin.SaveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(locked ? Loc.T("Compose.WindowUnlock") : Loc.T("Compose.WindowLock"));
         }
 
         ImGui.SameLine();
@@ -805,7 +862,7 @@ internal sealed class ChatWindow : Window
         ImGui.SameLine(0, 0);
         prefixSize += ImGui.CalcTextSize(timestamp);
 
-        var tag = ChannelDisplay.Tag(entry.ChatType) + " ";
+        var tag = ChannelDisplay.DisplayTag(entry.ChatType) + " ";
         ImGui.TextColored(channelColor, tag);
         ImGui.SameLine(0, 0);
         prefixSize += ImGui.CalcTextSize(tag);
@@ -821,7 +878,12 @@ internal sealed class ChatWindow : Window
             prefixSize.X += StatusIconRenderer.Draw(plugin, entry.SenderPayloads);
         }
 
-        var namePart = (isOutgoingTell ? plugin.OwnCharacterName : entry.Sender) + ": ";
+        // SanitizeSenderName strips the world back out of entry.Sender for a cross-world sender
+        // (see its own remarks) - it has to be appended back on here for the visible name, or the
+        // sender's world silently disappears from the log entirely instead of just no longer
+        // being garbled together with an unrenderable glyph.
+        var displayName = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
+        var namePart = (isOutgoingTell ? plugin.OwnCharacterName : displayName) + ": ";
 
         // Per-conversation-partner colors (see DrawWhisperTabQuickEdit) only ever tint the
         // partner's own NAME - not the [T</T>] tag or the message text, which stay in the
@@ -832,7 +894,7 @@ internal sealed class ChatWindow : Window
             : logSearchFilter.Length > 0 && entry.Sender.Contains(logSearchFilter, StringComparison.OrdinalIgnoreCase)
                 ? SearchHighlightColor
                 : entry.ChatType == XivChatType.TellIncoming
-                    ? ChannelDisplay.WhisperColor(entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender, config)
+                    ? ChannelDisplay.WhisperColor(displayName, config)
                     : channelColor;
         ImGui.TextColored(senderColor, namePart);
 
@@ -968,7 +1030,7 @@ internal sealed class ChatWindow : Window
 
                 if (ImGui.Selectable(Loc.T("ChatLog.AdventurerPlateAction")))
                 {
-                    plugin.OpenAdventurerPlate(entry.Sender, entry.SenderWorld);
+                    plugin.OpenAdventurerPlate(entry.Sender, entry.SenderWorld, entry.ContentId);
                 }
 
                 ImGui.Separator();
@@ -1508,14 +1570,30 @@ internal sealed class ChatWindow : Window
         }
     }
 
-    private static void DrawActiveWhisperIndicator(string target)
+    // Plain icon + plain text was too easy to miss, which was a big part of "you still can't
+    // tell who you're writing to" - this now uses the same per-target color the whisper
+    // tab/sender name already uses (see ChannelDisplay.WhisperColor) and wraps it in a bordered
+    // badge so it visually stands out from the rest of the toolbar instead of blending in. Fixed
+    // height (one frame line) so this never changes size frame-to-frame.
+    private static void DrawActiveWhisperIndicator(Configuration config, string target)
     {
+        var color = ChannelDisplay.WhisperColor(target, config);
+
+        ImGui.PushStyleColor(ImGuiCol.ChildBg, new Vector4(color.X, color.Y, color.Z, 0.16f));
+        ImGui.PushStyleColor(ImGuiCol.Border, new Vector4(color.X, color.Y, color.Z, 0.75f));
+        ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 4f);
+        ImGui.BeginChild("##activeWhisperIndicator", new Vector2(-1, ImGui.GetFrameHeight()), true, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
+
         ImGui.AlignTextToFramePadding();
         ImGui.PushFont(UiBuilder.IconFont);
-        ImGui.TextUnformatted(FontAwesomeIcon.EnvelopeOpen.ToIconString());
+        ImGui.TextColored(color, FontAwesomeIcon.EnvelopeOpen.ToIconString());
         ImGui.PopFont();
         ImGui.SameLine();
-        ImGui.TextUnformatted(Loc.T("Whisper.ActiveIndicator", target));
+        ImGui.TextColored(color, Loc.T("Whisper.ActiveIndicator", target));
+
+        ImGui.EndChild();
+        ImGui.PopStyleVar();
+        ImGui.PopStyleColor(2);
     }
 
     private void DrawWhisperTarget(CharacterState state)
@@ -1680,15 +1758,12 @@ internal sealed class ChatWindow : Window
             }
 
             var whisperUnread = whisperUnreadCounts.GetValueOrDefault(targetName);
-            var isBlinking = whisperUnread > 0;
-            if (isBlinking)
-            {
-                ImGui.PushStyleColor(ImGuiCol.Text, GetBlinkColor());
-            }
 
             // No count appended here either - see the fixed tabs above for why a
-            // width-changing label fights with ImGuiTabBarFlags.Reorderable.
-            var whisperLabel = targetName + "##whisper" + targetName;
+            // width-changing label fights with ImGuiTabBarFlags.Reorderable. Only the visible
+            // part is shortened to the forename - the ##id half keeps the full target name so
+            // tab identity, drag/drop and quick-edit lookups are unaffected.
+            var whisperLabel = FirstName(targetName) + "##whisper" + targetName;
             var open = true;
 
             // Same reasoning as the fixed tabs above: trust BeginTabItem's own return value as
@@ -1696,14 +1771,22 @@ internal sealed class ChatWindow : Window
             // which lag a frame behind an actual click.
             var tabIsOpen = ImGui.BeginTabItem(whisperLabel, ref open, flags);
 
-            if (isBlinking)
-            {
-                ImGui.PopStyleColor();
-            }
+            // Same small red count badge as the fixed tabs above (see DrawUnreadBadge) rather
+            // than blinking the whole tab's text color - a persistent badge reads as "you have
+            // unread messages" at a glance without the dated, attention-grabbing blink.
+            DrawUnreadBadge(whisperUnread);
 
             if (!state.LockedWhisperTargets.Contains(targetName))
             {
                 TabDragHelper.HandleHoverAndTearOff(() => plugin.MoveWhisperToSecondaryWindow(targetName));
+            }
+
+            // The tab label itself only shows the forename (see FirstName above) - show the
+            // full "Forename Surname@World" on hover so players with the same forename stay
+            // distinguishable.
+            if (ImGui.IsItemHovered() && !ImGui.IsMouseDragging(ImGuiMouseButton.Left))
+            {
+                ImGui.SetTooltip(targetName);
             }
 
             if (tabIsOpen)
@@ -1898,16 +1981,6 @@ internal sealed class ChatWindow : Window
     }
 
     /// <summary>
-    /// A smooth brightness pulse rather than a hard on/off flicker - reads better for an
-    /// immediate-mode tab label and can't get "stuck" invisible on an unlucky frame.
-    /// </summary>
-    private static Vector4 GetBlinkColor()
-    {
-        var pulse = (MathF.Sin((float)ImGui.GetTime() * 6f) + 1f) / 2f;
-        return new Vector4(1f, 0.35f + 0.35f * pulse, 0.15f, 1f);
-    }
-
-    /// <summary>
     /// A small unread-count badge drawn over a tab's top-right corner - must be called right
     /// after the tab item it belongs to (relies on GetItemRectMin/Max for that item). Doesn't
     /// touch the tab's own label, so unlike appending "(N)" to the label text, it can't affect
@@ -1978,7 +2051,9 @@ internal sealed class ChatWindow : Window
     {
         ChatChannel.Say => Loc.T("Channel.Say"),
         ChatChannel.Party => Loc.T("Channel.Party"),
-        ChatChannel.Whisper => Loc.T("Channel.Whisper"),
+        ChatChannel.Whisper => string.IsNullOrEmpty(state.LastWhisperTarget)
+            ? Loc.T("Channel.Whisper")
+            : Loc.T("Channel.WhisperWithTarget", FirstName(state.LastWhisperTarget)),
         ChatChannel.Yell => Loc.T("Channel.Yell"),
         ChatChannel.Shout => Loc.T("Channel.Shout"),
         ChatChannel.FreeCompany => Loc.T("Channel.FreeCompany"),
@@ -1994,6 +2069,22 @@ internal sealed class ChatWindow : Window
     {
         var match = existing.Find(e => e.Number == number);
         return match.Name != null ? $"{baseName} [{number}]: {match.Name}" : $"{baseName} [{number}]";
+    }
+
+    // Whisper targets are stored as "Forename Surname@World" - shorten to just the forename
+    // for compact UI spots (tab labels, the channel-picker label) while every internal lookup
+    // (dictionaries, tab quick-edit, RecentWhisperTargets) keeps using the full name as its key.
+    internal static string FirstName(string targetName)
+    {
+        if (string.IsNullOrEmpty(targetName))
+        {
+            return targetName;
+        }
+
+        var atIndex = targetName.IndexOf('@');
+        var namePart = atIndex >= 0 ? targetName[..atIndex] : targetName;
+        var spaceIndex = namePart.IndexOf(' ');
+        return spaceIndex >= 0 ? namePart[..spaceIndex] : namePart;
     }
 
     private static ChatCategory CategoryForChannel(ChatChannel channel) => channel switch

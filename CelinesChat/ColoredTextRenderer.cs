@@ -151,21 +151,44 @@ internal static class ColoredTextRenderer
         var lineWidthUsed = initialLineWidthUsed;
         var startOfLine = initialLineWidthUsed <= 0f;
 
-        foreach (var (word, kind, link, foreground) in words)
-        {
-            var display = word + " ";
-            var size = ImGui.CalcTextSize(display);
+        // Consecutive words that end up the same color/link get buffered and drawn as a single
+        // ImGui call once a line/formatting break actually forces a flush, instead of one call
+        // (plus CalcTextSize, SameLine, item-rect queries, ...) per individual word. SameLine(0,0)
+        // between separately drawn same-colored words was already pixel-identical to one
+        // continuous string, so this changes nothing on screen for the common case (most messages
+        // are a single color throughout) - it just cuts the per-frame ImGui call count roughly
+        // from one-per-word to one-per-formatting-run, which matters once the full scrollback (up
+        // to 500 entries) gets fully re-walked and re-drawn every single frame regardless of
+        // scroll position - this was the biggest concrete difference found comparing against
+        // Chat2's own per-line (not per-word) text drawing.
+        List<string>? runWords = null;
+        var runWidth = 0f;
+        Vector4 runColor = default;
+        Payload? runLink = null;
 
-            if (!startOfLine && lineWidthUsed + size.X > wrapWidth)
+        void FlushRun()
+        {
+            if (runWords == null)
             {
-                startOfLine = true;
-                lineWidthUsed = 0f;
+                return;
             }
 
             if (!startOfLine)
             {
                 ImGui.SameLine(0, 0);
             }
+
+            var bareText = runWords.Count == 1 ? runWords[0] : string.Join(' ', runWords);
+            DrawUnit(bareText + " ", bareText, runColor, runLink, onLinkClicked, onLinkHovered);
+            lineWidthUsed += runWidth;
+            startOfLine = false;
+            runWords = null;
+            runWidth = 0f;
+        }
+
+        foreach (var (word, kind, link, foreground) in words)
+        {
+            var size = ImGui.CalcTextSize(word + " ");
 
             // A native foreground color (e.g. an item link's rarity color, which the game already
             // wraps the item name in) wins over the generic link color - a link is still clickable
@@ -188,50 +211,94 @@ internal static class ColoredTextRenderer
             if (size.X > wrapWidth)
             {
                 // A single "word" wider than the whole line (a long URL, a wall of text with no
-                // spaces at all, ...) can never fit no matter which line it starts on - hard-wrap
-                // just this one word internally instead of rendering it as one unbroken line
-                // running off the edge of the window. Left alone otherwise: enabling wrap-pos
-                // unconditionally previously shaved a character or two off ordinary short words
-                // too, since Dear ImGui measures wrapped vs. unwrapped text slightly differently.
+                // spaces at all, ...) can never fit no matter which line it starts on, so (same as
+                // before this method buffered runs) it always starts its own fresh line rather
+                // than continuing whatever came before it - flush whatever's already buffered
+                // (finishing the previous line) and force a wrap first. Hard-wraps just this one
+                // word internally instead of rendering it as one unbroken line running off the
+                // edge of the window; left alone otherwise, enabling wrap-pos unconditionally
+                // previously shaved a character or two off ordinary short words too, since Dear
+                // ImGui measures wrapped vs. unwrapped text slightly differently.
+                FlushRun();
+                startOfLine = true;
+                lineWidthUsed = 0f;
+
                 ImGui.PushTextWrapPos(ImGui.GetCursorScreenPos().X + wrapWidth);
-                ImGui.TextColored(color, display);
+                ImGui.TextColored(color, word + " ");
                 ImGui.PopTextWrapPos();
+                lineWidthUsed = size.X;
+                startOfLine = false;
+                continue;
             }
-            else
+
+            var sameRun = runWords != null && color == runColor && link == runLink;
+            var fitsCurrentLine = lineWidthUsed + runWidth + size.X <= wrapWidth;
+
+            if (!fitsCurrentLine)
             {
-                ImGui.TextColored(color, display);
+                // The next word doesn't fit on the current line even with whatever's already
+                // buffered - flush the buffer (finishing this line), then start a fresh line.
+                FlushRun();
+                startOfLine = true;
+                lineWidthUsed = 0f;
+                sameRun = false;
             }
 
-            if (link != null && ImGui.IsItemHovered())
+            if (sameRun)
             {
-                ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
-                onLinkHovered?.Invoke(link);
-
-                // A cursor-shape change alone is easy to miss (the mouse might not even be
-                // looking at the cursor). An underline directly under the hovered word is the
-                // same affordance a normal web hyperlink gives on hover. Stops at the word itself,
-                // not the trailing space baked into "display"'s measured width.
-                var wordMin = ImGui.GetItemRectMin();
-                var wordMax = ImGui.GetItemRectMax();
-                var underlineEndX = wordMin.X + ImGui.CalcTextSize(word).X;
-                ImGui.GetWindowDrawList().AddLine(
-                    new Vector2(wordMin.X, wordMax.Y - 2),
-                    new Vector2(underlineEndX, wordMax.Y - 2),
-                    ImGui.GetColorU32(color));
-
-                if (ImGui.IsItemClicked())
-                {
-                    onLinkClicked?.Invoke(link);
-                }
+                runWords!.Add(word);
+                runWidth += size.X;
+                continue;
             }
 
-            lineWidthUsed += size.X;
-            startOfLine = false;
+            FlushRun();
+            runWords = new List<string> { word };
+            runWidth = size.X;
+            runColor = color;
+            runLink = link;
         }
+
+        FlushRun();
 
         if (startOfLine)
         {
             ImGui.TextColored(defaultColor, " ");
+        }
+    }
+
+    /// <summary>
+    /// Draws one already-fitted piece of text (a single word, or several consecutive same-format
+    /// words merged by DrawSequence's run buffering) plus its link hover/click/underline
+    /// handling. Callers own line-wrap decisions and call ImGui.SameLine beforehand as needed -
+    /// this only draws.
+    /// </summary>
+    private static void DrawUnit(string display, string bareText, Vector4 color, Payload? link, Action<Payload>? onLinkClicked, Action<Payload>? onLinkHovered)
+    {
+        ImGui.TextColored(color, display);
+
+        if (link == null || !ImGui.IsItemHovered())
+        {
+            return;
+        }
+
+        ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
+        onLinkHovered?.Invoke(link);
+
+        // A cursor-shape change alone is easy to miss (the mouse might not even be looking at the
+        // cursor). An underline directly under the hovered text is the same affordance a normal
+        // web hyperlink gives on hover. Stops at the text itself, not the trailing space baked
+        // into "display"'s measured width.
+        var rectMin = ImGui.GetItemRectMin();
+        var rectMax = ImGui.GetItemRectMax();
+        var underlineEndX = rectMin.X + ImGui.CalcTextSize(bareText).X;
+        ImGui.GetWindowDrawList().AddLine(
+            new Vector2(rectMin.X, rectMax.Y - 2),
+            new Vector2(underlineEndX, rectMax.Y - 2),
+            ImGui.GetColorU32(color));
+
+        if (ImGui.IsItemClicked())
+        {
+            onLinkClicked?.Invoke(link);
         }
     }
 

@@ -16,14 +16,6 @@ internal sealed class DisplayPage
         var config = plugin.Configuration;
 
         ImGui.SetNextItemWidth(150);
-        var fontScale = config.FontScale;
-        if (ImGui.SliderFloat(Loc.T("Settings.FontScale"), ref fontScale, 0.7f, 2.0f))
-        {
-            config.FontScale = fontScale;
-            plugin.SaveConfiguration();
-        }
-
-        ImGui.SetNextItemWidth(150);
         var opacity = config.WindowOpacity;
         if (ImGui.SliderFloat(Loc.T("Settings.WindowOpacity"), ref opacity, 0.2f, 1.0f))
         {

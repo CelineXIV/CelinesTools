@@ -26,15 +26,12 @@ internal sealed class FontsPage
             plugin.SaveConfiguration();
         }
 
-        if (config.ChatFont != ChatFontChoice.Default)
+        ImGui.SetNextItemWidth(150);
+        var sizePx = config.ChatFontSizePx;
+        if (ImGui.SliderFloat(Loc.T("Fonts.SizeLabel"), ref sizePx, 10f, 28f, "%.0fpx"))
         {
-            ImGui.SetNextItemWidth(150);
-            var sizePx = config.ChatFontSizePx;
-            if (ImGui.SliderFloat(Loc.T("Fonts.SizeLabel"), ref sizePx, 10f, 28f, "%.0fpx"))
-            {
-                config.ChatFontSizePx = sizePx;
-                plugin.SaveConfiguration();
-            }
+            config.ChatFontSizePx = sizePx;
+            plugin.SaveConfiguration();
         }
 
         ImGui.Separator();

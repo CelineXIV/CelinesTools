@@ -28,7 +28,9 @@ internal sealed class PreviewWindow : Window
 
     public override void Draw()
     {
-        ImGui.SetWindowFontScale(plugin.Configuration.FontScale);
+        // Same font as the compose box/log, exactly sized (no runtime scale) - see
+        // ChatWindow.Draw's comment for why the sizing lives in the font itself now.
+        using var chatFontScope = plugin.PushChatFont();
 
         var config = plugin.Configuration;
         var chunks = plugin.CurrentPreviewChunks;

@@ -176,6 +176,33 @@ internal static class ChannelDisplay
         ChatCategory.NoviceNetwork,
     };
 
+    /// <summary>
+    /// A second, later addition to the default tab's out-of-the-box set - migrated in the same
+    /// additive way as <see cref="LegacyDefaultCategories"/> (see Plugin's ctor) but kept as its
+    /// own list rather than extending the frozen one above, so each migration step stays separately
+    /// auditable. Despite the name (kept for that migration-step reasoning, not because every
+    /// entry is strictly an "Announcements"-group category - Debug is Standard-group), these were
+    /// all being silently excluded from the default tab entirely: Urgent is how most plugins post
+    /// messages into chat, SystemError covers native errors including a failed "/tell" ("player
+    /// not found", etc.), SystemMessage/Echo are core game feedback, and Debug is what plain
+    /// Dalamud IChatGui.Print() calls actually default to (Dalamud's own DalamudConfiguration.
+    /// GeneralChatType defaults to XivChatType.Debug, confirmed by decompile) - meaning most
+    /// small utility plugins (that don't call the rarer PrintError(), which does use Urgent) show
+    /// up as Debug, not Urgent, despite the misleading name. Chat2 includes all of these in every
+    /// one of its own default tab presets, not just its general one. The remaining
+    /// Announcements-group categories (loot, crafting, glamour, ...) stay opt-in via the Tabs
+    /// settings page instead, since they're closer to "nice to have" than "silently missing
+    /// something important".
+    /// </summary>
+    public static readonly ChatCategory[] CoreAnnouncementDefaultCategories =
+    {
+        ChatCategory.Urgent,
+        ChatCategory.SystemError,
+        ChatCategory.SystemMessage,
+        ChatCategory.Echo,
+        ChatCategory.Debug,
+    };
+
     public static ChatCategoryGroup GroupOf(ChatCategory category) => category switch
     {
         ChatCategory.Damage or ChatCategory.Miss or ChatCategory.ActionUsed or ChatCategory.ItemUsed
@@ -256,7 +283,12 @@ internal static class ChannelDisplay
         return type switch
         {
             XivChatType.Say => ChatCategory.Say,
-            XivChatType.Party => ChatCategory.Party,
+            // CrossParty is what a message from a cross-world duty finder party member actually
+            // arrives as (Party is only same-world) - found missing the same way ErrorMessage was
+            // above, by diffing every value in Dalamud's real XivChatType enum against this
+            // switch. Chat2's own SortOrder lists Party and CrossParty side by side in the same
+            // group for the same reason: from the player's perspective it's just "party chat".
+            XivChatType.Party or XivChatType.CrossParty => ChatCategory.Party,
             XivChatType.TellIncoming => ChatCategory.Whisper,
             XivChatType.TellOutgoing => ChatCategory.Whisper,
             XivChatType.Yell => ChatCategory.Yell,
@@ -271,7 +303,16 @@ internal static class ChannelDisplay
             XivChatType.Urgent => ChatCategory.Urgent,
             XivChatType.Debug => ChatCategory.Debug,
             XivChatType.SystemMessage => ChatCategory.SystemMessage,
+            // Dalamud's XivChatType has two distinct "error" values - SystemError (raw 58, rarely
+            // actually seen) and ErrorMessage (raw 60), which is what the retail client sends for
+            // user-facing errors like "Player not found" after /tell-ing someone offline or
+            // misspelled. Chat2's own ChatType enum only defines the raw-60 one at all (named
+            // "Error" there), confirming which one actually matters - only mapping SystemError
+            // here meant an actual failed-tell error had no category at all and silently vanished
+            // (CategoryOf returning null makes ChatLogService drop it before any tab ever sees
+            // it), regardless of the "Fehlermeldungen" checkbox being on.
             XivChatType.SystemError => ChatCategory.SystemError,
+            XivChatType.ErrorMessage => ChatCategory.SystemError,
             XivChatType.GatheringSystemMessage => ChatCategory.GatheringSystemMessage,
             XivChatType.Echo => ChatCategory.Echo,
             XivChatType.NoviceNetworkSystem => ChatCategory.NoviceNetworkAnnouncements,
@@ -380,7 +421,7 @@ internal static class ChannelDisplay
         return type switch
         {
             XivChatType.Say => "[S]",
-            XivChatType.Party => "[P]",
+            XivChatType.Party or XivChatType.CrossParty => "[P]",
             // Arrow direction mirrors the [T>] outgoing tag below rather than a bare "[T]" - also
             // still distinct enough that a reloaded log file can tell direction apart, same reason
             // outgoing needed its own tag: the sender slot on an outgoing line always holds the
@@ -402,6 +443,7 @@ internal static class ChannelDisplay
             XivChatType.Debug => "[Dbg]",
             XivChatType.SystemMessage => "[Sys]",
             XivChatType.SystemError => "[SysErr]",
+            XivChatType.ErrorMessage => "[SysErr]",
             XivChatType.GatheringSystemMessage => "[GathSys]",
             XivChatType.Echo => "[Echo]",
             XivChatType.NoviceNetworkSystem => "[NNSys]",
@@ -436,6 +478,28 @@ internal static class ChannelDisplay
             _ => "[?]",
         };
     }
+
+    /// <summary>
+    /// What actually gets drawn in front of a message in the live log - <see cref="Tag"/> itself
+    /// for almost everything, but blank for the small cluster of "technical" categories (Debug,
+    /// System*, Echo) whose abbreviations ("[SysErr]", "[Dbg]") read as cryptic noise rather than
+    /// useful information: these messages already say what they are in their own text, and are
+    /// already color-coded, so the bracket added nothing. Kept as a separate function rather than
+    /// changing <see cref="Tag"/> itself, since that one also writes the on-disk log file format -
+    /// LoadHistoryFile's parser requires a non-empty "[...]" token right after the timestamp, so
+    /// blanking it there would silently break history reload for every future line of these types.
+    /// </summary>
+    public static string DisplayTag(XivChatType type) => type switch
+    {
+        XivChatType.Debug
+            or XivChatType.SystemMessage
+            or XivChatType.SystemError
+            or XivChatType.ErrorMessage
+            or XivChatType.GatheringSystemMessage
+            or XivChatType.Echo
+            or XivChatType.NoviceNetworkSystem => string.Empty,
+        _ => Tag(type),
+    };
 
     public static XivChatType ParseTag(string tag)
     {
@@ -589,5 +653,55 @@ internal static class ChannelDisplay
     public static Vector4 Color(ChatCategory category, Configuration config)
     {
         return config.ChatColours.TryGetValue(category, out var color) ? color : DefaultColor(category);
+    }
+
+    /// <summary>
+    /// Extra search terms for the Tabs settings page's category search - a category's own display
+    /// name isn't always the word someone would actually type. The motivating case: a small
+    /// utility plugin's notification (e.g. a login/doorbell alert) shows up under "Debug" (see its
+    /// own tooltip for why), which nobody would think to search for by that name - searching
+    /// "plugin" finds it via this list instead. Empty for every category whose own name already
+    /// covers the obvious search terms.
+    /// </summary>
+    private static string[] SearchKeywords(ChatCategory category) => category switch
+    {
+        ChatCategory.Debug => new[] { "plugin", "addon" },
+        ChatCategory.Urgent => new[] { "plugin", "addon" },
+        ChatCategory.SystemError => new[] { "fehler", "error", "tell", "whisper", "anwhispern" },
+        ChatCategory.LootNotice => new[] { "beute", "loot", "gil", "item" },
+        ChatCategory.LootRoll => new[] { "würfeln", "wuerfeln", "roll", "beute", "loot" },
+        ChatCategory.Crafting => new[] { "synthese", "craften", "herstellen", "craft" },
+        ChatCategory.Gathering => new[] { "sammeln", "abbauen", "fischen", "botanik", "mining" },
+        ChatCategory.RetainerSale => new[] { "gehilfe", "verkauf", "markt", "retainer" },
+        ChatCategory.GlamourNotifications => new[] { "glamour", "transmog", "aussehen" },
+        ChatCategory.Alarm => new[] { "wecker", "timer", "alarm" },
+        ChatCategory.Orchestrion => new[] { "musik", "orchestrion", "lied" },
+        ChatCategory.RandomNumber => new[] { "würfel", "wuerfel", "zufallszahl", "random" },
+        ChatCategory.PeriodicRecruitmentNotification => new[] { "rekrutierung", "gruppensuche", "pf", "party finder" },
+        ChatCategory.NpcDialogue or ChatCategory.NpcDialogueAnnouncements => new[] { "npc", "quest" },
+        _ => System.Array.Empty<string>(),
+    };
+
+    public static bool CategoryMatchesSearch(ChatCategory category, string search)
+    {
+        if (string.IsNullOrWhiteSpace(search))
+        {
+            return true;
+        }
+
+        if (CategoryName(category).Contains(search, System.StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        foreach (var keyword in SearchKeywords(category))
+        {
+            if (keyword.Contains(search, System.StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

@@ -30,7 +30,12 @@ internal sealed class InfoPage
             config.FileLogShout = true;
             config.FileLogFreeCompany = true;
             config.FileLogLinkshell = true;
-            config.FontScale = 1f;
+            config.PlaySounds = true;
+            config.WhisperSoundEnabled = true;
+            config.WhisperSoundEffect = 3;
+            config.MentionSoundEnabled = false;
+            config.MentionSoundEffect = 6;
+            config.ChatWindowLocked = false;
             config.WindowOpacity = 1f;
             config.UnfocusedWindowOpacity = 0.35f;
             config.ChatLogBackgroundOpacity = 0.15f;

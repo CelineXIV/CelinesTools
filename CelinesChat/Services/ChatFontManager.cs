@@ -12,6 +12,14 @@ namespace CelinesChat.Services;
 /// <see cref="IDalamudPluginInterface.UiBuilder"/>.FontAtlas (auto-created per plugin, already set
 /// to rebuild asynchronously) rather than creating a separate atlas - there's no reason for this
 /// plugin to manage its own.
+///
+/// <see cref="ChatFontChoice.Default"/> used to mean "no custom handle at all, fall back to
+/// whatever ImGui's current font is" and rely on ImGui.SetWindowFontScale for resizing. That
+/// scale is a post-hoc stretch of already-rasterized glyph bitmaps, not a real re-render at a new
+/// size, and turned out to cause visible shimmer/instability while typing even at fairly mild
+/// factors - confirmed by the user still seeing it with Default selected. So Default now also
+/// gets a real, exactly-sized font handle (falls into the switch below same as any other choice,
+/// landing on NotoSansCjkRegular) and there is no more scale-based resize path anywhere.
 /// </summary>
 internal sealed class ChatFontManager : IDisposable
 {
@@ -41,12 +49,6 @@ internal sealed class ChatFontManager : IDisposable
         fontHandle = null;
         currentChoice = choice;
         currentSizePx = sizePx;
-
-        if (choice == ChatFontChoice.Default)
-        {
-            // No custom handle - callers fall back to whatever ImGui's current default font is.
-            return;
-        }
 
         var asset = choice switch
         {

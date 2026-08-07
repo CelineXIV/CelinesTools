@@ -177,6 +177,14 @@ public sealed class Plugin : IDalamudPlugin
                     addedAny |= defaultTab.IncludedChannels.Add(category);
                 }
 
+                // Second migration step - see CoreAnnouncementDefaultCategories's remarks. Was
+                // silently excluding Urgent (other plugins' own chat messages) and Error (includes
+                // e.g. a failed "/tell") from the default tab entirely.
+                foreach (var category in ChannelDisplay.CoreAnnouncementDefaultCategories)
+                {
+                    addedAny |= defaultTab.IncludedChannels.Add(category);
+                }
+
                 if (addedAny)
                 {
                     SaveConfiguration();
@@ -185,7 +193,7 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         sender = new MessageQueueSender(framework, log);
-        ChatLog = new ChatLogService(chatGui, Configuration, this.pluginInterface, log, gameInteropProvider);
+        ChatLog = new ChatLogService(chatGui, Configuration, this.pluginInterface, log, gameInteropProvider, playerState);
         chatActivationWatcher = new ChatActivationWatcher(gameInteropProvider, log);
         chatActivationWatcher.TextToInsert += text => PendingChatPrefillText = text;
 
@@ -473,20 +481,34 @@ public sealed class Plugin : IDalamudPlugin
 
     /// <summary>
     /// Opens the Adventurer Plate via the same native AgentCharaCard the game itself uses for
-    /// "View Adventurer Plate".
+    /// "View Adventurer Plate". Prefers the content ID lookup (AgentCharaCard.OpenCharaCard(ulong),
+    /// confirmed against Chat2's own GameFunctions.TryOpenAdventurerPlate) whenever the message
+    /// carried one - that's a server-side lookup by the player's persistent ID and works
+    /// regardless of whether they're anywhere near you right now. Only falls back to the
+    /// nearby-GameObject overload for messages without one (e.g. history reloaded from a log file
+    /// written before ContentId was tracked, or the rare case the AddMsgSourceEntry hook missed
+    /// it) - that fallback is why this used to only work "sometimes": almost every real chat
+    /// message (whispers, FC/PvP team chat, anyone not currently in your own zone) comes from a
+    /// player who isn't a loaded nearby object at all.
     /// </summary>
-    internal unsafe void OpenAdventurerPlate(string name, string? world)
+    internal unsafe void OpenAdventurerPlate(string name, string? world, ulong contentId)
     {
-        if (FindNearbyPlayer(name, world) is not { } player)
-        {
-            log.Warning($"[CelinesChat] Abenteurerkarte: Spieler '{name}' nicht in der Naehe gefunden.");
-            return;
-        }
-
         var agent = AgentCharaCard.Instance();
         if (agent == null)
         {
             log.Warning("[CelinesChat] AgentCharaCard nicht verfuegbar.");
+            return;
+        }
+
+        if (contentId != 0)
+        {
+            agent->OpenCharaCard(contentId);
+            return;
+        }
+
+        if (FindNearbyPlayer(name, world) is not { } player)
+        {
+            log.Warning($"[CelinesChat] Abenteurerkarte: Spieler '{name}' nicht in der Naehe gefunden und keine Content-ID vorhanden.");
             return;
         }
 

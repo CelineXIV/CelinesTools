@@ -152,7 +152,43 @@ public class Configuration : IPluginConfiguration
 
     public bool FileLogNoviceNetwork { get; set; }
 
-    public float FontScale { get; set; } = 1f;
+    /// <summary>
+    /// Master switch for the sound cues below - separate from each individual toggle so muting
+    /// everything at once doesn't require unchecking each one and losing its chosen sound effect.
+    /// </summary>
+    public bool PlaySounds { get; set; } = true;
+
+    /// <summary>
+    /// A whisper is easy to miss entirely while this plugin's window isn't focused (or the game
+    /// window isn't even focused) - on by default since that's the one most people expect a chat
+    /// plugin to have, unlike the rest below.
+    /// </summary>
+    public bool WhisperSoundEnabled { get; set; } = true;
+
+    /// <summary>
+    /// One of the game's own 16 built-in "system sound effect" slots (the same ones available to
+    /// macros via &lt;se.1&gt;-&lt;se.16&gt;) - played through UIGlobals.PlayChatSoundEffect, so it
+    /// respects the game's own SFX volume/mute settings automatically. Exposed as a plain 1-16
+    /// choice (matching how every FFXIV player already knows these) rather than this plugin
+    /// guessing which one "the" tell sound is meant to be - there's no single canonical answer.
+    /// </summary>
+    public int WhisperSoundEffect { get; set; } = 3;
+
+    /// <summary>
+    /// Off by default, unlike the whisper sound - being mentioned by name in busy party/FC/shout
+    /// chat is common enough that an always-on sound for it would likely be noise rather than a
+    /// useful alert, so this is opt-in.
+    /// </summary>
+    public bool MentionSoundEnabled { get; set; }
+
+    public int MentionSoundEffect { get; set; } = 6;
+
+    /// <summary>
+    /// Prevents dragging/resizing the main chat window entirely (ImGuiWindowFlags.NoMove/
+    /// NoResize) - toggled from a button in the log toolbar, for once a window's position and
+    /// size are exactly how someone wants them and an accidental drag would just be annoying.
+    /// </summary>
+    public bool ChatWindowLocked { get; set; }
 
     public float WindowOpacity { get; set; } = 0.661f;
 
