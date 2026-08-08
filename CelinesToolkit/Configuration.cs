@@ -37,4 +37,14 @@ public class Configuration : IPluginConfiguration
 
     /// <summary>Off by default - opens a separate window that live-mirrors Glamourer's own design list, letting you attach a preview image per design and apply it to yourself.</summary>
     public bool GlamourerPreviewEnabled { get; set; }
+
+    /// <summary>Off by default - shows overlay(s) marking the slidecast window near the end of a cast.</summary>
+    public bool SlidecastEnabled { get; set; }
+
+    public bool SlidecastShowCastBar { get; set; } = true;
+
+    public bool SlidecastShowCursorCircle { get; set; }
+
+    /// <summary>How much time (in ms) before a cast finishes counts as safe to start moving - the server locks the action in slightly before the visual bar hits zero.</summary>
+    public float SlidecastThresholdMs { get; set; } = 500f;
 }

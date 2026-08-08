@@ -34,6 +34,8 @@ public sealed class Plugin : IDalamudPlugin
     private readonly PaissaClient paissaClient;
     private readonly GlamourerIpcService glamourerIpcService;
     private readonly GlamourerPreviewWindow glamourerPreviewWindow;
+    private readonly SlidecastCastBarWindow slidecastCastBarWindow;
+    private readonly SlidecastCursorOverlayWindow slidecastCursorOverlayWindow;
 
     private const int LoginInitialDelayMs = 3000;
 
@@ -52,6 +54,9 @@ public sealed class Plugin : IDalamudPlugin
     public HousingTrackerService HousingTrackerService { get; }
 
     public FileDialogManager FileDialogManager { get; } = new();
+
+    /// <summary>Non-persisted, runtime-only: fakes a looping cast so the slidecast overlays can be positioned without needing to actually cast in-game. Toggled from SlidecastPage.</summary>
+    public bool SlidecastPreviewMode { get; set; }
 
     public Plugin(
         IDalamudPluginInterface pluginInterface,
@@ -88,7 +93,7 @@ public sealed class Plugin : IDalamudPlugin
         HousingTrackerService = new HousingTrackerService(paissaClient, objectTable);
         glamourerIpcService = new GlamourerIpcService(this.pluginInterface);
 
-        mainWindow = new MainWindow(this);
+        mainWindow = new MainWindow(this, clientState);
         windowSystem.AddWindow(mainWindow);
 
         quickBarWindow = new QuickBarWindow(this, this.pluginInterface, clientState, condition);
@@ -97,7 +102,15 @@ public sealed class Plugin : IDalamudPlugin
 
         glamourerPreviewWindow = new GlamourerPreviewWindow(this.pluginInterface, glamourerIpcService, objectTable, targetManager, PreviewTextureCache, PreviewImageService, FileDialogManager);
         windowSystem.AddWindow(glamourerPreviewWindow);
-        glamourerPreviewWindow.IsOpen = Configuration.GlamourerPreviewEnabled;
+
+        var slidecastService = new SlidecastService(objectTable, dataManager);
+        slidecastCastBarWindow = new SlidecastCastBarWindow(this, slidecastService);
+        windowSystem.AddWindow(slidecastCastBarWindow);
+        slidecastCastBarWindow.IsOpen = true;
+
+        slidecastCursorOverlayWindow = new SlidecastCursorOverlayWindow(this, slidecastService);
+        windowSystem.AddWindow(slidecastCursorOverlayWindow);
+        slidecastCursorOverlayWindow.IsOpen = true;
 
         openCommandInfo = new CommandInfo(OnOpenCommand) { HelpMessage = Loc.T("Command.Help.Open") };
         runCommandInfo = new CommandInfo(OnRunCommand) { HelpMessage = Loc.T("Command.Help.Run") };
@@ -105,6 +118,13 @@ public sealed class Plugin : IDalamudPlugin
         this.commandManager.AddHandler(CommandName, openCommandInfo);
         this.commandManager.AddHandler(RunCommandName, runCommandInfo);
         this.commandManager.AddHandler(GlamourerPreviewCommandName, glamourerPreviewCommandInfo);
+
+        // Dalamud auto-hides a plugin's entire UI during GPose by default - opted out of here so
+        // GlamourerPreviewWindow can stay usable there (browsing/applying designs while posing is
+        // exactly when you'd want it). The other windows didn't ask for that, so they each
+        // explicitly re-check IClientState.IsGPosing in their own DrawConditions to keep their
+        // prior (hidden-during-gpose) behavior instead of all inheriting this opt-out for free.
+        this.pluginInterface.UiBuilder.DisableGposeUiHide = true;
 
         this.pluginInterface.UiBuilder.Draw += DrawUi;
         this.pluginInterface.UiBuilder.Draw += FileDialogManager.Draw;

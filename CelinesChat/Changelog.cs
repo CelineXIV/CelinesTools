@@ -10,5 +10,6 @@ internal static class Changelog
         ("1.0.5", "Clear button now only clears the current tab"),
         ("1.0.6", "Menüband versteckbar, Neue Hotkey Settings"),
         ("1.0.7", "Big Update"),
+        ("1.0.8", "Fixed Gpose Fokus"),
     };
 }

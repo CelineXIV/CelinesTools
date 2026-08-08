@@ -2,6 +2,7 @@ using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Windowing;
+using Dalamud.Plugin.Services;
 using CelinesToolkit.Windows.Pages;
 
 namespace CelinesToolkit.Windows;
@@ -16,6 +17,7 @@ internal enum ToolkitPage
     ShoppingList,
     HousingTracker,
     GlamourerPreview,
+    Slidecast,
 }
 
 internal sealed class MainWindow : Window
@@ -28,10 +30,13 @@ internal sealed class MainWindow : Window
     private readonly ShoppingListPage shoppingListPage;
     private readonly HousingTrackerPage housingTrackerPage;
     private readonly GlamourerPreviewPage glamourerPreviewPage;
+    private readonly SlidecastPage slidecastPage;
+    private readonly IClientState clientState;
     private ToolkitPage currentPage = ToolkitPage.Overview;
 
-    public MainWindow(Plugin plugin) : base("CelinesToolkit##MainWindow")
+    public MainWindow(Plugin plugin, IClientState clientState) : base("CelinesToolkit##MainWindow")
     {
+        this.clientState = clientState;
         Size = new Vector2(700, 460);
         SizeCondition = ImGuiCond.FirstUseEver;
 
@@ -43,7 +48,13 @@ internal sealed class MainWindow : Window
         shoppingListPage = new ShoppingListPage(plugin.ItemLookupService, plugin.ShoppingListPricingService, plugin.FileDialogManager);
         housingTrackerPage = new HousingTrackerPage(plugin.HousingTrackerService);
         glamourerPreviewPage = new GlamourerPreviewPage(plugin);
+        slidecastPage = new SlidecastPage(plugin);
     }
+
+    // Preserves this window's prior hidden-during-GPose behavior now that the plugin as a whole
+    // opts out of Dalamud's automatic GPose UI hide (see Plugin's DisableGposeUiHide comment) -
+    // only GlamourerPreviewWindow specifically needed to stay visible there.
+    public override bool DrawConditions() => !clientState.IsGPosing;
 
     public override void Draw()
     {
@@ -60,6 +71,7 @@ internal sealed class MainWindow : Window
         DrawNavEntry(Loc.T("Nav.ShoppingList"), FontAwesomeIcon.ShoppingCart, ToolkitPage.ShoppingList);
         DrawNavEntry(Loc.T("Nav.HousingTracker"), FontAwesomeIcon.Building, ToolkitPage.HousingTracker);
         DrawNavEntry(Loc.T("Nav.GlamourerPreview"), FontAwesomeIcon.User, ToolkitPage.GlamourerPreview);
+        DrawNavEntry(Loc.T("Nav.Slidecast"), FontAwesomeIcon.Running, ToolkitPage.Slidecast);
         ImGui.EndChild();
 
         ImGui.SameLine();
@@ -90,6 +102,9 @@ internal sealed class MainWindow : Window
                 break;
             case ToolkitPage.GlamourerPreview:
                 glamourerPreviewPage.Draw();
+                break;
+            case ToolkitPage.Slidecast:
+                slidecastPage.Draw();
                 break;
         }
         ImGui.EndChild();

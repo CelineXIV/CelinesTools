@@ -34,6 +34,10 @@ public sealed class Plugin : IDalamudPlugin
     private const int MaxRecentWhisperTargets = 6;
     private const int MaxSentHistory = 10;
 
+    // How long an Enter-triggered activation is trusted on its own, even before IsChatInputActive
+    // confirms the compose box actually grabbed focus - see lastEnterActivationTick's remarks.
+    private const long EnterActivationGraceMs = 500;
+
     // /tell has to be validated against the recipient by the server before it goes out, unlike
     // local channels (say/party/yell/...) which are processed client-side. Sending tells back to
     // back at the same short delay used for local channels can make the server silently drop one
@@ -250,6 +254,11 @@ public sealed class Plugin : IDalamudPlugin
         this.commandManager.AddHandler(CommandName, openCommandInfo);
         this.commandManager.AddHandler(LogCommandName, openLogCommandInfo);
 
+        // Dalamud auto-hides a plugin's entire UI during GPose by default - without this, setting
+        // chatWindow.IsOpen = true from the Enter-activation logic below would have no visible
+        // effect while gposing, since Dalamud would just hide it again regardless.
+        this.pluginInterface.UiBuilder.DisableGposeUiHide = true;
+
         this.pluginInterface.UiBuilder.Draw += DrawUi;
         this.pluginInterface.UiBuilder.OpenMainUi += ToggleChatWindow;
         this.pluginInterface.UiBuilder.OpenConfigUi += ToggleSettingsWindow;
@@ -324,6 +333,18 @@ public sealed class Plugin : IDalamudPlugin
     /// otherwise - the two reasons for being hidden shouldn't undo each other.
     /// </summary>
     private bool chatManuallyHidden;
+
+    /// <summary>
+    /// Set the instant Enter forces the window open (see OnFrameworkUpdate), read by
+    /// ApplyGameStateVisibility's own guard alongside IsChatInputActive - normally IsChatInputActive
+    /// alone is enough (focus lands on the compose box the same frame it's requested), but GPose's
+    /// own camera/input handling can delay or altogether prevent that same-frame focus grab, which
+    /// without this caused the window to open for a single frame and immediately re-close the next
+    /// (game state still says "suppressed", and IsChatInputActive never got the chance to go true).
+    /// This gives a short window where a just-activated chat is trusted regardless, so a focus-timing
+    /// hiccup can't undo the open - worst case, the user can still click into the box themselves.
+    /// </summary>
+    private long lastEnterActivationTick;
 
     public void TogglePreviewWindow() => previewWindow.Toggle();
 
@@ -1052,6 +1073,7 @@ public sealed class Plugin : IDalamudPlugin
         chatManuallyHidden = false;
         chatWindow.IsOpen = true;
         pendingChatActivation = true;
+        lastEnterActivationTick = Environment.TickCount64;
     }
 
     /// <summary>
@@ -1072,7 +1094,7 @@ public sealed class Plugin : IDalamudPlugin
     /// </summary>
     private void ApplyGameStateVisibility()
     {
-        if (IsChatInputActive)
+        if (IsChatInputActive || Environment.TickCount64 - lastEnterActivationTick < EnterActivationGraceMs)
         {
             return;
         }
@@ -1082,9 +1104,13 @@ public sealed class Plugin : IDalamudPlugin
             || condition[ConditionFlag.OccupiedInCutSceneEvent];
         var inLoadingScreen = condition[ConditionFlag.BetweenAreas] || condition[ConditionFlag.BetweenAreas51];
 
+        // No opt-out setting for GPose (unlike cutscenes/loading screens) - always hidden by
+        // default there, same as the game's own chat log, but Enter still overrides it via the
+        // same mechanism that already lets someone type mid-cutscene.
         var suppressedByGameState = !clientState.IsLoggedIn
             || (inCutscene && !Configuration.ShowChatDuringCutscenes)
-            || (inLoadingScreen && !Configuration.ShowChatDuringLoadingScreens);
+            || (inLoadingScreen && !Configuration.ShowChatDuringLoadingScreens)
+            || clientState.IsGPosing;
 
         chatWindow.IsOpen = !chatManuallyHidden && !suppressedByGameState;
     }

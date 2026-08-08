@@ -156,6 +156,15 @@ internal static class Loc
         ["GlamourerPreview.Saved"] = ("Preview image saved.", "Vorschaubild gespeichert."),
         ["GlamourerPreview.TotalCount"] = ("{0} designs found", "{0} Designs gefunden"),
         ["GlamourerPreview.FilteredCount"] = ("{0} of {1} designs shown", "{0} von {1} Designs angezeigt"),
+        ["Nav.Slidecast"] = ("Slidecast", "Slidecast"),
+        ["Overview.FeatureSlidecast"] = ("Slidecast: overlay(s) marking the safe-to-move window near the end of a cast", "Slidecast: Overlay(s) markieren das sichere Bewegungsfenster am Ende eines Zaubers"),
+        ["Slidecast.Description"] = ("Marks the last part of a spell's cast bar where the server has already locked the action in, so you can start moving without interrupting the cast (\"slidecasting\"). Choose a custom cast bar with a red safe-zone, a ring around your mouse cursor, or both.", "Markiert den letzten Teil einer Zauberleiste, in dem der Server die Aktion bereits fest eingeplant hat - du kannst dich also schon bewegen, ohne den Zauber abzubrechen (\"Slidecasting\"). Waehle eine eigene Zauberleiste mit rotem Sicherheitsbereich, einen Ring um deinen Mauszeiger, oder beides."),
+        ["Slidecast.EnableCheckbox"] = ("Enable slidecast indicator", "Slidecast-Anzeige aktivieren"),
+        ["Slidecast.ShowCastBar"] = ("Show cast bar overlay", "Zauberleisten-Overlay anzeigen"),
+        ["Slidecast.ShowCursorCircle"] = ("Show ring around cursor", "Ring um Mauszeiger anzeigen"),
+        ["Slidecast.ThresholdSlider"] = ("Safe-to-move threshold", "Sicherheitsfenster"),
+        ["Slidecast.PreviewCheckbox"] = ("Preview (fakes a looping cast for positioning)", "Vorschau (simuliert einen Zauber zum Positionieren)"),
+        ["Slidecast.PreviewHint"] = ("Turn this on to see and drag the overlay(s) into place without needing to actually cast something.", "Aktivieren, um die Overlays zu sehen und zu positionieren, ohne tatsaechlich etwas zaubern zu muessen."),
     };
 
     public static void SetLanguage(string uiLanguage)

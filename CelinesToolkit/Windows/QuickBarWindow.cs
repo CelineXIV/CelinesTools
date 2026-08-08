@@ -39,7 +39,12 @@ internal sealed class QuickBarWindow : Window
 
     public override bool DrawConditions()
     {
+        // GPose is checked explicitly (not just left to Dalamud's automatic hide) because the
+        // plugin as a whole now opts out of that via DisableGposeUiHide, so GlamourerPreviewWindow
+        // can stay visible there - this preserves the quickbar's own prior hidden-during-gpose
+        // behavior instead of inheriting that opt-out for free.
         return clientState.IsLoggedIn
+            && !clientState.IsGPosing
             && !condition[ConditionFlag.BetweenAreas]
             && !condition[ConditionFlag.BetweenAreas51]
             && !condition[ConditionFlag.CreatingCharacter]
