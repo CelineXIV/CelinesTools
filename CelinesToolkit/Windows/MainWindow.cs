@@ -15,6 +15,7 @@ internal enum ToolkitPage
     PreviewManager,
     ShoppingList,
     HousingTracker,
+    GlamourerPreview,
 }
 
 internal sealed class MainWindow : Window
@@ -26,6 +27,7 @@ internal sealed class MainWindow : Window
     private readonly PreviewManagerPage previewManagerPage;
     private readonly ShoppingListPage shoppingListPage;
     private readonly HousingTrackerPage housingTrackerPage;
+    private readonly GlamourerPreviewPage glamourerPreviewPage;
     private ToolkitPage currentPage = ToolkitPage.Overview;
 
     public MainWindow(Plugin plugin) : base("CelinesToolkit##MainWindow")
@@ -40,6 +42,7 @@ internal sealed class MainWindow : Window
         previewManagerPage = new PreviewManagerPage(plugin, plugin.ModPreviewScanner, plugin.PreviewImageService, plugin.PreviewTextureCache, plugin.FileDialogManager);
         shoppingListPage = new ShoppingListPage(plugin.ItemLookupService, plugin.ShoppingListPricingService, plugin.FileDialogManager);
         housingTrackerPage = new HousingTrackerPage(plugin.HousingTrackerService);
+        glamourerPreviewPage = new GlamourerPreviewPage(plugin);
     }
 
     public override void Draw()
@@ -56,6 +59,7 @@ internal sealed class MainWindow : Window
         DrawNavEntry(Loc.T("Nav.PreviewManager"), FontAwesomeIcon.Image, ToolkitPage.PreviewManager);
         DrawNavEntry(Loc.T("Nav.ShoppingList"), FontAwesomeIcon.ShoppingCart, ToolkitPage.ShoppingList);
         DrawNavEntry(Loc.T("Nav.HousingTracker"), FontAwesomeIcon.Building, ToolkitPage.HousingTracker);
+        DrawNavEntry(Loc.T("Nav.GlamourerPreview"), FontAwesomeIcon.User, ToolkitPage.GlamourerPreview);
         ImGui.EndChild();
 
         ImGui.SameLine();
@@ -83,6 +87,9 @@ internal sealed class MainWindow : Window
                 break;
             case ToolkitPage.HousingTracker:
                 housingTrackerPage.Draw();
+                break;
+            case ToolkitPage.GlamourerPreview:
+                glamourerPreviewPage.Draw();
                 break;
         }
         ImGui.EndChild();

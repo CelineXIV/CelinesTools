@@ -15,6 +15,7 @@ public sealed class Plugin : IDalamudPlugin
 {
     private const string CommandName = "/celinestoolkit";
     private const string RunCommandName = "/ctrun";
+    private const string GlamourerPreviewCommandName = "/ctglamourer";
 
     private readonly IDalamudPluginInterface pluginInterface;
     private readonly ICommandManager commandManager;
@@ -27,9 +28,12 @@ public sealed class Plugin : IDalamudPlugin
     private readonly QuickBarWindow quickBarWindow;
     private readonly CommandInfo openCommandInfo;
     private readonly CommandInfo runCommandInfo;
+    private readonly CommandInfo glamourerPreviewCommandInfo;
     private readonly PenumbraPanelIntegration penumbraPanelIntegration;
     private readonly UniversalisClient universalisClient;
     private readonly PaissaClient paissaClient;
+    private readonly GlamourerIpcService glamourerIpcService;
+    private readonly GlamourerPreviewWindow glamourerPreviewWindow;
 
     private const int LoginInitialDelayMs = 3000;
 
@@ -58,7 +62,8 @@ public sealed class Plugin : IDalamudPlugin
         ITextureProvider textureProvider,
         ICondition condition,
         IDataManager dataManager,
-        IObjectTable objectTable)
+        IObjectTable objectTable,
+        ITargetManager targetManager)
     {
         this.pluginInterface = pluginInterface;
         this.commandManager = commandManager;
@@ -81,6 +86,7 @@ public sealed class Plugin : IDalamudPlugin
         ShoppingListPricingService = new ShoppingListPricingService(ItemLookupService, universalisClient, objectTable);
         paissaClient = new PaissaClient(log);
         HousingTrackerService = new HousingTrackerService(paissaClient, objectTable);
+        glamourerIpcService = new GlamourerIpcService(this.pluginInterface);
 
         mainWindow = new MainWindow(this);
         windowSystem.AddWindow(mainWindow);
@@ -89,10 +95,16 @@ public sealed class Plugin : IDalamudPlugin
         windowSystem.AddWindow(quickBarWindow);
         quickBarWindow.IsOpen = Configuration.QuickBarEnabled;
 
+        glamourerPreviewWindow = new GlamourerPreviewWindow(this.pluginInterface, glamourerIpcService, objectTable, targetManager, PreviewTextureCache, PreviewImageService, FileDialogManager);
+        windowSystem.AddWindow(glamourerPreviewWindow);
+        glamourerPreviewWindow.IsOpen = Configuration.GlamourerPreviewEnabled;
+
         openCommandInfo = new CommandInfo(OnOpenCommand) { HelpMessage = Loc.T("Command.Help.Open") };
         runCommandInfo = new CommandInfo(OnRunCommand) { HelpMessage = Loc.T("Command.Help.Run") };
+        glamourerPreviewCommandInfo = new CommandInfo(OnGlamourerPreviewCommand) { HelpMessage = Loc.T("Command.Help.GlamourerPreview") };
         this.commandManager.AddHandler(CommandName, openCommandInfo);
         this.commandManager.AddHandler(RunCommandName, runCommandInfo);
+        this.commandManager.AddHandler(GlamourerPreviewCommandName, glamourerPreviewCommandInfo);
 
         this.pluginInterface.UiBuilder.Draw += DrawUi;
         this.pluginInterface.UiBuilder.Draw += FileDialogManager.Draw;
@@ -113,9 +125,18 @@ public sealed class Plugin : IDalamudPlugin
         quickBarWindow.IsOpen = enabled;
     }
 
+    public void SetGlamourerPreviewEnabled(bool enabled)
+    {
+        Configuration.GlamourerPreviewEnabled = enabled;
+        SaveConfiguration();
+        glamourerPreviewWindow.IsOpen = enabled;
+    }
+
     public void SaveConfiguration() => pluginInterface.SavePluginConfig(Configuration);
 
     private void OnOpenCommand(string command, string args) => mainWindow.Toggle();
+
+    private void OnGlamourerPreviewCommand(string command, string args) => glamourerPreviewWindow.Toggle();
 
     private void OnRunCommand(string command, string args)
     {
@@ -155,6 +176,7 @@ public sealed class Plugin : IDalamudPlugin
         Loc.SetLanguage(langCode);
         openCommandInfo.HelpMessage = Loc.T("Command.Help.Open");
         runCommandInfo.HelpMessage = Loc.T("Command.Help.Run");
+        glamourerPreviewCommandInfo.HelpMessage = Loc.T("Command.Help.GlamourerPreview");
     }
 
     private void DrawUi() => windowSystem.Draw();
@@ -174,6 +196,7 @@ public sealed class Plugin : IDalamudPlugin
 
         commandManager.RemoveHandler(CommandName);
         commandManager.RemoveHandler(RunCommandName);
+        commandManager.RemoveHandler(GlamourerPreviewCommandName);
 
         runner.Dispose();
         orchestrionMuteService.Dispose();

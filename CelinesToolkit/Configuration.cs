@@ -34,4 +34,7 @@ public class Configuration : IPluginConfiguration
     public bool QuickBarEnabled { get; set; }
 
     public string? QuickBarSelectedMacroName { get; set; }
+
+    /// <summary>Off by default - opens a separate window that live-mirrors Glamourer's own design list, letting you attach a preview image per design and apply it to yourself.</summary>
+    public bool GlamourerPreviewEnabled { get; set; }
 }
