@@ -132,6 +132,19 @@ public class Configuration : IPluginConfiguration
     // show up in the log is now purely a per-tab concern - there's no separate global toggle.
     public List<ChatTab> ChatTabs { get; set; } = new();
 
+    /// <summary>
+    /// Off by default (tabs keep their plain, no-fill look). On, every tab in the strip gets
+    /// TabStripBackgroundColor as its background unless it has its own override - a fixed tab via
+    /// its own BackgroundColor, a whisper tab via WhisperTabBackgroundColours.
+    /// </summary>
+    public bool TabStripBackgroundColorEnabled { get; set; }
+
+    public Vector4 TabStripBackgroundColor { get; set; } = new(0.45f, 0.22f, 0.02f, 1f);
+
+    // Per-conversation-partner background override, same keying as WhisperColours above - falls
+    // back to TabStripBackgroundColor (if enabled) when a partner has no override of their own.
+    public Dictionary<string, Vector4> WhisperTabBackgroundColours { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
     public bool FileLogSay { get; set; } = true;
 
     public bool FileLogParty { get; set; } = true;
@@ -211,6 +224,13 @@ public class Configuration : IPluginConfiguration
     /// </summary>
     public bool ChatToolbarExpanded { get; set; } = true;
 
+    /// <summary>
+    /// On by default - lets the mouse wheel scroll the tab strip left/right while hovering it, on
+    /// top of the always-available arrow buttons. Off for anyone who'd rather the wheel do nothing
+    /// there (e.g. it conflicting with some other hover-scroll expectation).
+    /// </summary>
+    public bool TabStripWheelScrollEnabled { get; set; } = true;
+
     public float WindowOpacity { get; set; } = 0.661f;
 
     public float UnfocusedWindowOpacity { get; set; } = 0.62f;
@@ -241,4 +261,29 @@ public class Configuration : IPluginConfiguration
     public List<Snippet> Snippets { get; set; } = new();
 
     public Dictionary<ulong, CharacterState> Characters { get; set; } = new();
+
+    /// <summary>
+    /// Off by default - hosts a small local HTTP server (see Services/Web) so the chat can be read
+    /// and used from a browser or phone on the same network. A real (if opt-in, LAN-only) network
+    /// attack surface, hence off until explicitly turned on and gated behind the generated code
+    /// below - see WebClientPage's warning text.
+    /// </summary>
+    public bool WebClientEnabled { get; set; }
+
+    public int WebClientPort { get; set; } = 47829;
+
+    /// <summary>
+    /// The short code shown in Settings and entered once in the web page to log in - generated
+    /// lazily (see Plugin) the first time the feature is enabled with none set yet, not eagerly on
+    /// every plugin load, so a user who never touches this feature never has an unused credential
+    /// sitting in their config.
+    /// </summary>
+    public string WebClientAuthCode { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Session tokens issued after a successful code entry (see Services/Web/WebAuth) - checked on
+    /// every authenticated web request. Regenerating the code (WebClientPage's "Regenerate"
+    /// button) clears this entirely, logging out every previously-connected device at once.
+    /// </summary>
+    public HashSet<string> WebClientAuthStore { get; set; } = new();
 }

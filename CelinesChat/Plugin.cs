@@ -14,6 +14,7 @@ using Dalamud.Game.Text;
 using Dalamud.Game.Text.SeStringHandling;
 using Dalamud.Game.Text.SeStringHandling.Payloads;
 using CelinesChat.Services;
+using CelinesChat.Services.Web;
 using CelinesChat.Windows;
 using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
@@ -58,6 +59,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly MessageQueueSender sender;
     private readonly ChatActivationWatcher chatActivationWatcher;
     private readonly WindowSystem windowSystem = new("CelinesChat");
+    private readonly WebServerService webServerService;
     private readonly ChatWindow chatWindow;
     private readonly SettingsWindow settingsWindow;
     private readonly PreviewWindow previewWindow;
@@ -68,6 +70,21 @@ public sealed class Plugin : IDalamudPlugin
     public Configuration Configuration { get; }
 
     internal ChatLogService ChatLog { get; }
+
+    /// <summary>
+    /// Services/Web needs to call the chat window's own (internal) tab/channel-switching methods
+    /// directly - see ChatWindow.SelectChannel/SwitchToFixedTab/EnterWhisperView's remarks for why
+    /// that has to be a direct call rather than the Pending*/Draw()-consumed bridge pattern used
+    /// elsewhere in this class.
+    /// </summary>
+    internal ChatWindow ChatWindowInstance => chatWindow;
+
+    /// <summary>
+    /// Services/Web marshals every game/plugin-state-touching web request onto this before acting
+    /// on it - its own HTTP server threads are arbitrary background threads, not the framework
+    /// thread everything else in this plugin assumes it's running on.
+    /// </summary>
+    internal IFramework Framework => framework;
 
     internal bool IsSending => sender.IsSending;
 
@@ -216,6 +233,18 @@ public sealed class Plugin : IDalamudPlugin
         windowSystem.AddWindow(settingsWindow);
         windowSystem.AddWindow(previewWindow);
 
+        var webRootDir = Path.Combine(this.pluginInterface.AssemblyLocation.DirectoryName ?? string.Empty, "Web");
+        webServerService = new WebServerService(this, log, webRootDir);
+
+        // Off by default (see Configuration.WebClientEnabled) - only actually starts anything if
+        // a previous session had it turned on, so the feature resumes across a plugin reload/game
+        // restart without the user having to re-enable it every time, while still never starting
+        // on its own for anyone who's never touched the setting.
+        if (Configuration.WebClientEnabled)
+        {
+            webServerService.Start();
+        }
+
         openCommandInfo = new CommandInfo(OnOpenCommand) { HelpMessage = Loc.T("Command.Help.Open") };
         openLogCommandInfo = new CommandInfo(OnOpenCommand) { HelpMessage = Loc.T("Command.Help.OpenLog") };
         this.commandManager.AddHandler(CommandName, openCommandInfo);
@@ -236,6 +265,42 @@ public sealed class Plugin : IDalamudPlugin
     public void SaveConfiguration() => pluginInterface.SavePluginConfig(Configuration);
 
     public void ToggleSettingsWindow() => settingsWindow.Toggle();
+
+    /// <summary>For WebClientPage to query running-status/URLs/connected-count and drive the Start/Stop buttons.</summary>
+    internal WebServerService WebServer => webServerService;
+
+    /// <summary>
+    /// Turns the web client on/off - generates a code the first time it's ever enabled with none
+    /// set yet (see Configuration.WebClientAuthCode's remarks), so a user who never touches this
+    /// feature never has an unused credential sitting in their config.
+    /// </summary>
+    internal void SetWebClientEnabled(bool enabled)
+    {
+        Configuration.WebClientEnabled = enabled;
+        if (enabled && string.IsNullOrEmpty(Configuration.WebClientAuthCode))
+        {
+            Configuration.WebClientAuthCode = WebAuth.GenerateAuthCode();
+        }
+
+        SaveConfiguration();
+
+        if (enabled)
+        {
+            webServerService.Start();
+        }
+        else
+        {
+            webServerService.Stop();
+        }
+    }
+
+    /// <summary>Logs out every currently-connected device at once - see Configuration.WebClientAuthStore's remarks.</summary>
+    internal void RegenerateWebClientAuthCode()
+    {
+        Configuration.WebClientAuthCode = WebAuth.GenerateAuthCode();
+        Configuration.WebClientAuthStore.Clear();
+        SaveConfiguration();
+    }
 
     /// <summary>
     /// Hides the chat window entirely - since the native chat log is always kept hidden too (see
@@ -836,8 +901,16 @@ public sealed class Plugin : IDalamudPlugin
     {
         var state = GetCharacterState();
         RememberWhisperTarget(state, target);
-        state.LastWhisperTarget = target;
-        state.LastChannel = ChatChannel.Whisper;
+
+        // Deliberately NOT setting state.LastWhisperTarget/LastChannel here directly - that used
+        // to stomp state.LastChannel to Whisper immediately, before ChatWindow.EnterWhisperView
+        // (triggered next frame by PendingWhisperTarget below) got a chance to save whatever
+        // channel the currently-viewed fixed tab (e.g. a group chat) actually had into that tab's
+        // own remembered slot. By the time EnterWhisperView ran, there was nothing left to save
+        // but "Whisper" itself, so switching back to that tab afterward incorrectly left it on
+        // Whisper too instead of restoring Say/Party/whatever it was actually showing.
+        // PendingWhisperTarget already routes through EnterWhisperView, which sets both of these
+        // correctly *after* preserving the tab being left.
         PendingWhisperTarget = target;
         SaveConfiguration();
         chatManuallyHidden = false;
@@ -1090,6 +1163,7 @@ public sealed class Plugin : IDalamudPlugin
         commandManager.RemoveHandler(CommandName);
         commandManager.RemoveHandler(LogCommandName);
 
+        webServerService.Dispose();
         ChatLog.Dispose();
         chatActivationWatcher.Dispose();
         chatFontManager.Dispose();

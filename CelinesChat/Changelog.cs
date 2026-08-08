@@ -9,5 +9,6 @@ internal static class Changelog
         ("1.0.4", "Chatbug fixed, now hide by default during Cutscenes"),
         ("1.0.5", "Clear button now only clears the current tab"),
         ("1.0.6", "Menüband versteckbar, Neue Hotkey Settings"),
+        ("1.0.7", "Big Update"),
     };
 }

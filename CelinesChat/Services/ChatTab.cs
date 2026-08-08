@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Numerics;
 using Dalamud.Game.Text;
 using CelinesChat;
 
@@ -56,6 +57,12 @@ public sealed class ChatTab
     public int CrossWorldLinkshellNumber { get; set; } = 1;
 
     public string LastWhisperTarget { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Null (default) means "use whatever Configuration.TabStripBackgroundColor says, or no
+    /// background fill at all if that's off" - set via this tab's right-click quick-edit popup.
+    /// </summary>
+    public Vector4? BackgroundColor { get; set; }
 
     /// <summary>
     /// Whether a message of this type belongs in this tab - the category check every tab has

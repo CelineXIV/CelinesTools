@@ -118,6 +118,37 @@ internal sealed class GeneralPage
             config.ShowChatDuringLoadingScreens = showDuringLoadingScreens;
             plugin.SaveConfiguration();
         }
+
+        ImGui.Separator();
+        ImGui.TextUnformatted(Loc.T("Settings.TabsHeader"));
+
+        var tabWheelScroll = config.TabStripWheelScrollEnabled;
+        if (ImGui.Checkbox(Loc.T("Settings.TabStripWheelScroll"), ref tabWheelScroll))
+        {
+            config.TabStripWheelScrollEnabled = tabWheelScroll;
+            plugin.SaveConfiguration();
+        }
+
+        var tabBgEnabled = config.TabStripBackgroundColorEnabled;
+        if (ImGui.Checkbox(Loc.T("Settings.TabStripBackgroundEnabled"), ref tabBgEnabled))
+        {
+            config.TabStripBackgroundColorEnabled = tabBgEnabled;
+            plugin.SaveConfiguration();
+        }
+
+        // Applies to every tab that doesn't have its own override - a fixed tab via its
+        // right-click quick-edit popup, a whisper tab via the same popup's color picker.
+        ImGui.BeginDisabled(!tabBgEnabled);
+        ImGui.Indent();
+        var tabBgColor = config.TabStripBackgroundColor;
+        if (ImGui.ColorEdit4(Loc.T("Settings.TabStripBackgroundColor"), ref tabBgColor))
+        {
+            config.TabStripBackgroundColor = tabBgColor;
+            plugin.SaveConfiguration();
+        }
+
+        ImGui.Unindent();
+        ImGui.EndDisabled();
     }
 
     /// <summary>

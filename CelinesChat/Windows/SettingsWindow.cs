@@ -14,6 +14,7 @@ internal enum SettingsPage
     Display,
     Fonts,
     FileLog,
+    WebClient,
     Info,
 }
 
@@ -26,6 +27,7 @@ internal sealed class SettingsWindow : Window
     private readonly DisplayPage displayPage;
     private readonly FontsPage fontsPage;
     private readonly FileLogPage fileLogPage;
+    private readonly WebClientPage webClientPage;
     private readonly InfoPage infoPage;
     private SettingsPage currentPage = SettingsPage.General;
 
@@ -41,6 +43,7 @@ internal sealed class SettingsWindow : Window
         displayPage = new DisplayPage(plugin);
         fontsPage = new FontsPage(plugin);
         fileLogPage = new FileLogPage(plugin);
+        webClientPage = new WebClientPage(plugin);
         infoPage = new InfoPage(plugin);
     }
 
@@ -66,6 +69,7 @@ internal sealed class SettingsWindow : Window
         DrawNavEntry(Loc.T("Nav.Display"), FontAwesomeIcon.Desktop, SettingsPage.Display);
         DrawNavEntry(Loc.T("Nav.Fonts"), FontAwesomeIcon.Font, SettingsPage.Fonts);
         DrawNavEntry(Loc.T("Nav.FileLog"), FontAwesomeIcon.Save, SettingsPage.FileLog);
+        DrawNavEntry(Loc.T("Nav.WebClient"), FontAwesomeIcon.Wifi, SettingsPage.WebClient);
         ImGui.Separator();
         DrawNavEntry(Loc.T("Nav.Info"), FontAwesomeIcon.InfoCircle, SettingsPage.Info);
         ImGui.EndChild();
@@ -92,6 +96,9 @@ internal sealed class SettingsWindow : Window
                 break;
             case SettingsPage.FileLog:
                 fileLogPage.Draw();
+                break;
+            case SettingsPage.WebClient:
+                webClientPage.Draw();
                 break;
             case SettingsPage.Info:
                 infoPage.Draw();

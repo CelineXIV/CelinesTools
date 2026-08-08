@@ -78,7 +78,10 @@ internal static class ColoredTextRenderer
     /// itself already wraps the item's name in via UIForegroundPayload/UIColor) show up correctly
     /// instead of every link rendering in one flat link color regardless of what it actually is.
     /// </summary>
-    private static IEnumerable<(string Word, TextSegmentKind Kind, Payload? Link, Vector4? Foreground)> BuildRuns(IReadOnlyList<Payload> payloads, string mentionTerm)
+    // internal (not private) so Services/ColoredTextSegmenter can reuse this exact same
+    // payload-walking/tokenization logic to build data for the web client, instead of
+    // reimplementing OOC/emote/mention/link parsing a second time in JavaScript.
+    internal static IEnumerable<(string Word, TextSegmentKind Kind, Payload? Link, Vector4? Foreground)> BuildRuns(IReadOnlyList<Payload> payloads, string mentionTerm)
     {
         var state = new TokenizeState();
         Payload? currentLink = null;
@@ -126,6 +129,27 @@ internal static class ColoredTextRenderer
         var b = (byte)((rgba & 0xFF00) >> 8);
         var a = (byte)(rgba & 0xFF);
         return new Vector4(r / 255f, g / 255f, b / 255f, a / 255f);
+    }
+
+    /// <summary>
+    /// The color-precedence rule for one tokenized word: a native foreground color (e.g. an item
+    /// link's rarity color, which the game already wraps the item name in) wins over the generic
+    /// link color, which wins over the word's OOC/emote/mention/plain kind - a link is still
+    /// clickable regardless of which color it's actually drawn in. Extracted out of DrawSequence
+    /// (its only caller until now) so Services/ColoredTextSegmenter can resolve the exact same
+    /// color for the web client's JSON without re-deriving this precedence rule a second time.
+    /// </summary>
+    internal static Vector4 ResolveColor(Vector4? foreground, Payload? link, TextSegmentKind kind, Vector4 defaultColor, Vector4 emoteColor, Vector4 oocColor, Vector4 mentionColor, Vector4 linkColor)
+    {
+        return foreground ?? (link != null
+            ? linkColor
+            : kind switch
+            {
+                TextSegmentKind.Mention => mentionColor,
+                TextSegmentKind.Ooc => oocColor,
+                TextSegmentKind.Emote => emoteColor,
+                _ => defaultColor,
+            });
     }
 
     private static void DrawSequence(
@@ -190,18 +214,7 @@ internal static class ColoredTextRenderer
         {
             var size = ImGui.CalcTextSize(word + " ");
 
-            // A native foreground color (e.g. an item link's rarity color, which the game already
-            // wraps the item name in) wins over the generic link color - a link is still clickable
-            // regardless of which color it's actually drawn in.
-            var color = foreground ?? (link != null
-                ? linkColor
-                : kind switch
-                {
-                    TextSegmentKind.Mention => mentionColor,
-                    TextSegmentKind.Ooc => oocColor,
-                    TextSegmentKind.Emote => emoteColor,
-                    _ => defaultColor,
-                });
+            var color = ResolveColor(foreground, link, kind, defaultColor, emoteColor, oocColor, mentionColor, linkColor);
 
             if (highlightTerm.Length > 0 && word.Contains(highlightTerm, StringComparison.OrdinalIgnoreCase))
             {
@@ -302,7 +315,9 @@ internal static class ColoredTextRenderer
         }
     }
 
-    private sealed class TokenizeState
+    // internal (not private) - Services/ColoredTextSegmenter needs to construct one of these to
+    // call Tokenize, same reason as Tokenize/BuildRuns above.
+    internal sealed class TokenizeState
     {
         public bool InEmote;
 
@@ -313,7 +328,7 @@ internal static class ColoredTextRenderer
         public int OocDepth;
     }
 
-    private enum TextSegmentKind
+    internal enum TextSegmentKind
     {
         Default,
         Emote,
@@ -321,7 +336,8 @@ internal static class ColoredTextRenderer
         Mention,
     }
 
-    private static IEnumerable<(string Word, TextSegmentKind Kind)> Tokenize(string text, string mentionTerm, TokenizeState state)
+    // internal (not private) - see BuildRuns' remarks above, same reason.
+    internal static IEnumerable<(string Word, TextSegmentKind Kind)> Tokenize(string text, string mentionTerm, TokenizeState state)
     {
         // '\r'/'\n' matter here specifically because of NewLinePayload (Dalamud's
         // PayloadType.NewLine): its .Text is a literal Environment.NewLine, and it implements

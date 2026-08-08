@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>CelinesChat</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="login-screen" class="screen">
+    <form id="login-form" class="login-card">
+      <h1>CelinesChat</h1>
+      <p>Enter the code shown in the plugin's settings.</p>
+      <input id="login-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="5" placeholder="12345" autofocus>
+      <button type="submit">Connect</button>
+      <p id="login-error" class="error" hidden></p>
+    </form>
+  </div>
+
+  <div id="chat-screen" class="screen" hidden>
+    <header id="chat-header">
+      <div id="view-picker" class="picker"></div>
+      <div id="channel-picker" class="picker"></div>
+      <span id="connection-dot" class="dot" title="Connection status"></span>
+    </header>
+
+    <main id="message-list" aria-live="polite"></main>
+
+    <form id="compose-form">
+      <textarea id="compose-text" rows="1" placeholder="Message..." maxlength="4000"></textarea>
+      <button type="submit">Send</button>
+    </form>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

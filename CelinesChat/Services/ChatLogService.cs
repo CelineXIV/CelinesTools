@@ -28,6 +28,15 @@ internal sealed class ChatLogService : IDisposable
     private readonly Hook<RaptureLogModule.Delegates.AddMsgSourceEntry>? contentIdHook;
     private long nextSequence = 1;
 
+    // Every existing reader/writer of `entries` (OnChatMessage, LoadRecentHistory, Clear, and the
+    // public Entries property's own call sites in ChatWindow/SecondaryChatWindow) runs on
+    // Dalamud's framework/UI thread, which is single-threaded relative to itself - no lock was
+    // ever needed before. Services/Web is the first thing that reads this list from an arbitrary
+    // HTTP server thread, concurrently with the framework thread still appending to it - this
+    // lock exists solely for that new access pattern (see Snapshot/SnapshotSince/FindBySequence
+    // below), not because the original single-threaded assumption was ever wrong.
+    private readonly object entriesLock = new();
+
     // Updated on every incoming chat message, tracked or not (see OnChatMessage) - the native
     // AddMsgSourceEntry function this plugin hooks below fires for every message the game
     // processes, not just the ones IsKnownChannel keeps, so correlating against "the last entry
@@ -37,6 +46,12 @@ internal sealed class ChatLogService : IDisposable
 
     public string LogsFolderPath { get; }
 
+    /// <summary>
+    /// Framework/UI-thread-only, like every other member of this class historically - safe to
+    /// enumerate from ChatWindow/SecondaryChatWindow's Draw calls exactly as before. Do NOT read
+    /// this from Services/Web (an arbitrary HTTP thread) - use Snapshot()/SnapshotSince(long)
+    /// instead, which take entriesLock and hand back an independent copy.
+    /// </summary>
     public IReadOnlyList<ChatLogEntry> Entries => entries;
 
     public unsafe ChatLogService(IChatGui chatGui, Configuration configuration, IDalamudPluginInterface pluginInterface, IPluginLog log, IGameInteropProvider gameInteropProvider, IPlayerState playerState)
@@ -114,10 +129,13 @@ internal sealed class ChatLogService : IDisposable
                 loaded = loaded.GetRange(loaded.Count - maxHistoryEntries, maxHistoryEntries);
             }
 
-            foreach (var entry in loaded)
+            lock (entriesLock)
             {
-                entry.Sequence = nextSequence++;
-                entries.Add(entry);
+                foreach (var entry in loaded)
+                {
+                    entry.Sequence = nextSequence++;
+                    entries.Add(entry);
+                }
             }
         }
         catch (Exception ex)
@@ -126,7 +144,51 @@ internal sealed class ChatLogService : IDisposable
         }
     }
 
-    public void Clear() => entries.Clear();
+    public void Clear()
+    {
+        lock (entriesLock)
+        {
+            entries.Clear();
+        }
+    }
+
+    /// <summary>
+    /// An independent copy of every currently-buffered entry, safe to call from any thread - see
+    /// entriesLock's remarks. Used by Services/Web for a fresh SSE client's initial full resync.
+    /// </summary>
+    internal List<ChatLogEntry> Snapshot()
+    {
+        lock (entriesLock)
+        {
+            return new List<ChatLogEntry>(entries);
+        }
+    }
+
+    /// <summary>
+    /// Same as <see cref="Snapshot"/>, but only entries strictly newer than <paramref name="sequence"/> -
+    /// used for a reconnecting SSE client's delta resync (see Services/Web/WebSseHub), which is
+    /// lighter than resending the full buffer on every reconnect.
+    /// </summary>
+    internal List<ChatLogEntry> SnapshotSince(long sequence)
+    {
+        lock (entriesLock)
+        {
+            return entries.Where(e => e.Sequence > sequence).ToList();
+        }
+    }
+
+    /// <summary>
+    /// Looks up one entry by its Sequence - used by Services/Web to resolve a link click (the web
+    /// page only ever holds a sequence number + link index, never the real Payload objects) back
+    /// to the actual entry so the existing Plugin.HandleChatLinkClicked can run unchanged.
+    /// </summary>
+    internal ChatLogEntry? FindBySequence(long sequence)
+    {
+        lock (entriesLock)
+        {
+            return entries.FirstOrDefault(e => e.Sequence == sequence);
+        }
+    }
 
     private void OnChatMessage(IHandleableChatMessage message)
     {
@@ -174,16 +236,32 @@ internal sealed class ChatLogService : IDisposable
         // Always buffered regardless of the "show in chat log" setting, which is instead applied
         // at draw time (see ChannelDisplay.IsVisible callers) - so toggling a channel on/off takes
         // effect immediately on already-buffered messages instead of only affecting new arrivals.
-        entries.Add(entry);
-        while (entries.Count > MaxEntries)
+        lock (entriesLock)
         {
-            entries.RemoveAt(0);
+            entries.Add(entry);
+            while (entries.Count > MaxEntries)
+            {
+                entries.RemoveAt(0);
+            }
         }
 
         lastDispatchedEntry = entry;
 
         PlaySoundIfNeeded(entry);
+
+        // Raised after the entry is fully in the buffer (and thus visible to a concurrent
+        // Snapshot()/SnapshotSince() call from another thread) - Services/Web's WebSseHub
+        // subscribes to this to push new messages to connected web clients live, the same
+        // trigger point ChatWindow's own "new entry" detection would see next Draw().
+        EntryAdded?.Invoke(entry);
     }
+
+    /// <summary>
+    /// Fired once per newly-buffered live entry (never for history reloaded on startup), always
+    /// on the framework thread since OnChatMessage itself is. Services/Web's only supported way
+    /// to learn about new messages - do not add a second, polling-based path.
+    /// </summary>
+    internal event Action<ChatLogEntry>? EntryAdded;
 
     /// <summary>
     /// Since this plugin fully replaces the native chat window (and hides it - see

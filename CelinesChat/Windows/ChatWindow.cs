@@ -17,6 +17,12 @@ internal sealed class ChatWindow : Window
     private const string GenericDraftKey = "*generic*";
     private const float SplitterHeight = 6f;
     private const float MaxComposeAreaHeight = 400f;
+
+    // A little slack added on top of the footer's own exact measured height (see
+    // measuredFooterHeight below) - without it, the channel-picker/message-count row at the very
+    // bottom sat flush against the window's own edge with zero margin, reading as slightly cut
+    // off rather than cleanly finished.
+    private const float FooterBottomPaddingPx = 6f;
     private static readonly Vector4 SearchHighlightColor = new(1f, 0.65f, 0.15f, 1f);
     private static readonly Vector4 LinkColor = new(0.4f, 0.7f, 1f, 1f);
 
@@ -66,6 +72,34 @@ internal sealed class ChatWindow : Window
     // Log state
     private Guid activeTabId;
     private long lastSeenSequence;
+
+    /// <summary>
+    /// Read-only views of the fields above for Services/Web - it needs to know (and filter
+    /// messages against) whichever tab/whisper is currently active regardless of whether this
+    /// window is even open right now, which is common for a phone-based use case (cutscenes,
+    /// loading screens, or the user having manually hidden the desktop window - see
+    /// Plugin.ApplyGameStateVisibility). SelectChannel/SwitchToFixedTab/EnterWhisperView are the
+    /// matching internal setters the web layer calls to change these.
+    /// </summary>
+    internal Guid ActiveTabId => activeTabId;
+
+    internal string ActiveWhisperTabTarget => activeWhisperTabTarget;
+
+    /// <summary>
+    /// Fired at the end of SelectChannel/SwitchToFixedTab/EnterWhisperView, regardless of which
+    /// of the many call sites (a desktop tab click, the channel picker, a web client's
+    /// /api/view/* or /api/channel request, ...) triggered it - Services/Web subscribes once to
+    /// push a fresh view snapshot to every connected browser whenever it fires, so the phone and
+    /// the desktop window always agree on "what am I looking at / sending to" no matter which one
+    /// last changed it.
+    /// </summary>
+    internal event Action? ViewChanged;
+
+    // Hand-rolled horizontal scroll position for the tab strip (see DrawLogTabBar) and its last-
+    // measured total content width (one frame stale - see DrawLogTabBar's remarks on why that's
+    // fine), both in pixels.
+    private float tabStripScrollX;
+    private float tabStripContentWidth;
     private List<ChatLogEntry>? loadedHistoryEntries;
     private string? loadedHistoryLabel;
     private string logSearchFilter = string.Empty;
@@ -387,7 +421,7 @@ internal sealed class ChatWindow : Window
         // measuredFooterHeight's remarks. Feeds next frame's inputBoxHeight/minComposeAreaHeight
         // instead of a formula, so it's always right for whatever font size and row count (2 rows
         // normally, 3 whenever the validation message is showing) actually rendered.
-        measuredFooterHeight = Math.Max(0f, ImGui.GetCursorScreenPos().Y - inputBoxBottom);
+        measuredFooterHeight = Math.Max(0f, ImGui.GetCursorScreenPos().Y - inputBoxBottom) + FooterBottomPaddingPx;
 
         ImGui.PopStyleVar(8);
     }
@@ -510,7 +544,7 @@ internal sealed class ChatWindow : Window
         }
     }
 
-    private void SelectChannel(Configuration config, CharacterState state, ChatChannel channel)
+    internal void SelectChannel(Configuration config, CharacterState state, ChatChannel channel)
     {
         // Only jump the log view when switching TO Whisper *and* there's an actual target to
         // whisper (to your last conversation, same convenience as before) - switching to any
@@ -530,6 +564,7 @@ internal sealed class ChatWindow : Window
         }
 
         plugin.SaveConfiguration();
+        ViewChanged?.Invoke();
     }
 
     private void DrawLogToolbar(Configuration config, CharacterState state)
@@ -985,7 +1020,13 @@ internal sealed class ChatWindow : Window
         // sender's world silently disappears from the log entirely instead of just no longer
         // being garbled together with an unrenderable glyph.
         var displayName = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
-        var namePart = (isOutgoingTell ? plugin.OwnCharacterName : displayName) + ": ";
+        var rawName = isOutgoingTell ? plugin.OwnCharacterName : displayName;
+
+        // System/Error/Urgent/Echo messages (and similar) have no sender at all - entry.Sender is
+        // just "" for these. Appending ": " unconditionally used to leave a dangling " : " right
+        // after the channel tag (its own trailing space, then the empty name's ": ") with nothing
+        // in front of the colon, which read as a formatting glitch rather than "no sender to show".
+        var namePart = string.IsNullOrEmpty(rawName) ? string.Empty : rawName + ": ";
 
         // Per-conversation-partner colors (see DrawWhisperTabQuickEdit) only ever tint the
         // partner's own NAME - not the [T</T>] tag or the message text, which stay in the
@@ -1857,22 +1898,36 @@ internal sealed class ChatWindow : Window
         }
     }
 
+    private const float TabStripScrollStepPx = 80f;
+    private const float TabStripWheelStepPx = 60f;
+
+    // How far (in pixels) a tab has to be dragged horizontally before it swaps with its neighbor
+    // - see HandleReorderDrag. Reset after every swap so continuing to hold the drag keeps
+    // stepping through further swaps at the same steady pace.
+    private const float TabReorderDragThresholdPx = 24f;
+
     /// <summary>
     /// The one tab bar controlling what's shown in the log below: the default "Alle" tab plus any
     /// custom tabs from <see cref="Configuration.ChatTabs"/> (pure display filters, never touch
     /// the send target), followed by one closable tab per entry in
     /// <see cref="CharacterState.RecentWhisperTargets"/> (clicking one both shows that
     /// conversation and, like before, readies the compose area to reply to it).
+    ///
+    /// Hand-rolled (Selectable-per-tab inside a manually scrolled child) instead of Dear ImGui's
+    /// own BeginTabBar/BeginTabItem - its built-in overflow scroll buttons unavoidably also
+    /// change the *selected* tab when clicked (that's internal to the widget, not something a
+    /// flag can turn off), which read as "clicking the arrow jumps to a different conversation."
+    /// Selecting a tab now only ever happens from an explicit click on the tab itself; the arrows
+    /// (and an optional mouse wheel, see Configuration.TabStripWheelScrollEnabled) only move
+    /// which tabs are in view. Hover/tear-off (TabDragHelper) and the quick-edit popups
+    /// (DrawFixedTabQuickEdit/DrawWhisperTabQuickEdit) are all generic "act on the last drawn
+    /// item" helpers that don't care whether that item was a native tab or a Selectable, so they
+    /// carry over unchanged.
     /// </summary>
     private void DrawLogTabBar(Configuration config, CharacterState state)
     {
         // The toolbar's collapse toggle (search/history/clear/hide/settings/lock/preview/RP
-        // actions - see DrawLogToolbar) - drawn here, before BeginTabBar, and followed by
-        // SameLine() so the tab bar itself starts *after* this button on the same line rather
-        // than reserving its own row. Dear ImGui's tab bar always fills the width from wherever
-        // the cursor already is out to the window's edge, so it automatically starts to the right
-        // of this button instead of overlapping it - no manual width math needed to keep the two
-        // from colliding, regardless of how many tabs there are or whether they're scrolling.
+        // actions - see DrawLogToolbar).
         var toolbarExpanded = config.ChatToolbarExpanded;
         if (ImGuiComponents.IconButton(toolbarExpanded ? FontAwesomeIcon.ChevronUp : FontAwesomeIcon.ChevronDown))
         {
@@ -1887,12 +1942,47 @@ internal sealed class ChatWindow : Window
 
         ImGui.SameLine();
 
-        if (!ImGui.BeginTabBar("##logTabs", ImGuiTabBarFlags.FittingPolicyScroll | ImGuiTabBarFlags.Reorderable))
+        var arrowSize = ImGui.GetFrameHeight();
+        var spacing = ImGui.GetStyle().ItemSpacing.X;
+
+        // tabStripContentWidth is last frame's measured total - the true value for *this* frame
+        // isn't known until after everything below is drawn, and using yesterday's is
+        // indistinguishable in practice (layout only changes when a tab is added/removed/resized,
+        // never within a single still frame).
+        var stripWidth = MathF.Max(1f, ImGui.GetContentRegionAvail().X - (arrowSize + spacing) * 2f);
+        var maxScroll = MathF.Max(0f, tabStripContentWidth - stripWidth);
+        tabStripScrollX = Math.Clamp(tabStripScrollX, 0f, maxScroll);
+
+        ImGui.BeginDisabled(tabStripScrollX <= 0f);
+        if (ImGuiComponents.IconButton(FontAwesomeIcon.ChevronLeft))
         {
-            return;
+            tabStripScrollX = MathF.Max(0f, tabStripScrollX - TabStripScrollStepPx);
         }
 
-        foreach (var tab in config.ChatTabs)
+        ImGui.EndDisabled();
+        ImGui.SameLine();
+
+        ImGui.BeginChild("##logTabsStrip", new Vector2(stripWidth, arrowSize), false, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
+
+        // Centers each tab's own label within its Selectable - the default (top-left) read as
+        // messy once tabs started getting an actual background fill (see DrawTabBackgroundFill)
+        // to visually anchor them.
+        ImGui.PushStyleVar(ImGuiStyleVar.SelectableTextAlign, new Vector2(0.5f, 0.5f));
+
+        var basePos = ImGui.GetCursorPos();
+        var runningX = 0f;
+        string? closedTarget = null;
+        float? forceScrollTabStart = null;
+        float? forceScrollTabEnd = null;
+
+        // Snapshotted, not iterated live - HandleReorderDrag below can swap two elements of
+        // config.ChatTabs itself while this loop is still walking it (at most one swap per frame,
+        // whichever single tab is actively being dragged), and a live foreach would either
+        // re-visit the tab it swapped into its own old slot or skip over the one it swapped with,
+        // both of which are pure this-frame rendering glitches - the persisted order itself always
+        // ends up correct regardless, but there's no reason to have to explain that away when
+        // snapshotting the draw order costs nothing noticeable for a handful of tabs.
+        foreach (var tab in config.ChatTabs.ToArray())
         {
             // Torn off into the secondary window (see TabDragHelper/Plugin.MoveTabToSecondaryWindow) -
             // it lives exclusively over there until dragged back.
@@ -1901,121 +1991,176 @@ internal sealed class ChatWindow : Window
                 continue;
             }
 
-            // The label text itself deliberately never changes with the unread count - a tab
-            // bar with ImGuiTabBarFlags.Reorderable re-lays-out based on each tab's measured
-            // width, so appending e.g. " (3)" directly into the label made every tab visibly
-            // shift position on its own as messages arrived. The count is instead drawn as a
-            // small badge overlay after the tab (see DrawUnreadBadge), which doesn't affect
-            // the tab's own measured width at all.
-            var fixedUnread = fixedTabUnreadCounts.GetValueOrDefault(tab.Id);
-            var tabFlags = tab.PositionLocked ? ImGuiTabItemFlags.NoReorder : ImGuiTabItemFlags.None;
+            var tabWidth = ImGui.CalcTextSize(tab.Name).X + ImGui.GetStyle().FramePadding.X * 2f;
 
-            // BeginTabItem's return value IS ImGui's own authoritative "is this tab currently
-            // selected" state - layering IsItemClicked/IsItemActivated edge detection on top of
-            // it was unreliable because ImGui defers a tab-bar's selection change to the *next*
-            // frame's BeginTabBar call, so a click and the resulting BeginTabItem()==true
-            // practically never land on the same frame (looks like "the first click does
-            // nothing, the second one switches"). Simply mirroring the return value here every
-            // frame sidesteps that entirely.
-            var tabIsOpen = ImGui.BeginTabItem(tab.Name + "##tab" + tab.Id, tabFlags);
-
-            DrawUnreadBadge(fixedUnread);
-
-            // Hover/tear-off has to be checked right after BeginTabItem, not after a
-            // conditional EndTabItem() below - for a non-selected tab EndTabItem never runs at
-            // all, and either way this is the one point guaranteed to still refer to the tab
-            // header item itself.
-            if (!tab.PositionLocked)
+            // Only actually drawn if it fits *entirely* within the visible strip - a tab
+            // straddling the left or right edge used to render however much of it the child's
+            // clip rect happened to allow, which looked like a rendering glitch rather than "there
+            // are more tabs, scroll for them." Skipping it here instead leaves a small margin of
+            // blank space at that edge and nothing else - one extra scroll step reveals the tab
+            // whole rather than sliced.
+            if (runningX >= tabStripScrollX - 0.5f && runningX + tabWidth <= tabStripScrollX + stripWidth + 0.5f)
             {
-                TabDragHelper.HandleHoverAndTearOff(() => plugin.MoveTabToSecondaryWindow(tab.Id));
-            }
+                var isSelected = string.IsNullOrEmpty(activeWhisperTabTarget) && activeTabId == tab.Id;
+                var fixedUnread = fixedTabUnreadCounts.GetValueOrDefault(tab.Id);
+                var tabSize = new Vector2(tabWidth, arrowSize);
 
-            if (tabIsOpen)
-            {
-                if (activeTabId != tab.Id || !string.IsNullOrEmpty(activeWhisperTabTarget))
+                ImGui.SetCursorPos(new Vector2(basePos.X + runningX - tabStripScrollX, basePos.Y));
+                DrawTabBackgroundFill(tab.BackgroundColor ?? (config.TabStripBackgroundColorEnabled ? config.TabStripBackgroundColor : (Vector4?)null), tabSize);
+                var clicked = ImGui.Selectable(tab.Name + "##tab" + tab.Id, isSelected, ImGuiSelectableFlags.None, tabSize);
+
+                DrawUnreadBadge(fixedUnread);
+
+                if (!tab.PositionLocked)
+                {
+                    TabDragHelper.HandleHoverAndTearOff(() => plugin.MoveTabToSecondaryWindow(tab.Id));
+                    HandleReorderDrag(config.ChatTabs, config.ChatTabs.IndexOf(tab));
+                }
+
+                if (clicked && !isSelected)
                 {
                     SwitchToFixedTab(config, state, tab);
                     fixedTabUnreadCounts.Remove(tab.Id);
                 }
 
-                ImGui.EndTabItem();
+                DrawFixedTabQuickEdit(tab);
             }
 
-            DrawFixedTabQuickEdit(tab);
+            runningX += tabWidth + spacing;
         }
 
-        string? closedTarget = null;
-
-        foreach (var targetName in state.RecentWhisperTargets)
+        // Snapshotted for the same reason as the fixed tabs above.
+        foreach (var targetName in state.RecentWhisperTargets.ToArray())
         {
             if (plugin.IsWhisperInSecondaryWindow(targetName))
             {
                 continue;
             }
 
-            // SetSelected is only passed on the frame we explicitly want to force a tab switch
-            // (see pendingTabForceSelect), not every frame based on activeWhisperTabTarget -
-            // otherwise it fights with the user's own clicks on a different tab and can never
-            // "let go" of whichever tab happened to be first.
-            var flags = targetName == pendingTabForceSelect ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None;
-            if (state.LockedWhisperTargets.Contains(targetName))
+            // The tab label itself only shows the forename - the ##id half keeps the full target
+            // name so tab identity, drag/drop and quick-edit lookups are unaffected.
+            var whisperText = FirstName(targetName);
+            var tabWidth = ImGui.CalcTextSize(whisperText).X + ImGui.GetStyle().FramePadding.X * 2f;
+
+            // Computed (and, for a force-selected tab, acted on) regardless of whether this tab
+            // is actually drawn below - a brand new conversation's tab appearing off the end of an
+            // already-full strip is exactly the "not currently visible" case this needs to detect
+            // and scroll to, so it can't be skipped along with the rest of a not-fully-visible
+            // tab's drawing.
+            if (targetName == pendingTabForceSelect)
             {
-                flags |= ImGuiTabItemFlags.NoReorder;
+                forceScrollTabStart = runningX;
+                forceScrollTabEnd = runningX + tabWidth;
             }
 
-            var whisperUnread = whisperUnreadCounts.GetValueOrDefault(targetName);
-
-            // No count appended here either - see the fixed tabs above for why a
-            // width-changing label fights with ImGuiTabBarFlags.Reorderable. Only the visible
-            // part is shortened to the forename - the ##id half keeps the full target name so
-            // tab identity, drag/drop and quick-edit lookups are unaffected.
-            var whisperLabel = FirstName(targetName) + "##whisper" + targetName;
-            var open = true;
-
-            // Same reasoning as the fixed tabs above: trust BeginTabItem's own return value as
-            // the selected-tab signal instead of racing it against IsItemClicked/IsItemActivated,
-            // which lag a frame behind an actual click.
-            var tabIsOpen = ImGui.BeginTabItem(whisperLabel, ref open, flags);
-
-            // Same small red count badge as the fixed tabs above (see DrawUnreadBadge) rather
-            // than blinking the whole tab's text color - a persistent badge reads as "you have
-            // unread messages" at a glance without the dated, attention-grabbing blink.
-            DrawUnreadBadge(whisperUnread);
-
-            if (!state.LockedWhisperTargets.Contains(targetName))
+            // Only actually drawn if it fits *entirely* within the visible strip - see the fixed
+            // tabs loop above for why.
+            if (runningX >= tabStripScrollX - 0.5f && runningX + tabWidth <= tabStripScrollX + stripWidth + 0.5f)
             {
-                TabDragHelper.HandleHoverAndTearOff(() => plugin.MoveWhisperToSecondaryWindow(targetName));
-            }
+                var isSelected = activeWhisperTabTarget == targetName;
+                var whisperUnread = whisperUnreadCounts.GetValueOrDefault(targetName);
+                var tabSize = new Vector2(tabWidth, arrowSize);
 
-            // The tab label itself only shows the forename (see FirstName above) - show the
-            // full "Forename Surname@World" on hover so players with the same forename stay
-            // distinguishable.
-            if (ImGui.IsItemHovered() && !ImGui.IsMouseDragging(ImGuiMouseButton.Left))
-            {
-                ImGui.SetTooltip(targetName);
-            }
+                ImGui.SetCursorPos(new Vector2(basePos.X + runningX - tabStripScrollX, basePos.Y));
+                var whisperBg = config.WhisperTabBackgroundColours.TryGetValue(targetName, out var customBg)
+                    ? customBg
+                    : config.TabStripBackgroundColorEnabled ? config.TabStripBackgroundColor : (Vector4?)null;
+                DrawTabBackgroundFill(whisperBg, tabSize);
 
-            if (tabIsOpen)
-            {
-                if (activeWhisperTabTarget != targetName)
+                // Was pendingTabForceSelect + ImGuiTabItemFlags.SetSelected under the native tab
+                // bar - that flag existed purely to sync ImGui's own internal selection
+                // bookkeeping (which otherwise only follows clicks) with activeWhisperTabTarget
+                // having already changed elsewhere. A Selectable reads isSelected fresh every
+                // frame with no bookkeeping of its own to sync, so nothing extra is needed for
+                // *selection* here - scrolling this tab into view is handled unconditionally
+                // above instead, since it has to work even while the tab isn't drawn at all.
+                var clicked = ImGui.Selectable(whisperText + "##whisper" + targetName, isSelected, ImGuiSelectableFlags.None, tabSize);
+
+                DrawUnreadBadge(whisperUnread);
+
+                var locked = state.LockedWhisperTargets.Contains(targetName);
+                if (!locked)
+                {
+                    TabDragHelper.HandleHoverAndTearOff(() => plugin.MoveWhisperToSecondaryWindow(targetName));
+                    HandleReorderDrag(state.RecentWhisperTargets, state.RecentWhisperTargets.IndexOf(targetName));
+                }
+
+                // Middle-click to close - a plain, well-known convention (browsers, IDEs, ...)
+                // that needs no visual affordance at all, unlike a corner "x" overlaid on the tab.
+                // An earlier version tried exactly that overlay and it neither looked right nor
+                // actually worked: Dear ImGui doesn't let a later, visually-overlapping widget
+                // steal hover/click away from an earlier one drawn in the same spot by default
+                // (that needs an explicit opt-in on the earlier widget), so clicks on the "x" were
+                // actually landing on the Selectable underneath it. Right-click's quick-edit popup
+                // (below) offers the same close action with no such ambiguity, for anyone who
+                // doesn't know/like the middle-click convention.
+                if (ImGui.IsItemHovered() && ImGui.IsMouseClicked(ImGuiMouseButton.Middle))
+                {
+                    closedTarget = targetName;
+                }
+
+                // The tab label itself only shows the forename (see FirstName above) - show the
+                // full "Forename Surname@World" on hover so players with the same forename stay
+                // distinguishable.
+                if (ImGui.IsItemHovered() && !ImGui.IsMouseDragging(ImGuiMouseButton.Left))
+                {
+                    ImGui.SetTooltip(targetName);
+                }
+
+                if (clicked && !isSelected)
                 {
                     EnterWhisperView(config, state, targetName);
                     whisperUnreadCounts.Remove(targetName);
                     plugin.SaveConfiguration();
                 }
 
-                ImGui.EndTabItem();
+                if (DrawWhisperTabQuickEdit(state, targetName))
+                {
+                    closedTarget = targetName;
+                }
             }
 
-            DrawWhisperTabQuickEdit(state, targetName);
+            runningX += tabWidth + spacing;
+        }
 
-            if (!open)
+        // Bring a just-force-selected whisper tab (see forceScrollTabStart/End above) fully into
+        // view if it isn't already - e.g. a brand new conversation's tab appearing off the end of
+        // an already-full strip, which nothing would otherwise ever scroll to.
+        if (forceScrollTabStart is { } scrollStart && forceScrollTabEnd is { } scrollEnd)
+        {
+            if (scrollStart < tabStripScrollX)
             {
-                closedTarget = targetName;
+                tabStripScrollX = MathF.Max(0f, scrollStart - spacing);
+            }
+            else if (scrollEnd > tabStripScrollX + stripWidth)
+            {
+                tabStripScrollX = scrollEnd - stripWidth + spacing;
             }
         }
 
-        ImGui.EndTabBar();
+        tabStripContentWidth = runningX;
+
+        if (config.TabStripWheelScrollEnabled && ImGui.IsWindowHovered())
+        {
+            var wheel = ImGui.GetIO().MouseWheel;
+            if (wheel != 0f)
+            {
+                tabStripScrollX = Math.Clamp(tabStripScrollX - wheel * TabStripWheelStepPx, 0f, MathF.Max(0f, tabStripContentWidth - stripWidth));
+            }
+        }
+
+        ImGui.PopStyleVar();
+        ImGui.EndChild();
+
+        ImGui.SameLine();
+        ImGui.BeginDisabled(tabStripScrollX >= maxScroll);
+        if (ImGuiComponents.IconButton(FontAwesomeIcon.ChevronRight))
+        {
+            tabStripScrollX = MathF.Min(maxScroll, tabStripScrollX + TabStripScrollStepPx);
+        }
+
+        ImGui.EndDisabled();
+
         pendingTabForceSelect = null;
 
         if (closedTarget != null)
@@ -2047,13 +2192,63 @@ internal sealed class ChatWindow : Window
     }
 
     /// <summary>
+    /// Drag-to-reorder for the hand-rolled tab strip (see DrawLogTabBar) - swaps the item being
+    /// dragged with whichever neighbor it's been dragged past, then resets the drag delta so
+    /// continuing to hold the drag keeps stepping through further swaps at a steady pace instead
+    /// of firing dozens of swaps off one large motion. Must be called right after the Selectable
+    /// it applies to, same as TabDragHelper.
+    /// </summary>
+    private static void HandleReorderDrag<T>(IList<T> list, int index)
+    {
+        if (index < 0 || !ImGui.IsItemActive() || !ImGui.IsMouseDragging(ImGuiMouseButton.Left))
+        {
+            return;
+        }
+
+        var deltaX = ImGui.GetMouseDragDelta(ImGuiMouseButton.Left).X;
+        if (MathF.Abs(deltaX) < TabReorderDragThresholdPx)
+        {
+            return;
+        }
+
+        var swapWith = deltaX < 0f ? index - 1 : index + 1;
+        if (swapWith < 0 || swapWith >= list.Count)
+        {
+            return;
+        }
+
+        (list[index], list[swapWith]) = (list[swapWith], list[index]);
+        ImGui.ResetMouseDragDelta(ImGuiMouseButton.Left);
+    }
+
+    /// <summary>
+    /// Paints a plain filled rectangle at the cursor's current screen position, sized to exactly
+    /// match the tab about to be drawn there - a no-op for null (no color resolved for this tab,
+    /// see DrawLogTabBar's callers). Has to run *before* the Selectable it's a background for, not
+    /// after - Selectable already draws its own (otherwise fully transparent) hover/selected fill
+    /// plus the label text on top of whatever's already on the draw list, so drawing this first is
+    /// what lets that native highlight and text still show up over a custom color instead of
+    /// being covered by it.
+    /// </summary>
+    private static void DrawTabBackgroundFill(Vector4? color, Vector2 size)
+    {
+        if (color is not { } fill)
+        {
+            return;
+        }
+
+        var min = ImGui.GetCursorScreenPos();
+        ImGui.GetWindowDrawList().AddRectFilled(min, min + size, ImGui.GetColorU32(fill), ImGui.GetStyle().FrameRounding);
+    }
+
+    /// <summary>
     /// Switches to a fixed tab, saving the current send-channel selection into whichever fixed
     /// tab is being left (skipped if a whisper conversation was being viewed instead - its
     /// "Whisper" channel isn't something to save back into the fixed tab underneath it, since
     /// that fixed tab's own selection was already saved at the point the whisper tab was
     /// entered) and restoring the destination tab's own remembered selection.
     /// </summary>
-    private void SwitchToFixedTab(Configuration config, CharacterState state, ChatTab newTab)
+    internal void SwitchToFixedTab(Configuration config, CharacterState state, ChatTab newTab)
     {
         if (string.IsNullOrEmpty(activeWhisperTabTarget))
         {
@@ -2063,6 +2258,7 @@ internal sealed class ChatWindow : Window
         activeTabId = newTab.Id;
         activeWhisperTabTarget = string.Empty;
         LoadChannelSelection(newTab, state);
+        ViewChanged?.Invoke();
     }
 
     private static void SaveChannelSelection(ChatTab? tab, CharacterState state)
@@ -2093,7 +2289,7 @@ internal sealed class ChatWindow : Window
     /// channel saved *before* state.LastChannel gets forced to Whisper immediately below, not
     /// afterwards where it'd already be overwritten.
     /// </summary>
-    private void EnterWhisperView(Configuration config, CharacterState state, string target)
+    internal void EnterWhisperView(Configuration config, CharacterState state, string target)
     {
         if (string.IsNullOrEmpty(activeWhisperTabTarget))
         {
@@ -2103,6 +2299,7 @@ internal sealed class ChatWindow : Window
         state.LastWhisperTarget = target;
         state.LastChannel = ChatChannel.Whisper;
         activeWhisperTabTarget = target;
+        ViewChanged?.Invoke();
     }
 
     /// <summary>
@@ -2132,20 +2329,53 @@ internal sealed class ChatWindow : Window
             plugin.SaveConfiguration();
         }
 
+        // Falls back to Configuration.TabStripBackgroundColor (if enabled) when null - see
+        // DrawTabBackgroundFill's callers.
+        var tabBg = tab.BackgroundColor ?? plugin.Configuration.TabStripBackgroundColor;
+        ImGui.SetNextItemWidth(160);
+        if (ImGui.ColorEdit4(Loc.T("Tabs.BackgroundColorLabel") + "##tabBg" + tab.Id, ref tabBg))
+        {
+            tab.BackgroundColor = tabBg;
+            plugin.SaveConfiguration();
+        }
+
+        ImGui.SameLine();
+        if (ImGuiComponents.IconButton(FontAwesomeIcon.UndoAlt))
+        {
+            tab.BackgroundColor = null;
+            plugin.SaveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Settings.ColorsResetRow"));
+        }
+
         ImGui.EndPopup();
     }
 
     /// <summary>
     /// Right-click quick-edit popup for a whisper tab - no rename (its name is the actual
     /// whisper target, renaming it would desync the tab label from who messages actually go to),
-    /// just the same lock-position toggle the fixed tabs get.
+    /// just the same lock-position toggle the fixed tabs get, plus a "Close" entry (see also
+    /// middle-click, in DrawLogTabBar). Returns true the one frame Close is actually clicked, so
+    /// the caller (which owns closedTarget) can act on it.
     /// </summary>
-    private void DrawWhisperTabQuickEdit(CharacterState state, string targetName)
+    private bool DrawWhisperTabQuickEdit(CharacterState state, string targetName)
     {
         if (!ImGui.BeginPopupContextItem("##whisperTabQuickEdit" + targetName))
         {
-            return;
+            return false;
         }
+
+        var closeRequested = false;
+        if (ImGui.Selectable(Loc.T("Tabs.CloseConversation") + "##closeWhisper" + targetName))
+        {
+            closeRequested = true;
+            ImGui.CloseCurrentPopup();
+        }
+
+        ImGui.Separator();
 
         var locked = state.LockedWhisperTargets.Contains(targetName);
         if (ImGui.Checkbox(Loc.T("Tabs.PositionLocked") + "##lockWhisper" + targetName, ref locked))
@@ -2172,7 +2402,7 @@ internal sealed class ChatWindow : Window
         }
 
         ImGui.SameLine();
-        if (ImGuiComponents.IconButton(FontAwesomeIcon.UndoAlt))
+        if (ImGuiComponents.IconButton("resetWhisperColor" + targetName, FontAwesomeIcon.UndoAlt))
         {
             config.WhisperColours.Remove(targetName);
             plugin.SaveConfiguration();
@@ -2183,7 +2413,30 @@ internal sealed class ChatWindow : Window
             ImGui.SetTooltip(Loc.T("Settings.ColorsResetRow"));
         }
 
+        // Falls back to Configuration.TabStripBackgroundColor (if enabled) when this partner has
+        // no override of their own - see DrawTabBackgroundFill's callers.
+        var tabBg = config.WhisperTabBackgroundColours.TryGetValue(targetName, out var customBg) ? customBg : config.TabStripBackgroundColor;
+        ImGui.SetNextItemWidth(160);
+        if (ImGui.ColorEdit4(Loc.T("Tabs.BackgroundColorLabel") + "##whisperTabBg" + targetName, ref tabBg))
+        {
+            config.WhisperTabBackgroundColours[targetName] = tabBg;
+            plugin.SaveConfiguration();
+        }
+
+        ImGui.SameLine();
+        if (ImGuiComponents.IconButton("resetWhisperTabBg" + targetName, FontAwesomeIcon.UndoAlt))
+        {
+            config.WhisperTabBackgroundColours.Remove(targetName);
+            plugin.SaveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Settings.ColorsResetRow"));
+        }
+
         ImGui.EndPopup();
+        return closeRequested;
     }
 
     /// <summary>
@@ -2212,7 +2465,7 @@ internal sealed class ChatWindow : Window
         drawList.AddText(center - (textSize / 2f), ImGui.GetColorU32(new Vector4(1f, 1f, 1f, 1f)), label);
     }
 
-    private ChatTab? GetActiveFixedTab(Configuration config)
+    internal ChatTab? GetActiveFixedTab(Configuration config)
     {
         if (config.ChatTabs.Count == 0)
         {
@@ -2222,7 +2475,7 @@ internal sealed class ChatWindow : Window
         return config.ChatTabs.Find(t => t.Id == activeTabId) ?? config.ChatTabs[0];
     }
 
-    private bool MatchesWhisperTarget(ChatLogEntry entry, string target)
+    internal bool MatchesWhisperTarget(ChatLogEntry entry, string target)
     {
         if (entry.ChatType is not (XivChatType.TellIncoming or XivChatType.TellOutgoing))
         {
