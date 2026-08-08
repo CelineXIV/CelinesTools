@@ -305,7 +305,12 @@ internal static class ColoredTextRenderer
     private sealed class TokenizeState
     {
         public bool InEmote;
-        public bool InOoc;
+
+        // A depth (not just a bool) so "(((nested))" and similar don't prematurely drop out of
+        // OOC after only one of several closes - and, just as importantly, so a *stray* ')' with
+        // nothing open (a ":)" or "8)" smiley, a typo) can never push it negative and doesn't
+        // count as a close at all. See Tokenize's per-character scan below.
+        public int OocDepth;
     }
 
     private enum TextSegmentKind
@@ -331,31 +336,83 @@ internal static class ColoredTextRenderer
         foreach (var word in words)
         {
             var startedInEmote = state.InEmote;
-            var startedInOoc = state.InOoc;
 
             if (CountOccurrences(word, '*') % 2 == 1)
             {
                 state.InEmote = !state.InEmote;
             }
 
-            var oocOpens = CountOccurrences(word, "((");
-            var oocCloses = CountOccurrences(word, "))");
-            if (oocOpens > oocCloses)
+            // Single "(aside)" and double "((aside))" parens both go grey the same way - depth
+            // simply reaches 1 (or 2) instead of caring which. Scanned character-by-character
+            // (not just an aggregate open/close count) specifically so a lone, never-opened ')'
+            // - a ":)" or "8)" smiley, a stray typo - can't decrement below zero and doesn't
+            // touch OOC at all, the way a naive "does this word contain ')'" check would have.
+            //
+            // A "(2/7)" split-message counter (see MessageSplitter) is a single self-contained
+            // paren pair by construction, so it would otherwise go grey by this same rule - it's
+            // our own bookkeeping, not something the sender wrote, so it's excluded outright
+            // rather than colored as if it were part of the message.
+            var startedInOoc = state.OocDepth > 0;
+            var touchedOoc = startedInOoc;
+            if (!IsMessagePartCounter(word))
             {
-                state.InOoc = true;
-            }
-            else if (oocCloses > oocOpens)
-            {
-                state.InOoc = false;
+                foreach (var ch in word)
+                {
+                    if (ch == '(')
+                    {
+                        state.OocDepth++;
+                        touchedOoc = true;
+                    }
+                    else if (ch == ')' && state.OocDepth > 0)
+                    {
+                        state.OocDepth--;
+                        touchedOoc = true;
+                    }
+                }
             }
 
-            var isOoc = startedInOoc || oocOpens > 0 || oocCloses > 0;
+            var isOoc = touchedOoc;
             var isEmote = !isOoc && (startedInEmote || word.Contains('*'));
             var isMention = !string.IsNullOrEmpty(mentionTerm) && string.Equals(StripPunctuation(word), mentionTerm, StringComparison.OrdinalIgnoreCase);
 
             var kind = isMention ? TextSegmentKind.Mention : (isOoc ? TextSegmentKind.Ooc : (isEmote ? TextSegmentKind.Emote : TextSegmentKind.Default));
             yield return (word, kind);
         }
+    }
+
+    /// <summary>
+    /// True for exactly "(&lt;digits&gt;/&lt;digits&gt;)" - the split-message counter
+    /// MessageSplitter.BuildMessages appends (" (2/7)" etc.), and nothing else. Deliberately
+    /// strict (no other characters allowed inside) so it can't accidentally swallow something a
+    /// person actually wrote that happens to contain a slash between two numbers as part of a
+    /// longer word.
+    /// </summary>
+    private static bool IsMessagePartCounter(string word)
+    {
+        if (word.Length < 5 || word[0] != '(' || word[^1] != ')')
+        {
+            return false;
+        }
+
+        var slashIndex = -1;
+        for (var i = 1; i < word.Length - 1; i++)
+        {
+            if (word[i] == '/')
+            {
+                if (slashIndex >= 0)
+                {
+                    return false;
+                }
+
+                slashIndex = i;
+            }
+            else if (!char.IsDigit(word[i]))
+            {
+                return false;
+            }
+        }
+
+        return slashIndex > 1 && slashIndex < word.Length - 2;
     }
 
     private static string StripPunctuation(string word)
@@ -385,19 +442,6 @@ internal static class ColoredTextRenderer
             {
                 count++;
             }
-        }
-
-        return count;
-    }
-
-    private static int CountOccurrences(string text, string pattern)
-    {
-        var count = 0;
-        var index = 0;
-        while ((index = text.IndexOf(pattern, index, StringComparison.Ordinal)) >= 0)
-        {
-            count++;
-            index += pattern.Length;
         }
 
         return count;

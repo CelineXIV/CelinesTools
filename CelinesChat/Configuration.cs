@@ -203,6 +203,14 @@ public class Configuration : IPluginConfiguration
     /// </summary>
     public bool ShowChatDuringLoadingScreens { get; set; }
 
+    /// <summary>
+    /// On by default (matches the plugin's original always-visible toolbar) - toggled from the
+    /// small chevron button next to the tab bar (see ChatWindow.DrawLogTabBar). Off collapses the
+    /// whole search/history/clear/hide/settings/lock/preview/RP-actions row to reclaim the
+    /// vertical space it takes up, for anyone who only reaches for those occasionally.
+    /// </summary>
+    public bool ChatToolbarExpanded { get; set; } = true;
+
     public float WindowOpacity { get; set; } = 0.661f;
 
     public float UnfocusedWindowOpacity { get; set; } = 0.62f;
@@ -218,6 +226,13 @@ public class Configuration : IPluginConfiguration
     // true (default): Enter sends the message, Shift+Enter inserts a newline.
     // false: Enter inserts a newline (multiline default), Ctrl+Enter sends.
     public bool SendOnEnter { get; set; } = true;
+
+    /// <summary>
+    /// Off by default (sending drops focus, same as vanilla FFXIV's own chat box). Turning this
+    /// on keeps the compose box focused right after a message goes out, so a string of messages
+    /// can be typed and sent back-to-back without re-clicking or re-focusing in between.
+    /// </summary>
+    public bool KeepInputFocusAfterSend { get; set; }
 
     // Legacy global template list from before templates became per-character. Kept only so
     // existing saved templates survive the update; Plugin.GetCharacterState() copies them into

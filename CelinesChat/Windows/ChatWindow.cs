@@ -36,6 +36,14 @@ internal sealed class ChatWindow : Window
     private string cachedInput = string.Empty;
     private int cachedMaxLength = -1;
     private List<string> cachedChunks = new();
+
+    // Up/Down-arrow recall through plugin.SentHistory (see TrackTextState's CallbackHistory
+    // branch) - -1 means "not currently browsing", 0 is the most recently sent message, counting
+    // up from there. historyBrowseOriginalDraft is whatever was actually being typed right before
+    // the first Up press, restored once Down cycles back past the most recent entry, the same way
+    // a shell's own command history leaves an in-progress line intact if you back out of it.
+    private int historyBrowseIndex = -1;
+    private string historyBrowseOriginalDraft = string.Empty;
     private bool splitterDragging;
 
     // How tall the preview-toggle row + action row + (sometimes) the validation message actually
@@ -242,9 +250,16 @@ internal sealed class ChatWindow : Window
             }
         }
 
-        DrawLogToolbar(config, state);
-
+        // Tab bar first, toolbar second (reversed from how this used to read top-to-bottom) - the
+        // toolbar's collapse toggle lives at the start of the tab bar row (see DrawLogTabBar), so
+        // the row it controls has to follow directly under it to read as "this expands/collapses
+        // that", not float disconnected above its own toggle.
         DrawLogTabBar(config, state);
+
+        if (config.ChatToolbarExpanded)
+        {
+            DrawLogToolbar(config, state);
+        }
 
         var chunks = GetChunks(inputText, config.MaxMessageLength);
         plugin.CurrentPreviewChunks = chunks;
@@ -298,7 +313,11 @@ internal sealed class ChatWindow : Window
         // AllowTabInput stops Tab from doing its default "move focus to the next widget" thing -
         // needed so it reaches the char filter below as a literal '\t' to intercept for the
         // auto-translate picker, the same way Enter is intercepted for sending.
-        const ImGuiInputTextFlags composeFlags = ImGuiInputTextFlags.CallbackAlways | ImGuiInputTextFlags.CallbackCharFilter | ImGuiInputTextFlags.AllowTabInput;
+        // CallbackHistory is what lets TrackTextState see Up/Down at all - Dear ImGui only fires
+        // it once a multiline input is already at the first/last line respectively (so it can't
+        // move the cursor there any further itself), which is exactly the "only recall history
+        // once there's nowhere left to navigate" behavior a shell's own input has.
+        const ImGuiInputTextFlags composeFlags = ImGuiInputTextFlags.CallbackAlways | ImGuiInputTextFlags.CallbackCharFilter | ImGuiInputTextFlags.CallbackHistory | ImGuiInputTextFlags.AllowTabInput;
         var commandTint = GetCommandTint(config);
         if (commandTint is { } tint)
         {
@@ -1162,6 +1181,12 @@ internal sealed class ChatWindow : Window
 
         inputText = state.Drafts.TryGetValue(key, out var draft) ? draft : string.Empty;
         currentDraftKey = key;
+
+        // A history-browsing session (see historyBrowseIndex) belongs to whichever draft it
+        // started on - carrying it over into a freshly-switched-to tab's own draft would let a
+        // Down-arrow there overwrite it with a leftover line from a completely different
+        // conversation.
+        historyBrowseIndex = -1;
     }
 
     /// <summary>
@@ -1210,6 +1235,12 @@ internal sealed class ChatWindow : Window
             return 0;
         }
 
+        if (data.EventFlag == ImGuiInputTextFlags.CallbackHistory)
+        {
+            HandleHistoryRecall(ref data);
+            return 0;
+        }
+
         // data.CursorPos/SelectionStart/SelectionEnd are byte offsets into ImGui's internal
         // UTF8 text buffer, not char indices into the C# (UTF16) inputText string - with any
         // multi-byte character before the cursor (e.g. ae/oe/ue/ss in German text) the two
@@ -1219,6 +1250,54 @@ internal sealed class ChatWindow : Window
         selectionEnd = ByteOffsetToCharIndex(data, data.SelectionEnd);
         cursorPos = ByteOffsetToCharIndex(data, data.CursorPos);
         return 0;
+    }
+
+    /// <summary>
+    /// Up/Down-arrow recall through plugin.SentHistory, most-recent first (index 0) - Up walks
+    /// further back, Down walks forward again and eventually restores whatever was actually being
+    /// typed before the first Up press (historyBrowseOriginalDraft), the same as a shell's own
+    /// command history leaves an in-progress line alone if you back all the way out of it. Only
+    /// reached at all once Dear ImGui itself decides there's nowhere left to move the cursor
+    /// within the text (see composeFlags' remarks) - not on every Up/Down press.
+    /// </summary>
+    private unsafe void HandleHistoryRecall(ref ImGuiInputTextCallbackData data)
+    {
+        var history = plugin.SentHistory;
+        if (history.Count == 0)
+        {
+            return;
+        }
+
+        if (data.EventKey == ImGuiKey.UpArrow)
+        {
+            if (historyBrowseIndex == -1)
+            {
+                historyBrowseOriginalDraft = inputText;
+            }
+
+            if (historyBrowseIndex < history.Count - 1)
+            {
+                historyBrowseIndex++;
+            }
+        }
+        else if (data.EventKey == ImGuiKey.DownArrow)
+        {
+            if (historyBrowseIndex == -1)
+            {
+                return;
+            }
+
+            historyBrowseIndex--;
+        }
+        else
+        {
+            return;
+        }
+
+        var replacement = historyBrowseIndex == -1 ? historyBrowseOriginalDraft : history[historyBrowseIndex];
+
+        data.DeleteChars(0, data.BufTextLen);
+        data.InsertChars(0, replacement);
     }
 
     private static unsafe int ByteOffsetToCharIndex(ImGuiInputTextCallbackData data, int byteOffset)
@@ -1440,6 +1519,7 @@ internal sealed class ChatWindow : Window
         inputText = string.Empty;
         state.Drafts[currentDraftKey] = string.Empty;
         plugin.SaveConfiguration();
+        historyBrowseIndex = -1;
 
         // While the multiline input keeps keyboard focus (always true for a keyboard-only send
         // like Enter or Ctrl+Enter, unlike clicking the Send button), ImGui's InputText widget
@@ -1447,6 +1527,15 @@ internal sealed class ChatWindow : Window
         // buffer - clearing inputText above has no visible effect until the widget deactivates
         // and re-reads it. Forcing that here is what actually makes the field clear on screen.
         ImGuiP.ClearActiveID();
+
+        // KeepInputFocusAfterSend off (default): stop here, matching vanilla FFXIV - the box
+        // above just lost focus and stays that way. On: immediately re-request focus for next
+        // frame (the same pendingFocusInput hook Enter-activation already uses) so the box comes
+        // right back, now empty, ready to keep typing without an extra click.
+        if (plugin.Configuration.KeepInputFocusAfterSend)
+        {
+            pendingFocusInput = true;
+        }
     }
 
     private void DrawPreviewToggle(Configuration config, CharacterState state, List<string> chunks)
@@ -1777,6 +1866,27 @@ internal sealed class ChatWindow : Window
     /// </summary>
     private void DrawLogTabBar(Configuration config, CharacterState state)
     {
+        // The toolbar's collapse toggle (search/history/clear/hide/settings/lock/preview/RP
+        // actions - see DrawLogToolbar) - drawn here, before BeginTabBar, and followed by
+        // SameLine() so the tab bar itself starts *after* this button on the same line rather
+        // than reserving its own row. Dear ImGui's tab bar always fills the width from wherever
+        // the cursor already is out to the window's edge, so it automatically starts to the right
+        // of this button instead of overlapping it - no manual width math needed to keep the two
+        // from colliding, regardless of how many tabs there are or whether they're scrolling.
+        var toolbarExpanded = config.ChatToolbarExpanded;
+        if (ImGuiComponents.IconButton(toolbarExpanded ? FontAwesomeIcon.ChevronUp : FontAwesomeIcon.ChevronDown))
+        {
+            config.ChatToolbarExpanded = !toolbarExpanded;
+            plugin.SaveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(toolbarExpanded ? Loc.T("ChatLog.CollapseToolbar") : Loc.T("ChatLog.ExpandToolbar"));
+        }
+
+        ImGui.SameLine();
+
         if (!ImGui.BeginTabBar("##logTabs", ImGuiTabBarFlags.FittingPolicyScroll | ImGuiTabBarFlags.Reorderable))
         {
             return;

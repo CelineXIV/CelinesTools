@@ -54,6 +54,13 @@ internal sealed class GeneralPage
             ImGui.PopStyleColor();
         }
 
+        var keepFocus = config.KeepInputFocusAfterSend;
+        if (ImGui.Checkbox(Loc.T("Settings.KeepInputFocusAfterSend"), ref keepFocus))
+        {
+            config.KeepInputFocusAfterSend = keepFocus;
+            plugin.SaveConfiguration();
+        }
+
         ImGui.Separator();
         ImGui.TextUnformatted(Loc.T("Settings.SoundsHeader"));
 
