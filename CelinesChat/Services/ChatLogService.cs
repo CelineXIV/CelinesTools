@@ -18,6 +18,9 @@ internal sealed class ChatLogService : IDisposable
     // Every entry is small (a few strings + a timestamp), and only the entries matching the
     // currently active tab's filter actually get drawn each frame - 500 buffered messages costs
     // negligible memory and lets a busy multi-channel session scroll back further than before.
+    // Eviction is fair per-channel (see RemoveOldestFromLargestCategory), not plain FIFO, so this
+    // cap is a shared *total* budget rather than something a busy channel can spend all of at a
+    // quiet one's expense.
     private const int MaxEntries = 500;
 
     private readonly IChatGui chatGui;
@@ -241,7 +244,7 @@ internal sealed class ChatLogService : IDisposable
             entries.Add(entry);
             while (entries.Count > MaxEntries)
             {
-                entries.RemoveAt(0);
+                RemoveOldestFromLargestCategory();
             }
         }
 
@@ -262,6 +265,46 @@ internal sealed class ChatLogService : IDisposable
     /// to learn about new messages - do not add a second, polling-based path.
     /// </summary>
     internal event Action<ChatLogEntry>? EntryAdded;
+
+    /// <summary>
+    /// Evicts the oldest entry belonging to whichever category currently has the most entries in
+    /// the buffer, instead of always the globally oldest one. A plain FIFO cap meant a busy
+    /// channel (Yell/Shout in a populated area, a chatty Party, ...) could silently evict old
+    /// Whisper history within minutes even though the whisper conversation itself saw barely any
+    /// traffic - reported after two whisper messages vanished from the log after only ~15 minutes.
+    /// Must be called with entriesLock already held (see OnChatMessage). Falls back to the
+    /// globally oldest entry if categorization ever comes back empty, which shouldn't happen since
+    /// every buffered entry already passed IsKnownChannel to get in here.
+    /// </summary>
+    private void RemoveOldestFromLargestCategory()
+    {
+        var countsByCategory = new Dictionary<ChatCategory, int>();
+        foreach (var existing in entries)
+        {
+            if (ChannelDisplay.CategoryOf(existing.ChatType) is { } category)
+            {
+                countsByCategory[category] = countsByCategory.GetValueOrDefault(category) + 1;
+            }
+        }
+
+        if (countsByCategory.Count == 0)
+        {
+            entries.RemoveAt(0);
+            return;
+        }
+
+        var largestCategory = countsByCategory.OrderByDescending(kv => kv.Value).First().Key;
+        for (var i = 0; i < entries.Count; i++)
+        {
+            if (ChannelDisplay.CategoryOf(entries[i].ChatType) == largestCategory)
+            {
+                entries.RemoveAt(i);
+                return;
+            }
+        }
+
+        entries.RemoveAt(0);
+    }
 
     /// <summary>
     /// Since this plugin fully replaces the native chat window (and hides it - see

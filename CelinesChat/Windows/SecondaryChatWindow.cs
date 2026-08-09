@@ -181,7 +181,7 @@ internal sealed class SecondaryChatWindow : Window
                 continue;
             }
 
-            DrawEntry(entry, config, index, availableWidth);
+            DrawEntry(entry, config, index, availableWidth, showingWhisper);
             index++;
         }
 
@@ -191,7 +191,7 @@ internal sealed class SecondaryChatWindow : Window
         }
     }
 
-    private void DrawEntry(ChatLogEntry entry, Configuration config, int index, float availableWidth)
+    private void DrawEntry(ChatLogEntry entry, Configuration config, int index, float availableWidth, bool showingWhisper)
     {
         ImGui.PushID(index);
         ImGui.BeginGroup();
@@ -219,7 +219,12 @@ internal sealed class SecondaryChatWindow : Window
         // back out of a cross-world sender's name, so it has to be appended back on here for the
         // visible name.
         var displayName = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
-        var namePart = (isOutgoingTell ? plugin.OwnCharacterName : displayName) + ": ";
+
+        // See ChatWindow.DrawLogEntry's matching remarks - outside the dedicated whisper tab for
+        // this conversation, showing your own name again doesn't say who you sent it to. The tag
+        // drawn above already renders "[T>]" for TellOutgoing - do not add it again here.
+        var rawName = isOutgoingTell && showingWhisper ? plugin.OwnCharacterName : displayName;
+        var namePart = rawName + ": ";
 
         // Only the partner's own NAME picks up their per-conversation color override - see
         // ChatWindow.DrawLogEntry's matching remarks.

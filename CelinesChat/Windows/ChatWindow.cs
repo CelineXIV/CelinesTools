@@ -877,7 +877,7 @@ internal sealed class ChatWindow : Window
                 hasNewOwnMessageInView = true;
             }
 
-            DrawLogEntry(entry, config, mentionTerm, index, availableWidth);
+            DrawLogEntry(entry, config, mentionTerm, index, availableWidth, showingWhisper);
             index++;
         }
 
@@ -986,7 +986,7 @@ internal sealed class ChatWindow : Window
         return string.Equals(activeWhisperTabTarget.Split('@')[0], senderNameOnly, StringComparison.OrdinalIgnoreCase);
     }
 
-    private void DrawLogEntry(ChatLogEntry entry, Configuration config, string mentionTerm, int index, float availableWidth)
+    private void DrawLogEntry(ChatLogEntry entry, Configuration config, string mentionTerm, int index, float availableWidth, bool showingWhisper)
     {
         ImGui.PushID(index);
         ImGui.BeginGroup();
@@ -1020,7 +1020,15 @@ internal sealed class ChatWindow : Window
         // sender's world silently disappears from the log entirely instead of just no longer
         // being garbled together with an unrenderable glyph.
         var displayName = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
-        var rawName = isOutgoingTell ? plugin.OwnCharacterName : displayName;
+
+        // Inside the whisper tab for this exact conversation the target is already obvious from
+        // context, so your own outgoing side just reads "You". Anywhere else (the general tab, a
+        // fixed tab that also happens to show Whisper) that context is gone - entry.Sender is the
+        // RECIPIENT for an outgoing tell (see remark above displayName), so showing the target's
+        // name there makes it clear who you sent it to instead of just showing your own name again.
+        // The tag drawn just above (ChannelDisplay.DisplayTag) already renders "[T>]" in front of
+        // this for TellOutgoing - do not add it again here.
+        var rawName = isOutgoingTell && showingWhisper ? plugin.OwnCharacterName : displayName;
 
         // System/Error/Urgent/Echo messages (and similar) have no sender at all - entry.Sender is
         // just "" for these. Appending ": " unconditionally used to leave a dangling " : " right
@@ -1463,6 +1471,17 @@ internal sealed class ChatWindow : Window
         if (text.StartsWith('/'))
         {
             inputText = text;
+
+            // The native "Send Tell" context menu entry (party list, nameplate, target frame, ...)
+            // turned out to work exactly like map-flag/item-link prefill - it hands us the literal
+            // text "/tell Name@World " to drop into the chat box (see ChatActivationWatcher) - two
+            // earlier native-hook guesses at a separate "current Tell target" signal both fired
+            // zero times because neither one was actually involved. A fresh Tell target deserves
+            // its own tab the same as any other way of starting a whisper conversation.
+            if (TryParseTellTarget(text, out var tellTarget))
+            {
+                plugin.OpenWhisperTab(tellTarget);
+            }
         }
         else if (!inputText.Contains(text, StringComparison.Ordinal))
         {
@@ -1471,6 +1490,39 @@ internal sealed class ChatWindow : Window
 
         state.Drafts[currentDraftKey] = inputText;
         plugin.SaveConfiguration();
+    }
+
+    private static bool TryParseTellTarget(string text, out string target)
+    {
+        target = string.Empty;
+        const string prefix = "/tell ";
+        if (!text.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var rest = text[prefix.Length..].TrimStart();
+        if (rest.Length == 0)
+        {
+            return false;
+        }
+
+        // Confirmed via a live capture of the actual prefill text ("/tell Unholy Blacky@Shiva "):
+        // the game does NOT quote the "Forename Surname@World" target here even though the name
+        // itself contains a space - so it can't be split on the first space (that lands on just
+        // "Unholy", which never contains an "@" and made every earlier version of this silently do
+        // nothing). The world name itself never has a space, so the target actually ends at the
+        // first space AFTER the "@", not before it.
+        var atIndex = rest.IndexOf('@');
+        if (atIndex < 0)
+        {
+            return false;
+        }
+
+        var endIndex = rest.IndexOf(' ', atIndex);
+        target = endIndex > 0 ? rest[..endIndex] : rest.TrimEnd();
+
+        return target.Contains('@');
     }
 
     private void InsertMarkerAtCursor(CharacterState state, string marker)
@@ -2458,7 +2510,14 @@ internal sealed class ChatWindow : Window
 
         var max = ImGui.GetItemRectMax();
         var min = ImGui.GetItemRectMin();
-        var center = new Vector2(max.X - radius * 0.6f, min.Y + radius * 0.6f);
+
+        // The vertical center used to sit at min.Y + radius*0.6, putting the circle's top edge
+        // 0.4*radius ABOVE the tab's own top boundary (min.Y) - since there's usually no margin
+        // above the tab bar for it to spill into, that portion got clipped by the surrounding
+        // window/child region instead of actually being visible. Keeping center.Y >= min.Y +
+        // radius keeps the whole circle within the tab's own bounds instead of overflowing above
+        // it, fixing the reported "cut off on top" for larger counts (bigger radius = worse clip).
+        var center = new Vector2(max.X - radius * 0.6f, min.Y + radius);
 
         var drawList = ImGui.GetWindowDrawList();
         drawList.AddCircleFilled(center, radius, ImGui.GetColorU32(new Vector4(0.85f, 0.15f, 0.15f, 1f)));

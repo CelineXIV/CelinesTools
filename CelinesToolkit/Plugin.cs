@@ -36,6 +36,8 @@ public sealed class Plugin : IDalamudPlugin
     private readonly GlamourerPreviewWindow glamourerPreviewWindow;
     private readonly SlidecastCastBarWindow slidecastCastBarWindow;
     private readonly SlidecastCursorOverlayWindow slidecastCursorOverlayWindow;
+    private readonly TradeAutoAcceptService tradeAutoAcceptService;
+    private readonly GroupPoseCountdownService groupPoseCountdownService;
 
     private const int LoginInitialDelayMs = 3000;
 
@@ -68,7 +70,10 @@ public sealed class Plugin : IDalamudPlugin
         ICondition condition,
         IDataManager dataManager,
         IObjectTable objectTable,
-        ITargetManager targetManager)
+        ITargetManager targetManager,
+        IAddonLifecycle addonLifecycle,
+        IGameGui gameGui,
+        IChatGui chatGui)
     {
         this.pluginInterface = pluginInterface;
         this.commandManager = commandManager;
@@ -112,6 +117,12 @@ public sealed class Plugin : IDalamudPlugin
         windowSystem.AddWindow(slidecastCursorOverlayWindow);
         slidecastCursorOverlayWindow.IsOpen = true;
 
+        tradeAutoAcceptService = new TradeAutoAcceptService(framework, gameGui, addonLifecycle, objectTable, log, Configuration);
+        tradeAutoAcceptService.SetEnabled(Configuration.AutoAcceptTradeEnabled);
+
+        groupPoseCountdownService = new GroupPoseCountdownService(chatGui, log, Configuration);
+        groupPoseCountdownService.SetEnabled(Configuration.GroupPoseCountdownEnabled);
+
         openCommandInfo = new CommandInfo(OnOpenCommand) { HelpMessage = Loc.T("Command.Help.Open") };
         runCommandInfo = new CommandInfo(OnRunCommand) { HelpMessage = Loc.T("Command.Help.Run") };
         glamourerPreviewCommandInfo = new CommandInfo(OnGlamourerPreviewCommand) { HelpMessage = Loc.T("Command.Help.GlamourerPreview") };
@@ -150,6 +161,20 @@ public sealed class Plugin : IDalamudPlugin
         Configuration.GlamourerPreviewEnabled = enabled;
         SaveConfiguration();
         glamourerPreviewWindow.IsOpen = enabled;
+    }
+
+    public void SetAutoAcceptTradeEnabled(bool enabled)
+    {
+        Configuration.AutoAcceptTradeEnabled = enabled;
+        SaveConfiguration();
+        tradeAutoAcceptService.SetEnabled(enabled);
+    }
+
+    public void SetGroupPoseCountdownEnabled(bool enabled)
+    {
+        Configuration.GroupPoseCountdownEnabled = enabled;
+        SaveConfiguration();
+        groupPoseCountdownService.SetEnabled(enabled);
     }
 
     public void SaveConfiguration() => pluginInterface.SavePluginConfig(Configuration);
@@ -225,5 +250,7 @@ public sealed class Plugin : IDalamudPlugin
         penumbraPanelIntegration.Dispose();
         universalisClient.Dispose();
         paissaClient.Dispose();
+        tradeAutoAcceptService.Dispose();
+        groupPoseCountdownService.Dispose();
     }
 }

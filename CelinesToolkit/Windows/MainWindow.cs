@@ -1,3 +1,4 @@
+using System;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
@@ -18,10 +19,13 @@ internal enum ToolkitPage
     HousingTracker,
     GlamourerPreview,
     Slidecast,
+    AutoAcceptTrade,
+    GroupPoseCountdown,
 }
 
 internal sealed class MainWindow : Window
 {
+    private readonly Plugin plugin;
     private readonly OverviewPage overviewPage;
     private readonly CommandToolPage commandToolPage;
     private readonly QuickBarPage quickBarPage;
@@ -31,11 +35,15 @@ internal sealed class MainWindow : Window
     private readonly HousingTrackerPage housingTrackerPage;
     private readonly GlamourerPreviewPage glamourerPreviewPage;
     private readonly SlidecastPage slidecastPage;
+    private readonly AutoAcceptTradePage autoAcceptTradePage;
+    private readonly GroupPoseCountdownPage groupPoseCountdownPage;
     private readonly IClientState clientState;
     private ToolkitPage currentPage = ToolkitPage.Overview;
+    private bool draggingNavSplitter;
 
     public MainWindow(Plugin plugin, IClientState clientState) : base("CelinesToolkit##MainWindow")
     {
+        this.plugin = plugin;
         this.clientState = clientState;
         Size = new Vector2(700, 460);
         SizeCondition = ImGuiCond.FirstUseEver;
@@ -49,6 +57,8 @@ internal sealed class MainWindow : Window
         housingTrackerPage = new HousingTrackerPage(plugin.HousingTrackerService);
         glamourerPreviewPage = new GlamourerPreviewPage(plugin);
         slidecastPage = new SlidecastPage(plugin);
+        autoAcceptTradePage = new AutoAcceptTradePage(plugin);
+        groupPoseCountdownPage = new GroupPoseCountdownPage(plugin);
     }
 
     // Preserves this window's prior hidden-during-GPose behavior now that the plugin as a whole
@@ -61,7 +71,7 @@ internal sealed class MainWindow : Window
         ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 4f);
         ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(6f, 4f));
 
-        ImGui.BeginChild("##toolkitNav", new Vector2(160, 0), true);
+        ImGui.BeginChild("##toolkitNav", new Vector2(plugin.Configuration.ToolkitNavWidth, 0), true);
         DrawNavEntry(Loc.T("Nav.Overview"), FontAwesomeIcon.Home, ToolkitPage.Overview);
         DrawNavEntry(Loc.T("Nav.CommandTool"), FontAwesomeIcon.ListOl, ToolkitPage.CommandTool);
         DrawNavEntry(Loc.T("Nav.QuickBar"), FontAwesomeIcon.Bolt, ToolkitPage.QuickBar);
@@ -72,9 +82,29 @@ internal sealed class MainWindow : Window
         DrawNavEntry(Loc.T("Nav.HousingTracker"), FontAwesomeIcon.Building, ToolkitPage.HousingTracker);
         DrawNavEntry(Loc.T("Nav.GlamourerPreview"), FontAwesomeIcon.User, ToolkitPage.GlamourerPreview);
         DrawNavEntry(Loc.T("Nav.Slidecast"), FontAwesomeIcon.Running, ToolkitPage.Slidecast);
+        DrawNavEntry(Loc.T("Nav.AutoAcceptTrade"), FontAwesomeIcon.Handshake, ToolkitPage.AutoAcceptTrade);
+        DrawNavEntry(Loc.T("Nav.GroupPoseCountdown"), FontAwesomeIcon.Users, ToolkitPage.GroupPoseCountdown);
         ImGui.EndChild();
 
-        ImGui.SameLine();
+        ImGui.SameLine(0, 2);
+        ImGui.Button("##toolkitNavSplitter", new Vector2(4, -1));
+        if (ImGui.IsItemActive())
+        {
+            plugin.Configuration.ToolkitNavWidth = Math.Clamp(plugin.Configuration.ToolkitNavWidth + ImGui.GetIO().MouseDelta.X, 140f, 320f);
+            draggingNavSplitter = true;
+        }
+        else if (draggingNavSplitter)
+        {
+            draggingNavSplitter = false;
+            plugin.SaveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered() || ImGui.IsItemActive())
+        {
+            ImGui.SetMouseCursor(ImGuiMouseCursor.ResizeEw);
+        }
+
+        ImGui.SameLine(0, 2);
 
         ImGui.BeginChild("##toolkitContent", Vector2.Zero, false);
         switch (currentPage)
@@ -105,6 +135,12 @@ internal sealed class MainWindow : Window
                 break;
             case ToolkitPage.Slidecast:
                 slidecastPage.Draw();
+                break;
+            case ToolkitPage.AutoAcceptTrade:
+                autoAcceptTradePage.Draw();
+                break;
+            case ToolkitPage.GroupPoseCountdown:
+                groupPoseCountdownPage.Draw();
                 break;
         }
         ImGui.EndChild();

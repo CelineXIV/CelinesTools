@@ -19,5 +19,7 @@ internal sealed class OverviewPage
         ImGui.BulletText(Loc.T("Overview.FeatureHousingTracker"));
         ImGui.BulletText(Loc.T("Overview.FeatureGlamourerPreview"));
         ImGui.BulletText(Loc.T("Overview.FeatureSlidecast"));
+        ImGui.BulletText(Loc.T("Overview.FeatureAutoAcceptTrade"));
+        ImGui.BulletText(Loc.T("Overview.FeatureGroupPoseCountdown"));
     }
 }
