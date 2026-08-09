@@ -69,6 +69,20 @@ public enum ChatCategory
     LoseBuff,
     GainDebuff,
     LoseDebuff,
+
+    /// <summary>
+    /// Ambient NPC-vs-NPC combat narration (e.g. "The Wood Wailer sentry defeats the ground
+    /// squirrel.") - despite XivChatType's own name for the raw value this arrives as
+    /// ("SystemError"), it turns out the actual game client uses that same raw type for this
+    /// rather than genuine errors (see CategoryOf's remarks) - split into its own category so it
+    /// no longer shows up mixed in with actual user-facing errors like a failed "/tell". Appended
+    /// at the end rather than declared next to SystemError above deliberately: HashSet&lt;ChatCategory&gt;
+    /// serializes as bare ordinal integers (no string enum converter is configured), so inserting a
+    /// new member anywhere except the end would silently renumber every category declared after it
+    /// - every existing user's saved tab filters would start matching the wrong categories the
+    /// moment they updated, with no error or warning of any kind.
+    /// </summary>
+    AmbientBattle,
 }
 
 /// <summary>
@@ -154,6 +168,7 @@ internal static class ChannelDisplay
         ChatCategory.LoseBuff,
         ChatCategory.GainDebuff,
         ChatCategory.LoseDebuff,
+        ChatCategory.AmbientBattle,
     };
 
     /// <summary>
@@ -207,7 +222,7 @@ internal static class ChannelDisplay
     {
         ChatCategory.Damage or ChatCategory.Miss or ChatCategory.ActionUsed or ChatCategory.ItemUsed
             or ChatCategory.Healing or ChatCategory.GainBuff or ChatCategory.LoseBuff
-            or ChatCategory.GainDebuff or ChatCategory.LoseDebuff => ChatCategoryGroup.Battle,
+            or ChatCategory.GainDebuff or ChatCategory.LoseDebuff or ChatCategory.AmbientBattle => ChatCategoryGroup.Battle,
         ChatCategory.Say or ChatCategory.Party or ChatCategory.Whisper or ChatCategory.Yell
             or ChatCategory.Shout or ChatCategory.FreeCompany or ChatCategory.Linkshell
             or ChatCategory.CrossWorldLinkshell or ChatCategory.Alliance or ChatCategory.PvpTeam
@@ -303,15 +318,20 @@ internal static class ChannelDisplay
             XivChatType.Urgent => ChatCategory.Urgent,
             XivChatType.Debug => ChatCategory.Debug,
             XivChatType.SystemMessage => ChatCategory.SystemMessage,
-            // Dalamud's XivChatType has two distinct "error" values - SystemError (raw 58, rarely
-            // actually seen) and ErrorMessage (raw 60), which is what the retail client sends for
+            // Dalamud's XivChatType has two distinct "error" values - SystemError (raw 58) and
+            // ErrorMessage (raw 60). ErrorMessage is what the retail client actually sends for
             // user-facing errors like "Player not found" after /tell-ing someone offline or
-            // misspelled. Chat2's own ChatType enum only defines the raw-60 one at all (named
-            // "Error" there), confirming which one actually matters - only mapping SystemError
-            // here meant an actual failed-tell error had no category at all and silently vanished
-            // (CategoryOf returning null makes ChatLogService drop it before any tab ever sees
-            // it), regardless of the "Fehlermeldungen" checkbox being on.
-            XivChatType.SystemError => ChatCategory.SystemError,
+            // misspelled - Chat2's own ChatType enum only defines this one at all (named "Error"
+            // there), confirming it's the one that matters for real errors. SystemError, despite
+            // its name, turns out to carry something else entirely: confirmed via a live report of
+            // ambient NPC-vs-NPC combat narration ("The Wood Wailer sentry defeats the ground
+            // squirrel.") showing up right alongside genuine failed-/tell errors - both were being
+            // filed under the same ChatCategory.SystemError before this split, which read as
+            // background combat spam polluting what's supposed to be an error log. Mapping it to
+            // its own AmbientBattle category instead keeps the two apart without any fragile
+            // content/text matching (which would also need to work across every game client
+            // language, not just this plugin's own UI language).
+            XivChatType.SystemError => ChatCategory.AmbientBattle,
             XivChatType.ErrorMessage => ChatCategory.SystemError,
             XivChatType.GatheringSystemMessage => ChatCategory.GatheringSystemMessage,
             XivChatType.Echo => ChatCategory.Echo,
@@ -399,6 +419,7 @@ internal static class ChannelDisplay
         ChatCategory.LoseBuff => Loc.T("Channel.LoseBuff"),
         ChatCategory.GainDebuff => Loc.T("Channel.GainDebuff"),
         ChatCategory.LoseDebuff => Loc.T("Channel.LoseDebuff"),
+        ChatCategory.AmbientBattle => Loc.T("Channel.AmbientBattle"),
         _ => category.ToString(),
     };
 
@@ -616,6 +637,7 @@ internal static class ChannelDisplay
         ChatCategory.LoseBuff => new Vector4(0.6f, 0.8f, 0.6f, 1f),
         ChatCategory.GainDebuff => new Vector4(0.9f, 0.5f, 0.9f, 1f),
         ChatCategory.LoseDebuff => new Vector4(0.7f, 0.6f, 0.8f, 1f),
+        ChatCategory.AmbientBattle => new Vector4(0.75f, 0.75f, 0.75f, 1f),
 
         _ => new Vector4(0.8f, 0.8f, 0.8f, 1f),
     };
@@ -668,6 +690,7 @@ internal static class ChannelDisplay
         ChatCategory.Debug => new[] { "plugin", "addon" },
         ChatCategory.Urgent => new[] { "plugin", "addon" },
         ChatCategory.SystemError => new[] { "fehler", "error", "tell", "whisper", "anwhispern" },
+        ChatCategory.AmbientBattle => new[] { "kampf", "besiegt", "defeats", "monster", "npc" },
         ChatCategory.LootNotice => new[] { "beute", "loot", "gil", "item" },
         ChatCategory.LootRoll => new[] { "würfeln", "wuerfeln", "roll", "beute", "loot" },
         ChatCategory.Crafting => new[] { "synthese", "craften", "herstellen", "craft" },

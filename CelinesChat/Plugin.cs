@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
+using Dalamud.Bindings.ImGui;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Keys;
 using Dalamud.Game.ClientState.Objects.Enums;
@@ -74,6 +75,9 @@ public sealed class Plugin : IDalamudPlugin
     public Configuration Configuration { get; }
 
     internal ChatLogService ChatLog { get; }
+
+    internal IPluginLog Log => log;
+
 
     /// <summary>
     /// Services/Web needs to call the chat window's own (internal) tab/channel-switching methods
@@ -188,8 +192,10 @@ public sealed class Plugin : IDalamudPlugin
         Configuration = this.pluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
         if (Configuration.ChatTabs.Count == 0)
         {
-            Configuration.ChatTabs.Add(ChatTab.CreateDefaultAllTab());
-            Configuration.ChatTabs.Add(ChatTab.CreateDefaultBattleLootTab());
+            Configuration.ChatTabs.Add(ChatTab.CreateDefaultGeneralTab());
+            Configuration.ChatTabs.Add(ChatTab.CreateDefaultChatTab());
+            Configuration.ChatTabs.Add(ChatTab.CreateDefaultSystemTab());
+            Configuration.ChatTabs.Add(ChatTab.CreateDefaultLootTab());
             SaveConfiguration();
         }
         else
@@ -214,6 +220,16 @@ public sealed class Plugin : IDalamudPlugin
                     addedAny |= defaultTab.IncludedChannels.Add(category);
                 }
 
+                // Third migration step: AmbientBattle used to be lumped into SystemError (see
+                // ChannelDisplay.CategoryOf's remarks on why that split apart) - a tab saved
+                // before the split that already had SystemError checked was relying on that one
+                // category to also show this ambient combat text, so add the new one alongside it
+                // here rather than have it silently vanish from the default tab entirely.
+                if (defaultTab.IncludedChannels.Contains(ChatCategory.SystemError))
+                {
+                    addedAny |= defaultTab.IncludedChannels.Add(ChatCategory.AmbientBattle);
+                }
+
                 if (addedAny)
                 {
                     SaveConfiguration();
@@ -236,6 +252,15 @@ public sealed class Plugin : IDalamudPlugin
         windowSystem.AddWindow(chatWindow);
         windowSystem.AddWindow(settingsWindow);
         windowSystem.AddWindow(previewWindow);
+
+        // Torn-off tabs/whispers are persisted (see Configuration.SecondaryChatTabIds) - if any
+        // survived from the last session, the secondary window needs to exist again right away
+        // rather than waiting for a drag that'll never come, or those tabs would be unreachable
+        // (still flagged as "in the secondary window" everywhere else, but with nothing to show them).
+        if (Configuration.SecondaryChatTabIds.Count > 0 || Configuration.SecondaryChatWhisperTargets.Count > 0)
+        {
+            EnsureSecondaryWindow();
+        }
 
         var webRootDir = Path.Combine(this.pluginInterface.AssemblyLocation.DirectoryName ?? string.Empty, "Web");
         webServerService = new WebServerService(this, log, webRootDir);
@@ -348,49 +373,72 @@ public sealed class Plugin : IDalamudPlugin
 
     public void TogglePreviewWindow() => previewWindow.Toggle();
 
-    /// <summary>
-    /// Tracks which tabs/whisper conversations currently live in the one secondary chat window
-    /// (see <see cref="SecondaryChatWindow"/>) instead of the main one - purely runtime state,
-    /// deliberately not persisted, so every plugin load starts fresh with everything back in the
-    /// main window.
-    /// </summary>
-    private readonly HashSet<Guid> secondaryWindowTabIds = new();
 
-    private readonly HashSet<string> secondaryWindowWhisperTargets = new(StringComparer.OrdinalIgnoreCase);
     private SecondaryChatWindow? secondaryChatWindow;
 
-    internal bool IsTabInSecondaryWindow(Guid tabId) => secondaryWindowTabIds.Contains(tabId);
+    /// <summary>
+    /// Whether the secondary window currently exists at all - used to gate the "drag far enough
+    /// away and let go" bootstrap tear-off (see TabDragHelper/ChatWindow's remarks) to only the
+    /// one case it's actually needed for: creating the secondary window the very first time,
+    /// before it exists as an explicit drop target anywhere to drop onto instead.
+    /// </summary>
+    internal bool HasSecondaryWindow => secondaryChatWindow != null;
 
-    internal bool IsWhisperInSecondaryWindow(string target) => secondaryWindowWhisperTargets.Contains(target);
+    internal bool IsTabInSecondaryWindow(Guid tabId) => Configuration.SecondaryChatTabIds.Contains(tabId);
+
+    internal bool IsWhisperInSecondaryWindow(string target) => Configuration.SecondaryChatWhisperTargets.Contains(target);
 
     /// <summary>
     /// Moves a tab into the secondary window, opening it first if this is the first tab ever
     /// torn off. There's only ever one secondary window - dragging more tabs out joins them into
     /// its tab bar rather than spawning additional windows, matching "a second chat window".
+    /// dropScreenPos positions a brand new window near wherever the tab was actually dropped
+    /// (drag-and-drop should land where you let go of it, not at some unrelated default spot) -
+    /// ignored if the window already exists, since repositioning it out from under whatever else
+    /// is already open there would be more surprising than helpful.
     /// </summary>
-    internal void MoveTabToSecondaryWindow(Guid tabId)
+    internal void MoveTabToSecondaryWindow(Guid tabId, Vector2? dropScreenPos = null)
     {
-        EnsureSecondaryWindow();
-        secondaryWindowTabIds.Add(tabId);
+        EnsureSecondaryWindow(dropScreenPos);
+        Configuration.SecondaryChatTabIds.Add(tabId);
+        SaveConfiguration();
     }
 
-    internal void MoveWhisperToSecondaryWindow(string target)
+    internal void MoveWhisperToSecondaryWindow(string target, Vector2? dropScreenPos = null)
     {
-        EnsureSecondaryWindow();
-        secondaryWindowWhisperTargets.Add(target);
+        EnsureSecondaryWindow(dropScreenPos);
+        Configuration.SecondaryChatWhisperTargets.Add(target);
+        SaveConfiguration();
     }
 
-    internal void MoveTabToMainWindow(Guid tabId) => secondaryWindowTabIds.Remove(tabId);
+    internal void MoveTabToMainWindow(Guid tabId)
+    {
+        Configuration.SecondaryChatTabIds.Remove(tabId);
+        SaveConfiguration();
+    }
 
-    internal void MoveWhisperToMainWindow(string target) => secondaryWindowWhisperTargets.Remove(target);
+    internal void MoveWhisperToMainWindow(string target)
+    {
+        Configuration.SecondaryChatWhisperTargets.Remove(target);
+        SaveConfiguration();
+    }
 
     internal void ReturnAllTabsFromSecondaryWindow()
     {
-        secondaryWindowTabIds.Clear();
-        secondaryWindowWhisperTargets.Clear();
+        Configuration.SecondaryChatTabIds.Clear();
+        Configuration.SecondaryChatWhisperTargets.Clear();
+        SaveConfiguration();
     }
 
-    private void EnsureSecondaryWindow()
+    /// <summary>Called by SecondaryChatWindow whenever it's been moved/resized, so the layout survives a restart.</summary>
+    internal void SaveSecondaryWindowBounds(Vector2 position, Vector2 size)
+    {
+        Configuration.SecondaryChatWindowPosition = position;
+        Configuration.SecondaryChatWindowSize = size;
+        SaveConfiguration();
+    }
+
+    private void EnsureSecondaryWindow(Vector2? dropScreenPos = null)
     {
         if (secondaryChatWindow != null)
         {
@@ -405,6 +453,23 @@ public sealed class Plugin : IDalamudPlugin
                 secondaryChatWindow = null;
             }
         });
+
+        if (dropScreenPos is { } dropPos)
+        {
+            secondaryChatWindow.Position = dropPos;
+            secondaryChatWindow.PositionCondition = ImGuiCond.Appearing;
+        }
+        else if (Configuration.SecondaryChatWindowPosition is { } savedPos)
+        {
+            secondaryChatWindow.Position = savedPos;
+            secondaryChatWindow.PositionCondition = ImGuiCond.FirstUseEver;
+        }
+
+        if (Configuration.SecondaryChatWindowSize is { } savedSize)
+        {
+            secondaryChatWindow.Size = savedSize;
+            secondaryChatWindow.SizeCondition = ImGuiCond.FirstUseEver;
+        }
 
         windowSystem.AddWindow(secondaryChatWindow);
         secondaryChatWindow.IsOpen = true;
@@ -1051,6 +1116,10 @@ public sealed class Plugin : IDalamudPlugin
     {
         SetNativeChatVisible(false);
         ApplyGameStateVisibility();
+
+        // Runs regardless of whether the chat window is even open - see its own remarks on why a
+        // retry loop tied to a window's Draw call wouldn't be reliable.
+        NoviceNetworkService.TickAutoRetry(Log);
 
         if (!keyState[VirtualKey.RETURN])
         {

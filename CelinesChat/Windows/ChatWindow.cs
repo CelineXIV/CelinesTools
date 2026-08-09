@@ -35,6 +35,11 @@ internal sealed class ChatWindow : Window
     private string newSnippetName = string.Empty;
     private string snippetSearchFilter = string.Empty;
     private string activeWhisperTabTarget = string.Empty;
+
+    /// <summary>Whether the auto-appearing/disappearing Novice Network tab (see DrawLogTabBar) is the one currently being viewed - it exists only while NoviceNetworkService.IsConnected, so this gets force-cleared the moment that stops being true.</summary>
+    private bool noviceNetworkTabActive;
+
+    private int noviceNetworkUnread;
     private string? pendingTabForceSelect;
     private int selectionStart;
     private int selectionEnd;
@@ -99,7 +104,25 @@ internal sealed class ChatWindow : Window
     // measured total content width (one frame stale - see DrawLogTabBar's remarks on why that's
     // fine), both in pixels.
     private float tabStripScrollX;
+
+    // The continuous, unsnapped scroll position wheel input accumulates into - tabStripScrollX
+    // itself is always a snapped tab boundary (see tabStripTabStartOffsets), so if wheel scrolling
+    // adjusted that directly, each tick's small delta got rounded straight back down to the exact
+    // boundary it started from whenever a tab was wider than one tick's worth of movement - visibly
+    // "the wheel does nothing at all" rather than just "it snaps a bit late". Keeping this separate
+    // lets ticks keep accumulating underneath the snapped display position until they've actually
+    // crossed into the next tab. The chevrons jump straight to a boundary, so they reset this to
+    // match rather than leaving stale progress toward whatever boundary the wheel last aimed at.
+    private float tabStripScrollRawTarget;
     private float tabStripContentWidth;
+
+    // Each tab's own starting X within the strip's total content width (same one-frame-stale
+    // deal as tabStripContentWidth) - lets every scroll path (chevrons, wheel, the general clamp)
+    // snap onto an actual tab boundary instead of resting at an arbitrary pixel offset. Landing
+    // mid-tab looked broken: the tab straddling that offset gets skipped entirely (see the "only
+    // draw a tab if it fits whole" rule below), so whatever's drawn next starts partway across the
+    // strip instead of flush with its left edge, leaving a chunk of blank space in front of it.
+    private readonly List<float> tabStripTabStartOffsets = new();
     private List<ChatLogEntry>? loadedHistoryEntries;
     private string? loadedHistoryLabel;
     private string logSearchFilter = string.Empty;
@@ -120,6 +143,9 @@ internal sealed class ChatWindow : Window
     // touched, so clearing one tab can't blank out another tab's (or "Alle"'s) view of the same
     // underlying messages.
     private readonly Dictionary<Guid, long> fixedTabClearCutoff = new();
+
+    // Same idea again, for the single auto-managed Novice Network tab.
+    private long? noviceNetworkClearCutoff;
 
     // Whether the most recent right-click on a log entry's group landed specifically on the
     // sender name (vs. elsewhere in the row) - see DrawLogEntry's merged "##logEntryContext"
@@ -681,6 +707,107 @@ internal sealed class ChatWindow : Window
         }
 
         ImGui.SameLine();
+        var noviceConnected = NoviceNetworkService.IsConnected;
+        var noviceJoinFailed = NoviceNetworkService.JoinFailed;
+        var noviceAutoRetrying = NoviceNetworkService.AutoRetryEnabled && !noviceConnected;
+
+        // Covers both a plain single click (IsJoining, the first few seconds before it's had time
+        // to succeed or be judged failed) and auto-retry's repeated attempts - without IsJoining
+        // here, clicking Connect gave no feedback at all until either the green (connected) or red
+        // (JoinFailed) state appeared several seconds later, reading as if the click did nothing.
+        var noviceTrying = (NoviceNetworkService.IsJoining || noviceAutoRetrying) && !noviceConnected;
+        if (noviceConnected)
+        {
+            ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.3f, 0.9f, 0.3f, 1f));
+        }
+        else if (noviceTrying)
+        {
+            // Pulses gently between the normal text color and orange rather than sitting flat, so
+            // "actively trying to connect" reads as an ongoing process at a glance instead of
+            // looking identical to the plain disconnected state until you happen to hover it.
+            var pulse = (MathF.Sin(Environment.TickCount64 / 250f) + 1f) * 0.5f;
+            var normal = ImGui.GetStyle().Colors[(int)ImGuiCol.Text];
+            var orange = new Vector4(1f, 0.65f, 0.15f, 1f);
+            ImGui.PushStyleColor(ImGuiCol.Text, Vector4.Lerp(normal, orange, pulse));
+        }
+
+        if (ImGuiComponents.IconButton(FontAwesomeIcon.Wifi))
+        {
+            if (noviceConnected)
+            {
+                NoviceNetworkService.Disconnect(plugin.Log);
+            }
+            else
+            {
+                NoviceNetworkService.Connect(plugin.Log);
+            }
+        }
+
+        if (noviceConnected || noviceTrying)
+        {
+            ImGui.PopStyleColor();
+        }
+
+        // The game's own "channel is full" (or any other silent join rejection) notice is a
+        // native banner, not a chat line - it never reaches our log no matter what's shown here,
+        // so this small red dot is the only cue that the last connect attempt didn't go through.
+        // Suppressed while still trying (either a fresh single attempt or auto-retry) - that state
+        // already has its own pulsing indicator above, and a fail badge on top of it would just
+        // read as "still failing" on every single attempt in between successes.
+        if (noviceJoinFailed && !noviceTrying)
+        {
+            var badgeMax = ImGui.GetItemRectMax();
+            var badgeRadius = 4f;
+            var badgeCenter = new Vector2(badgeMax.X - badgeRadius, badgeMax.Y - badgeRadius);
+            ImGui.GetWindowDrawList().AddCircleFilled(badgeCenter, badgeRadius, ImGui.GetColorU32(new Vector4(0.9f, 0.15f, 0.15f, 1f)));
+        }
+
+        // Right-click offers to keep retrying on its own every few seconds until a slot actually
+        // opens up - for a channel that's often full, that beats sitting there re-clicking Connect
+        // by hand. Ticked from Plugin.OnFrameworkUpdate (see NoviceNetworkService.TickAutoRetry) so
+        // it keeps working even if this window gets hidden mid-retry.
+        if (ImGui.BeginPopupContextItem("##noviceNetworkAutoRetryMenu"))
+        {
+            if (NoviceNetworkService.AutoRetryEnabled)
+            {
+                if (ImGui.Selectable(Loc.T("NoviceNetwork.StopAutoRetry")))
+                {
+                    NoviceNetworkService.StopAutoRetry();
+                }
+            }
+            else if (ImGui.Selectable(Loc.T("NoviceNetwork.StartAutoRetry")))
+            {
+                NoviceNetworkService.StartAutoRetry(plugin.Log);
+            }
+
+            ImGui.EndPopup();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(noviceAutoRetrying
+                ? Loc.T("NoviceNetwork.AutoRetrying")
+                : NoviceNetworkService.IsJoining
+                    ? Loc.T("NoviceNetwork.Connecting")
+                    : noviceJoinFailed
+                        ? Loc.T("NoviceNetwork.JoinFailed")
+                        : noviceConnected
+                            ? Loc.T("NoviceNetwork.Connected")
+                            : Loc.T("NoviceNetwork.Disconnected"));
+        }
+
+        ImGui.SameLine();
+        if (ImGuiComponents.IconButton(FontAwesomeIcon.Users))
+        {
+            NoviceNetworkService.OpenNativeMemberList(plugin.Log);
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("NoviceNetwork.OpenList"));
+        }
+
+        ImGui.SameLine();
         DrawRpActionsMenu(state);
 
         if (loadedHistoryEntries != null)
@@ -755,8 +882,12 @@ internal sealed class ChatWindow : Window
         }
 
         var showingWhisper = !string.IsNullOrEmpty(activeWhisperTabTarget);
-        var activeTab = showingWhisper ? null : GetActiveFixedTab(config);
-        var tabLabel = showingWhisper ? activeWhisperTabTarget : activeTab?.Name ?? string.Empty;
+        var activeTab = showingWhisper || noviceNetworkTabActive ? null : GetActiveFixedTab(config);
+        var tabLabel = showingWhisper
+            ? activeWhisperTabTarget
+            : noviceNetworkTabActive
+                ? Loc.T("Channel.NoviceNetwork")
+                : activeTab?.Name ?? string.Empty;
 
         ImGui.TextUnformatted(Loc.T("ChatLog.ClearTabConfirm", tabLabel));
 
@@ -768,6 +899,10 @@ internal sealed class ChatWindow : Window
             if (showingWhisper)
             {
                 whisperCloseCutoff[activeWhisperTabTarget] = cutoff;
+            }
+            else if (noviceNetworkTabActive)
+            {
+                noviceNetworkClearCutoff = cutoff;
             }
             else if (activeTab != null)
             {
@@ -802,7 +937,9 @@ internal sealed class ChatWindow : Window
             ? $"H:{loadedHistoryLabel}"
             : !string.IsNullOrEmpty(activeWhisperTabTarget)
                 ? $"W:{activeWhisperTabTarget}"
-                : $"T:{activeTabId}";
+                : noviceNetworkTabActive
+                    ? "NN"
+                    : $"T:{activeTabId}";
         var viewChanged = viewKey != lastViewKey;
         lastViewKey = viewKey;
 
@@ -822,7 +959,8 @@ internal sealed class ChatWindow : Window
         var availableWidth = ImGui.GetContentRegionAvail().X;
 
         var showingWhisper = !string.IsNullOrEmpty(activeWhisperTabTarget);
-        var activeTab = showingWhisper ? null : GetActiveFixedTab(config);
+        var showingNoviceNetwork = !showingWhisper && noviceNetworkTabActive;
+        var activeTab = showingWhisper || showingNoviceNetwork ? null : GetActiveFixedTab(config);
 
         var hasNewEntries = false;
         var hasNewOwnMessageInView = false;
@@ -837,12 +975,24 @@ internal sealed class ChatWindow : Window
             if (isNew)
             {
                 hasNewEntries = true;
-                TrackUnreadForNewEntry(config, state, entry, showingWhisper, activeTab?.Id);
+                TrackUnreadForNewEntry(config, state, entry, showingWhisper, showingNoviceNetwork, activeTab?.Id);
             }
 
             if (showingWhisper)
             {
                 if (!MatchesWhisperTarget(entry, activeWhisperTabTarget))
+                {
+                    continue;
+                }
+            }
+            else if (showingNoviceNetwork)
+            {
+                if (!IsNoviceNetworkMessage(entry.ChatType))
+                {
+                    continue;
+                }
+
+                if (noviceNetworkClearCutoff is { } nnClearCutoff && entry.Sequence <= nnClearCutoff)
                 {
                     continue;
                 }
@@ -906,7 +1056,7 @@ internal sealed class ChatWindow : Window
     /// whichever one you're currently looking at. Your own outgoing messages never count as
     /// "missed".
     /// </summary>
-    private void TrackUnreadForNewEntry(Configuration config, CharacterState state, ChatLogEntry entry, bool showingWhisper, Guid? activeFixedTabId)
+    private void TrackUnreadForNewEntry(Configuration config, CharacterState state, ChatLogEntry entry, bool showingWhisper, bool showingNoviceNetwork, Guid? activeFixedTabId)
     {
         if (IsSelfAuthored(entry))
         {
@@ -928,11 +1078,19 @@ internal sealed class ChatWindow : Window
             fixedTabUnreadCounts[tab.Id] = fixedTabUnreadCounts.GetValueOrDefault(tab.Id) + 1;
         }
 
+        if (!showingNoviceNetwork && IsNoviceNetworkMessage(entry.ChatType))
+        {
+            noviceNetworkUnread++;
+        }
+
         if (entry.ChatType == XivChatType.TellIncoming)
         {
             TrackIncomingWhisper(state, entry);
         }
     }
+
+    private static bool IsNoviceNetworkMessage(XivChatType type) =>
+        type is XivChatType.NoviceNetwork or XivChatType.NoviceNetworkSystem;
 
     /// <summary>
     /// Makes sure a newly-arrived whisper has a tab to show up in (conversations used to only
@@ -1950,13 +2108,7 @@ internal sealed class ChatWindow : Window
         }
     }
 
-    private const float TabStripScrollStepPx = 80f;
     private const float TabStripWheelStepPx = 60f;
-
-    // How far (in pixels) a tab has to be dragged horizontally before it swaps with its neighbor
-    // - see HandleReorderDrag. Reset after every swap so continuing to hold the drag keeps
-    // stepping through further swaps at the same steady pace.
-    private const float TabReorderDragThresholdPx = 24f;
 
     /// <summary>
     /// The one tab bar controlling what's shown in the log below: the default "Alle" tab plus any
@@ -1976,6 +2128,54 @@ internal sealed class ChatWindow : Window
     /// item" helpers that don't care whether that item was a native tab or a Selectable, so they
     /// carry over unchanged.
     /// </summary>
+    /// <summary>Largest recorded tab-start offset that's still at or before value - see tabStripTabStartOffsets' remarks.</summary>
+    private float SnapScrollToTabBoundary(float value)
+    {
+        var snapped = 0f;
+        foreach (var offset in tabStripTabStartOffsets)
+        {
+            if (offset > value + 0.5f)
+            {
+                break;
+            }
+
+            snapped = offset;
+        }
+
+        return snapped;
+    }
+
+    /// <summary>The next recorded tab-start offset strictly after value, for the right-scroll chevron - falls back to value itself if there isn't one (nothing left to scroll to).</summary>
+    private float NextTabBoundaryAfter(float value)
+    {
+        foreach (var offset in tabStripTabStartOffsets)
+        {
+            if (offset > value + 0.5f)
+            {
+                return offset;
+            }
+        }
+
+        return value;
+    }
+
+    /// <summary>The previous recorded tab-start offset strictly before value, for the left-scroll chevron - falls back to 0 (the very start) if there isn't one.</summary>
+    private float PrevTabBoundaryBefore(float value)
+    {
+        var result = 0f;
+        foreach (var offset in tabStripTabStartOffsets)
+        {
+            if (offset >= value - 0.5f)
+            {
+                break;
+            }
+
+            result = offset;
+        }
+
+        return result;
+    }
+
     private void DrawLogTabBar(Configuration config, CharacterState state)
     {
         // The toolbar's collapse toggle (search/history/clear/hide/settings/lock/preview/RP
@@ -2003,18 +2203,35 @@ internal sealed class ChatWindow : Window
         // never within a single still frame).
         var stripWidth = MathF.Max(1f, ImGui.GetContentRegionAvail().X - (arrowSize + spacing) * 2f);
         var maxScroll = MathF.Max(0f, tabStripContentWidth - stripWidth);
-        tabStripScrollX = Math.Clamp(tabStripScrollX, 0f, maxScroll);
+        tabStripScrollRawTarget = Math.Clamp(tabStripScrollRawTarget, 0f, maxScroll);
+        tabStripScrollX = SnapScrollToTabBoundary(tabStripScrollRawTarget);
 
         ImGui.BeginDisabled(tabStripScrollX <= 0f);
         if (ImGuiComponents.IconButton(FontAwesomeIcon.ChevronLeft))
         {
-            tabStripScrollX = MathF.Max(0f, tabStripScrollX - TabStripScrollStepPx);
+            tabStripScrollX = PrevTabBoundaryBefore(tabStripScrollX);
+            tabStripScrollRawTarget = tabStripScrollX;
         }
 
         ImGui.EndDisabled();
         ImGui.SameLine();
 
         ImGui.BeginChild("##logTabsStrip", new Vector2(stripWidth, arrowSize), false, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
+
+        // The whole strip is a drop target for tabs dragged out of the secondary window - see
+        // TabDragHelper.DrawDropZone's remarks. Whatever's dropped here always returns to the
+        // main window regardless of whether it's a fixed tab (a Guid) or a whisper (a plain name).
+        if (TabDragHelper.DrawDropZone(stripWidth, arrowSize) is { } droppedOnMain)
+        {
+            if (Guid.TryParse(droppedOnMain, out var droppedTabId))
+            {
+                plugin.MoveTabToMainWindow(droppedTabId);
+            }
+            else
+            {
+                plugin.MoveWhisperToMainWindow(droppedOnMain);
+            }
+        }
 
         // Centers each tab's own label within its Selectable - the default (top-left) read as
         // messy once tabs started getting an actual background fill (see DrawTabBackgroundFill)
@@ -2027,13 +2244,21 @@ internal sealed class ChatWindow : Window
         float? forceScrollTabStart = null;
         float? forceScrollTabEnd = null;
 
-        // Snapshotted, not iterated live - HandleReorderDrag below can swap two elements of
-        // config.ChatTabs itself while this loop is still walking it (at most one swap per frame,
-        // whichever single tab is actively being dragged), and a live foreach would either
-        // re-visit the tab it swapped into its own old slot or skip over the one it swapped with,
-        // both of which are pure this-frame rendering glitches - the persisted order itself always
-        // ends up correct regardless, but there's no reason to have to explain that away when
-        // snapshotting the draw order costs nothing noticeable for a handful of tabs.
+        // Rebuilt fresh every frame below - without this, offsets from every previous frame just
+        // kept accumulating on top of each other forever, and once a frame's freshly-appended
+        // values (which restart from 0) landed after the previous frame's larger ones, the list
+        // was no longer sorted ascending - silently breaking every snap/boundary lookup below
+        // (they all assume ascending order and bail out early), which is what made scrolling stop
+        // working at all rather than just occasionally landing mid-tab.
+        tabStripTabStartOffsets.Clear();
+
+        // Snapshotted, not iterated live - a completed reorder drop (see DrawReorderTarget below)
+        // can remove-and-reinsert an element of config.ChatTabs itself while this loop is still
+        // walking it, and a live foreach would either re-visit the tab that landed in its own old
+        // slot or skip over one it got inserted ahead of - both pure this-frame rendering glitches
+        // (the persisted order itself always ends up correct regardless) - but there's no reason
+        // to have to explain that away when snapshotting the draw order costs nothing noticeable
+        // for a handful of tabs.
         foreach (var tab in config.ChatTabs.ToArray())
         {
             // Torn off into the secondary window (see TabDragHelper/Plugin.MoveTabToSecondaryWindow) -
@@ -2044,6 +2269,7 @@ internal sealed class ChatWindow : Window
             }
 
             var tabWidth = ImGui.CalcTextSize(tab.Name).X + ImGui.GetStyle().FramePadding.X * 2f;
+            tabStripTabStartOffsets.Add(runningX);
 
             // Only actually drawn if it fits *entirely* within the visible strip - a tab
             // straddling the left or right edge used to render however much of it the child's
@@ -2053,7 +2279,12 @@ internal sealed class ChatWindow : Window
             // whole rather than sliced.
             if (runningX >= tabStripScrollX - 0.5f && runningX + tabWidth <= tabStripScrollX + stripWidth + 0.5f)
             {
-                var isSelected = string.IsNullOrEmpty(activeWhisperTabTarget) && activeTabId == tab.Id;
+                // Excluding noviceNetworkTabActive here matters for more than just the highlight:
+                // without it, clicking back onto whichever fixed tab was active before switching
+                // to Novice Network silently did nothing - isSelected already read true for that
+                // one tab (activeTabId never changed while viewing Novice Network), so "clicked &&
+                // !isSelected" below never fired for it.
+                var isSelected = string.IsNullOrEmpty(activeWhisperTabTarget) && !noviceNetworkTabActive && activeTabId == tab.Id;
                 var fixedUnread = fixedTabUnreadCounts.GetValueOrDefault(tab.Id);
                 var tabSize = new Vector2(tabWidth, arrowSize);
 
@@ -2065,8 +2296,39 @@ internal sealed class ChatWindow : Window
 
                 if (!tab.PositionLocked)
                 {
-                    TabDragHelper.HandleHoverAndTearOff(() => plugin.MoveTabToSecondaryWindow(tab.Id));
-                    HandleReorderDrag(config.ChatTabs, config.ChatTabs.IndexOf(tab));
+                    // The distance-based fallback only ever creates the secondary window the
+                    // very first time (there's nothing to explicitly drop onto yet) - once it
+                    // exists, moving a tab there requires an actual drop onto its tab strip (see
+                    // SecondaryChatWindow's own DrawDropZone call), so a drop onto empty space
+                    // elsewhere no longer silently tears the tab off to it.
+                    TabDragHelper.HandleHoverAndTearOff(tab.Id.ToString(), tab.Name, dropPos =>
+                    {
+                        if (!plugin.HasSecondaryWindow)
+                        {
+                            plugin.MoveTabToSecondaryWindow(tab.Id, dropPos);
+                        }
+                    });
+                    if (TabDragHelper.DrawReorderTarget(tab.Id.ToString(), out var insertBefore) is { } droppedTabIdStr
+                        && Guid.TryParse(droppedTabIdStr, out var droppedTabId))
+                    {
+                        // A drop landing on a specific tab's left/right half can come from the
+                        // secondary window just as easily as from elsewhere in this same strip -
+                        // without this, dropping there only ever reordered config.ChatTabs (a
+                        // single shared list for both windows), never actually joining this
+                        // window's own membership set, so the tab would just silently stay put in
+                        // whichever window it started in - the reported "nothing happens".
+                        plugin.MoveTabToMainWindow(droppedTabId);
+
+                        var draggedIndex = config.ChatTabs.FindIndex(t => t.Id == droppedTabId);
+                        if (draggedIndex >= 0)
+                        {
+                            var draggedTab = config.ChatTabs[draggedIndex];
+                            config.ChatTabs.RemoveAt(draggedIndex);
+                            var targetIndex = config.ChatTabs.IndexOf(tab);
+                            config.ChatTabs.Insert(insertBefore ? targetIndex : targetIndex + 1, draggedTab);
+                            plugin.SaveConfiguration();
+                        }
+                    }
                 }
 
                 if (clicked && !isSelected)
@@ -2081,6 +2343,45 @@ internal sealed class ChatWindow : Window
             runningX += tabWidth + spacing;
         }
 
+        // Auto-appears the moment NoviceNetworkService.IsConnected, disappears the moment it
+        // isn't - not a real ChatTab (never added to config.ChatTabs), so there's nothing to
+        // accidentally persist into the saved config while connected and nothing to clean up on
+        // disconnect beyond resetting this one flag.
+        if (NoviceNetworkService.IsConnected)
+        {
+            var noviceLabel = Loc.T("Channel.NoviceNetwork");
+            var noviceTabWidth = ImGui.CalcTextSize(noviceLabel).X + ImGui.GetStyle().FramePadding.X * 2f;
+            tabStripTabStartOffsets.Add(runningX);
+
+            if (runningX >= tabStripScrollX - 0.5f && runningX + noviceTabWidth <= tabStripScrollX + stripWidth + 0.5f)
+            {
+                var isSelected = noviceNetworkTabActive;
+                var tabSize = new Vector2(noviceTabWidth, arrowSize);
+
+                ImGui.SetCursorPos(new Vector2(basePos.X + runningX - tabStripScrollX, basePos.Y));
+                var clicked = ImGui.Selectable(noviceLabel + "##noviceNetworkTab", isSelected, ImGuiSelectableFlags.None, tabSize);
+
+                DrawUnreadBadge(noviceNetworkUnread);
+
+                if (clicked && !isSelected)
+                {
+                    EnterNoviceNetworkView();
+                    noviceNetworkUnread = 0;
+                }
+            }
+
+            runningX += noviceTabWidth + spacing;
+        }
+        else if (noviceNetworkTabActive)
+        {
+            // Disconnected while this was the active view - fall back silently. activeTabId was
+            // never touched the whole time this was showing, so whichever fixed tab was active
+            // before is still remembered and picks right back up.
+            noviceNetworkTabActive = false;
+            noviceNetworkUnread = 0;
+            ViewChanged?.Invoke();
+        }
+
         // Snapshotted for the same reason as the fixed tabs above.
         foreach (var targetName in state.RecentWhisperTargets.ToArray())
         {
@@ -2093,6 +2394,7 @@ internal sealed class ChatWindow : Window
             // name so tab identity, drag/drop and quick-edit lookups are unaffected.
             var whisperText = FirstName(targetName);
             var tabWidth = ImGui.CalcTextSize(whisperText).X + ImGui.GetStyle().FramePadding.X * 2f;
+            tabStripTabStartOffsets.Add(runningX);
 
             // Computed (and, for a force-selected tab, acted on) regardless of whether this tab
             // is actually drawn below - a brand new conversation's tab appearing off the end of an
@@ -2133,8 +2435,28 @@ internal sealed class ChatWindow : Window
                 var locked = state.LockedWhisperTargets.Contains(targetName);
                 if (!locked)
                 {
-                    TabDragHelper.HandleHoverAndTearOff(() => plugin.MoveWhisperToSecondaryWindow(targetName));
-                    HandleReorderDrag(state.RecentWhisperTargets, state.RecentWhisperTargets.IndexOf(targetName));
+                    TabDragHelper.HandleHoverAndTearOff(targetName, whisperText, dropPos =>
+                    {
+                        if (!plugin.HasSecondaryWindow)
+                        {
+                            plugin.MoveWhisperToSecondaryWindow(targetName, dropPos);
+                        }
+                    });
+                    if (TabDragHelper.DrawReorderTarget(targetName, out var insertBefore) is { } droppedTargetName
+                        && !Guid.TryParse(droppedTargetName, out _))
+                    {
+                        // See the fixed-tab reorder accept above for why this is needed.
+                        plugin.MoveWhisperToMainWindow(droppedTargetName);
+
+                        var draggedIndex = state.RecentWhisperTargets.IndexOf(droppedTargetName);
+                        if (draggedIndex >= 0)
+                        {
+                            state.RecentWhisperTargets.RemoveAt(draggedIndex);
+                            var targetIndex = state.RecentWhisperTargets.IndexOf(targetName);
+                            state.RecentWhisperTargets.Insert(insertBefore ? targetIndex : targetIndex + 1, droppedTargetName);
+                            plugin.SaveConfiguration();
+                        }
+                    }
                 }
 
                 // Middle-click to close - a plain, well-known convention (browsers, IDEs, ...)
@@ -2183,10 +2505,12 @@ internal sealed class ChatWindow : Window
             if (scrollStart < tabStripScrollX)
             {
                 tabStripScrollX = MathF.Max(0f, scrollStart - spacing);
+                tabStripScrollRawTarget = tabStripScrollX;
             }
             else if (scrollEnd > tabStripScrollX + stripWidth)
             {
                 tabStripScrollX = scrollEnd - stripWidth + spacing;
+                tabStripScrollRawTarget = tabStripScrollX;
             }
         }
 
@@ -2197,7 +2521,11 @@ internal sealed class ChatWindow : Window
             var wheel = ImGui.GetIO().MouseWheel;
             if (wheel != 0f)
             {
-                tabStripScrollX = Math.Clamp(tabStripScrollX - wheel * TabStripWheelStepPx, 0f, MathF.Max(0f, tabStripContentWidth - stripWidth));
+                // Accumulates into the raw target, not the (snapped) display position directly -
+                // see tabStripScrollRawTarget's remarks for why adjusting the snapped value itself
+                // made the wheel appear to do nothing whenever a tab was wider than one tick.
+                tabStripScrollRawTarget = Math.Clamp(tabStripScrollRawTarget - wheel * TabStripWheelStepPx, 0f, MathF.Max(0f, tabStripContentWidth - stripWidth));
+                tabStripScrollX = SnapScrollToTabBoundary(tabStripScrollRawTarget);
             }
         }
 
@@ -2208,7 +2536,8 @@ internal sealed class ChatWindow : Window
         ImGui.BeginDisabled(tabStripScrollX >= maxScroll);
         if (ImGuiComponents.IconButton(FontAwesomeIcon.ChevronRight))
         {
-            tabStripScrollX = MathF.Min(maxScroll, tabStripScrollX + TabStripScrollStepPx);
+            tabStripScrollX = MathF.Min(maxScroll, NextTabBoundaryAfter(tabStripScrollX));
+            tabStripScrollRawTarget = tabStripScrollX;
         }
 
         ImGui.EndDisabled();
@@ -2244,36 +2573,6 @@ internal sealed class ChatWindow : Window
     }
 
     /// <summary>
-    /// Drag-to-reorder for the hand-rolled tab strip (see DrawLogTabBar) - swaps the item being
-    /// dragged with whichever neighbor it's been dragged past, then resets the drag delta so
-    /// continuing to hold the drag keeps stepping through further swaps at a steady pace instead
-    /// of firing dozens of swaps off one large motion. Must be called right after the Selectable
-    /// it applies to, same as TabDragHelper.
-    /// </summary>
-    private static void HandleReorderDrag<T>(IList<T> list, int index)
-    {
-        if (index < 0 || !ImGui.IsItemActive() || !ImGui.IsMouseDragging(ImGuiMouseButton.Left))
-        {
-            return;
-        }
-
-        var deltaX = ImGui.GetMouseDragDelta(ImGuiMouseButton.Left).X;
-        if (MathF.Abs(deltaX) < TabReorderDragThresholdPx)
-        {
-            return;
-        }
-
-        var swapWith = deltaX < 0f ? index - 1 : index + 1;
-        if (swapWith < 0 || swapWith >= list.Count)
-        {
-            return;
-        }
-
-        (list[index], list[swapWith]) = (list[swapWith], list[index]);
-        ImGui.ResetMouseDragDelta(ImGuiMouseButton.Left);
-    }
-
-    /// <summary>
     /// Paints a plain filled rectangle at the cursor's current screen position, sized to exactly
     /// match the tab about to be drawn there - a no-op for null (no color resolved for this tab,
     /// see DrawLogTabBar's callers). Has to run *before* the Selectable it's a background for, not
@@ -2282,7 +2581,7 @@ internal sealed class ChatWindow : Window
     /// what lets that native highlight and text still show up over a custom color instead of
     /// being covered by it.
     /// </summary>
-    private static void DrawTabBackgroundFill(Vector4? color, Vector2 size)
+    internal static void DrawTabBackgroundFill(Vector4? color, Vector2 size)
     {
         if (color is not { } fill)
         {
@@ -2309,6 +2608,13 @@ internal sealed class ChatWindow : Window
 
         activeTabId = newTab.Id;
         activeWhisperTabTarget = string.Empty;
+
+        // Without this, leaving the Novice Network tab for a fixed one changed activeTabId but
+        // left noviceNetworkTabActive true - DrawChatLogEntries/TrackUnreadForNewEntry check that
+        // flag *before* looking at activeTabId at all, so the log kept showing Novice Network
+        // content no matter which fixed tab now looked selected, reading as "stuck" on that tab.
+        noviceNetworkTabActive = false;
+
         LoadChannelSelection(newTab, state);
         ViewChanged?.Invoke();
     }
@@ -2351,6 +2657,24 @@ internal sealed class ChatWindow : Window
         state.LastWhisperTarget = target;
         state.LastChannel = ChatChannel.Whisper;
         activeWhisperTabTarget = target;
+
+        // See SwitchToFixedTab's matching remark - same reason this has to be cleared here too.
+        noviceNetworkTabActive = false;
+
+        ViewChanged?.Invoke();
+    }
+
+    /// <summary>
+    /// Switches the view to the auto-managed Novice Network tab - a pure display filter like a
+    /// fixed tab, not a send target, so unlike EnterWhisperView this deliberately never touches
+    /// state.LastChannel/activeTabId: leaving them alone is what lets the fallback in
+    /// DrawLogTabBar (on disconnect) return to exactly whatever fixed tab was active before,
+    /// with no separate "remembered channel" bookkeeping needed for this tab at all.
+    /// </summary>
+    internal void EnterNoviceNetworkView()
+    {
+        activeWhisperTabTarget = string.Empty;
+        noviceNetworkTabActive = true;
         ViewChanged?.Invoke();
     }
 
@@ -2497,7 +2821,7 @@ internal sealed class ChatWindow : Window
     /// touch the tab's own label, so unlike appending "(N)" to the label text, it can't affect
     /// the tab's measured width or shift its position in a Reorderable tab bar.
     /// </summary>
-    private static void DrawUnreadBadge(int count)
+    internal static void DrawUnreadBadge(int count)
     {
         if (count <= 0)
         {

@@ -133,6 +133,20 @@ public class Configuration : IPluginConfiguration
     public List<ChatTab> ChatTabs { get; set; } = new();
 
     /// <summary>
+    /// Which fixed tabs/whisper conversations currently live in the secondary chat window (see
+    /// SecondaryChatWindow) rather than the main one, plus that window's own position/size -
+    /// persisted so a layout like "main chat on the left, a torn-off loot log on the right"
+    /// survives a restart instead of everything snapping back into the main window every load.
+    /// </summary>
+    public HashSet<Guid> SecondaryChatTabIds { get; set; } = new();
+
+    public HashSet<string> SecondaryChatWhisperTargets { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public Vector2? SecondaryChatWindowPosition { get; set; }
+
+    public Vector2? SecondaryChatWindowSize { get; set; }
+
+    /// <summary>
     /// Off by default (tabs keep their plain, no-fill look). On, every tab in the strip gets
     /// TabStripBackgroundColor as its background unless it has its own override - a fixed tab via
     /// its own BackgroundColor, a whisper tab via WhisperTabBackgroundColours.

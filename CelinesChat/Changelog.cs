@@ -12,5 +12,6 @@ internal static class Changelog
         ("1.0.7", "Big Update"),
         ("1.0.8", "Fixed Gpose Fokus"),
         ("1.0.9", "Some fixes and Features"),
+        ("1.0.10", "Major Stuff added"),
     };
 }

@@ -28,6 +28,13 @@ html, body {
   flex-direction: column;
 }
 
+/* A plain [hidden] rule would tie in specificity with this class's own "display: flex" and lose
+   (author rules always beat the browser's default [hidden] { display: none } regardless of
+   source order) - this combined selector is specific enough to actually win. */
+.screen[hidden] {
+  display: none;
+}
+
 /* ----- Login ----- */
 
 #login-screen {

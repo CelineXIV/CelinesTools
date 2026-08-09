@@ -439,6 +439,17 @@ internal sealed class WebRoutes : IDisposable
     private void OnViewChanged()
     {
         hub.Broadcast(BuildFrame("view", null, BuildViewDto()));
+
+        // The "message" event only ever pushes newly-arriving entries filtered to whatever the
+        // view happened to be at that moment (see OnEntryAdded) - switching tabs/channels/whisper
+        // targets needs the *history* for the newly-selected view too, or the message list would
+        // just keep showing whatever the previous view had until new traffic happens to arrive.
+        var config = plugin.Configuration;
+        var mentionTerm = plugin.MentionFirstName;
+        var history = FilterToCurrentView(Tail(plugin.ChatLog.Snapshot(), 200))
+            .Select(entry => ToDto(entry, config, mentionTerm))
+            .ToList();
+        hub.Broadcast(BuildFrame("history", null, history));
     }
 
     private bool MatchesCurrentView(ChatLogEntry entry)

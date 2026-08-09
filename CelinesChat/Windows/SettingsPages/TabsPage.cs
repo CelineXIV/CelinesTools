@@ -68,6 +68,14 @@ internal sealed class TabsPage
                 ImGuiTreeNodeFlags.SpanAvailWidth | ImGuiTreeNodeFlags.FramePadding,
                 TabHeaderLabel(tab));
 
+            // SpanAvailWidth makes the tree node's own clickable area cover the whole row,
+            // including where the reorder/delete buttons render via SameLine right after it - by
+            // default Dear ImGui lets an earlier widget's hit area silently swallow clicks meant
+            // for something drawn on top of it later in the same spot (same class of overlap issue
+            // noted elsewhere in this file, re: the whisper tabs' close button), so without this
+            // the buttons looked clickable but every click just toggled the tree node instead.
+            ImGui.SetItemAllowOverlap();
+
             DrawTabToolbar(config, tab, i, out var removed);
             if (removed)
             {
@@ -306,6 +314,7 @@ internal sealed class TabsPage
         ChatCategory.Urgent => Loc.T("Channel.UrgentTooltip"),
         ChatCategory.Debug => Loc.T("Channel.DebugTooltip"),
         ChatCategory.SystemError => Loc.T("Channel.SystemErrorTooltip"),
+        ChatCategory.AmbientBattle => Loc.T("Channel.AmbientBattleTooltip"),
         _ => null,
     };
 

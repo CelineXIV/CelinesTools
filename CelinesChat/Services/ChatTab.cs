@@ -89,56 +89,113 @@ public sealed class ChatTab
         return true;
     }
 
-    public static ChatTab CreateDefaultAllTab()
+    /// <summary>
+    /// The fallback view that always has to exist, seeded on a brand new install with the general
+    /// chat categories plus notices/errors/system feedback and a couple of extras (loot, some FC
+    /// announcements) - not derived from LegacyDefaultCategories/CoreAnnouncementDefaultCategories
+    /// (those two now only matter for migrating a tab saved before this set was chosen), this is a
+    /// fixed snapshot of one real, in-use tab setup rather than an assembled "every core category"
+    /// default.
+    /// </summary>
+    public static ChatTab CreateDefaultGeneralTab()
     {
-        var included = new HashSet<ChatCategory>(ChannelDisplay.LegacyDefaultCategories);
-
-        // Plus Urgent/Error/System/Echo (see CoreAnnouncementDefaultCategories's remarks) - not
-        // every selectable category, though: Battle categories in particular (Damage, Miss,
-        // Action, ...) are extremely high-volume, and a brand new "Alle" tab flooding with combat
-        // spam by default would be a bad first impression. The rest of the Announcements group
-        // (loot, crafting, glamour, ...) and all of Battle are opt-in per tab via settings instead,
-        // matching the same choice made for existing tabs after an update (see Plugin's ctor).
-        foreach (var category in ChannelDisplay.CoreAnnouncementDefaultCategories)
-        {
-            included.Add(category);
-        }
-
         return new ChatTab
         {
-            Name = Loc.T("Tabs.DefaultAllName"),
-            IncludedChannels = included,
+            Name = "General",
+            IncludedChannels = new HashSet<ChatCategory>
+            {
+                ChatCategory.Say,
+                ChatCategory.Party,
+                ChatCategory.Whisper,
+                ChatCategory.Yell,
+                ChatCategory.Shout,
+                ChatCategory.FreeCompany,
+                ChatCategory.Linkshell,
+                ChatCategory.CrossWorldLinkshell,
+                ChatCategory.Alliance,
+                ChatCategory.PvpTeam,
+                ChatCategory.NoviceNetwork,
+                ChatCategory.StandardEmote,
+                ChatCategory.CustomEmote,
+                ChatCategory.Notice,
+                ChatCategory.Urgent,
+                ChatCategory.Debug,
+                ChatCategory.SystemMessage,
+                ChatCategory.SystemError,
+                ChatCategory.Echo,
+                ChatCategory.NoviceNetworkAnnouncements,
+                ChatCategory.FreeCompanyLoginLogout,
+                ChatCategory.LootNotice,
+                ChatCategory.LootRoll,
+            },
             Removable = false,
+            PositionLocked = true,
         };
     }
 
     /// <summary>
-    /// A second tab seeded alongside the general one on a brand new install, covering what
-    /// happens in battle (damage/misses/actions/items used/healing/buffs) plus item and gil
-    /// drops (loot notices/rolls) - unlike the general tab, these are opt-in-by-default here
-    /// specifically (not silently added to it) since they're high-volume in a way the general
-    /// chat categories aren't, and a separate tab keeps them out of the way of normal
-    /// conversation while still being one click away. Removable, unlike the general tab - this
-    /// one's just a starting convenience, not a fallback view that always has to exist.
+    /// A second tab seeded alongside the general one on a brand new install - every regular
+    /// conversation channel plus every linkshell/cross-world linkshell number, kept separate from
+    /// the general tab's own broader mix of notices/system feedback/loot. Removable, unlike the
+    /// general tab - this one's just a starting convenience, not a fallback view that always has
+    /// to exist.
     /// </summary>
-    public static ChatTab CreateDefaultBattleLootTab()
+    public static ChatTab CreateDefaultChatTab()
     {
         return new ChatTab
         {
-            Name = Loc.T("Tabs.DefaultBattleLootName"),
+            Name = "Chat",
             IncludedChannels = new HashSet<ChatCategory>
             {
-                ChatCategory.Damage,
-                ChatCategory.Miss,
-                ChatCategory.ActionUsed,
-                ChatCategory.ItemUsed,
-                ChatCategory.Healing,
-                ChatCategory.GainBuff,
-                ChatCategory.LoseBuff,
-                ChatCategory.GainDebuff,
-                ChatCategory.LoseDebuff,
+                ChatCategory.Say,
+                ChatCategory.Party,
+                ChatCategory.Whisper,
+                ChatCategory.FreeCompany,
+                ChatCategory.Linkshell,
+                ChatCategory.CrossWorldLinkshell,
+                ChatCategory.Alliance,
+                ChatCategory.PvpTeam,
+            },
+            Removable = true,
+        };
+    }
+
+    /// <summary>
+    /// A third tab seeded alongside the general one, covering system/gathering feedback and
+    /// Novice Network announcements - the more "background noise" side of what the general tab
+    /// already includes, split out for anyone who'd rather not have it mixed into regular chat.
+    /// </summary>
+    public static ChatTab CreateDefaultSystemTab()
+    {
+        return new ChatTab
+        {
+            Name = "System",
+            IncludedChannels = new HashSet<ChatCategory>
+            {
+                ChatCategory.SystemMessage,
+                ChatCategory.GatheringSystemMessage,
+                ChatCategory.NoviceNetworkAnnouncements,
+            },
+            Removable = true,
+        };
+    }
+
+    /// <summary>
+    /// A fourth tab seeded alongside the general one, covering item/gil drops and crafting/party-
+    /// recruitment notices - kept separate since it's a different kind of "feedback" than regular
+    /// conversation or system messages.
+    /// </summary>
+    public static ChatTab CreateDefaultLootTab()
+    {
+        return new ChatTab
+        {
+            Name = "Loot",
+            IncludedChannels = new HashSet<ChatCategory>
+            {
                 ChatCategory.LootNotice,
                 ChatCategory.LootRoll,
+                ChatCategory.PeriodicRecruitmentNotification,
+                ChatCategory.Crafting,
             },
             Removable = true,
         };

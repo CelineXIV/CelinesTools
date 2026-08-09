@@ -51,9 +51,21 @@ function showChat() {
 
 async function onLoginSubmit(ev) {
   ev.preventDefault();
+
+  // The server rate-limits /api/auth per IP (10s cooldown) regardless of whether an attempt
+  // succeeds - a double-click/double-tap firing two overlapping submits would always get the
+  // second one rejected with a confusing "rate limit" error for what the user experienced as one
+  // single login attempt. Guarding here (rather than only rate-limiting server-side) means that
+  // never happens in the first place.
+  const submitButton = ev.submitter ?? el("login-form").querySelector("button[type=submit]");
+  if (submitButton?.disabled) {
+    return;
+  }
+
   const code = el("login-code").value.trim();
   const errorEl = el("login-error");
   errorEl.hidden = true;
+  if (submitButton) submitButton.disabled = true;
 
   // fetch() has no built-in timeout - without this, a request that never gets a response (a
   // server-side hang, a dropped connection that doesn't reset cleanly) leaves the user staring at
@@ -79,6 +91,8 @@ async function onLoginSubmit(ev) {
   } catch {
     errorEl.textContent = "Could not reach the server.";
     errorEl.hidden = false;
+  } finally {
+    if (submitButton) submitButton.disabled = false;
   }
 }
 
@@ -109,6 +123,20 @@ function connectEvents() {
     state.view = JSON.parse(ev.data);
     renderViewPicker();
     renderChannelPicker();
+  });
+
+  // Sent right after "view" whenever the active tab/channel/whisper changes (from this device or
+  // any other) - replaces the message list with that view's own history, since "message" events
+  // only ever cover newly-arriving traffic from here on.
+  source.addEventListener("history", (ev) => {
+    markAlive();
+    const list = el("message-list");
+    list.textContent = "";
+    for (const msg of JSON.parse(ev.data)) {
+      appendMessage(msg);
+    }
+
+    list.scrollTop = list.scrollHeight;
   });
 
   source.addEventListener("heartbeat", markAlive);
