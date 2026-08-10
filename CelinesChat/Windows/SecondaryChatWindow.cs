@@ -92,7 +92,9 @@ internal sealed class SecondaryChatWindow : Window
 
         var availableWidth = ImGui.GetContentRegionAvail().X;
         ImGui.PushStyleColor(ImGuiCol.ChildBg, new Vector4(0f, 0f, 0f, config.ChatLogBackgroundOpacity));
-        ImGui.BeginChild("##secondaryChatLog", new Vector2(-1, -1), true);
+        // See ChatWindow.Draw's matching remarks on AlwaysVerticalScrollbar - same reflow-jitter
+        // risk applies here.
+        ImGui.BeginChild("##secondaryChatLog", new Vector2(-1, -1), true, ImGuiWindowFlags.AlwaysVerticalScrollbar);
         DrawFilteredEntries(config, availableWidth);
         ImGui.EndChild();
         ImGui.PopStyleColor();

@@ -294,7 +294,13 @@ public sealed class Plugin : IDalamudPlugin
         // undo a one-time hide. Restored in Dispose so a plugin unload/reload never leaves the
         // user without any chat at all.
         this.framework.Update += OnFrameworkUpdate;
+
+        // See NoviceNetworkService.ArmZoneChangeDisconnectGuard's remarks - a zone change is when
+        // a spontaneous, unrequested Novice Network reconnect has actually been observed.
+        this.clientState.TerritoryChanged += OnTerritoryChanged;
     }
+
+    private void OnTerritoryChanged(uint territoryId) => NoviceNetworkService.ArmZoneChangeDisconnectGuard();
 
     public void SaveConfiguration() => pluginInterface.SavePluginConfig(Configuration);
 
@@ -1120,6 +1126,7 @@ public sealed class Plugin : IDalamudPlugin
         // Runs regardless of whether the chat window is even open - see its own remarks on why a
         // retry loop tied to a window's Draw call wouldn't be reliable.
         NoviceNetworkService.TickAutoRetry(Log);
+        NoviceNetworkService.TickZoneChangeDisconnectGuard(Log);
 
         if (!keyState[VirtualKey.RETURN])
         {
@@ -1251,6 +1258,7 @@ public sealed class Plugin : IDalamudPlugin
         pluginInterface.UiBuilder.OpenConfigUi -= ToggleSettingsWindow;
         pluginInterface.LanguageChanged -= OnLanguageChanged;
         framework.Update -= OnFrameworkUpdate;
+        clientState.TerritoryChanged -= OnTerritoryChanged;
         SetNativeChatVisible(true);
 
         windowSystem.RemoveAllWindows();

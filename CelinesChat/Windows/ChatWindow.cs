@@ -344,7 +344,16 @@ internal sealed class ChatWindow : Window
         var inputBoxHeight = Math.Max(minInputBoxHeight, composeAreaHeight - measuredFooterHeight);
 
         ImGui.PushStyleColor(ImGuiCol.ChildBg, new Vector4(0f, 0f, 0f, config.ChatLogBackgroundOpacity));
-        ImGui.BeginChild("##chatLogScroll", new Vector2(-1, -(composeAreaHeight + SplitterHeight)), true);
+
+        // AlwaysVerticalScrollbar reserves the scrollbar's own width permanently, whether content
+        // currently overflows or not - without it, DrawChatLogEntries' one-per-frame availableWidth
+        // measurement (which every entry that frame wraps its text against) would shrink by the
+        // scrollbar's width the instant content height crossed the overflow threshold and grow back
+        // the instant it dropped back under it. Content height sits right at that threshold often
+        // (every new message, every evicted old one), so without this, text kept visibly reflowing
+        // between two different wrap widths for no reason a user could ever pin down - reported as
+        // "the chat sometimes jitters, no clear pattern," which is exactly what this looks like.
+        ImGui.BeginChild("##chatLogScroll", new Vector2(-1, -(composeAreaHeight + SplitterHeight)), true, ImGuiWindowFlags.AlwaysVerticalScrollbar);
         DrawChatLogEntries(config, state);
         ImGui.EndChild();
         ImGui.PopStyleColor();
@@ -974,7 +983,6 @@ internal sealed class ChatWindow : Window
             var isNew = !viewingHistory && entry.Sequence > lastSeenSequence;
             if (isNew)
             {
-                hasNewEntries = true;
                 TrackUnreadForNewEntry(config, state, entry, showingWhisper, showingNoviceNetwork, activeTab?.Id);
             }
 
@@ -1019,12 +1027,24 @@ internal sealed class ChatWindow : Window
                 continue;
             }
 
-            // A message you just sent yourself should always scroll into view regardless of where
-            // you'd scrolled to - unlike someone else's message, there's no "reading history on
-            // purpose" case where you wouldn't want to see your own reply land.
-            if (isNew && IsSelfAuthored(entry))
+            // Only counts as "something new arrived" for the auto-scroll decision below once an
+            // entry has actually made it past every filter above and is really part of *this*
+            // view - counting it the instant it's merely new anywhere in the shared buffer (this
+            // used to run before all those filters) meant activity in a completely different
+            // channel/tab - one you're not even looking at - could still yank your current view
+            // back to the bottom, which looked exactly like the chat randomly jumping for no
+            // reason whenever you'd scrolled up even slightly to reread something.
+            if (isNew)
             {
-                hasNewOwnMessageInView = true;
+                hasNewEntries = true;
+
+                // A message you just sent yourself should always scroll into view regardless of
+                // where you'd scrolled to - unlike someone else's message, there's no "reading
+                // history on purpose" case where you wouldn't want to see your own reply land.
+                if (IsSelfAuthored(entry))
+                {
+                    hasNewOwnMessageInView = true;
+                }
             }
 
             DrawLogEntry(entry, config, mentionTerm, index, availableWidth, showingWhisper);
