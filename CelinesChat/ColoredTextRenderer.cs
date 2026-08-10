@@ -9,29 +9,88 @@ namespace CelinesChat;
 
 internal static class ColoredTextRenderer
 {
+    /// <summary>
+    /// What a rendered word links to, if anything - either a real SeString payload (map/item/
+    /// Dalamud link, already part of the message's own data) or a plain URL typed straight into
+    /// the message text (e.g. "https://example.com" pasted by whoever sent it, with no special
+    /// payload backing it at all). Kept as its own tiny type rather than overloading Payload
+    /// itself - none of Dalamud's actual Payload subtypes have a slot for "just an arbitrary URL
+    /// string," and every one of them carries protocol-specific fields that don't apply here.
+    /// </summary>
+    internal sealed class LinkTarget
+    {
+        public Payload? Payload { get; }
+
+        public string? Url { get; }
+
+        public LinkTarget(Payload payload) => Payload = payload;
+
+        public LinkTarget(string url) => Url = url;
+    }
+
+    /// <summary>
+    /// Trailing sentence punctuation a URL commonly ends up glued to ("check this out:
+    /// https://example.com." or "(https://example.com)") gets trimmed off before validating and
+    /// linkifying - otherwise the period/parenthesis would either break the link or just render
+    /// as part of the clickable text, neither of which is what the sender meant.
+    /// </summary>
+    private static readonly char[] UrlTrailingPunctuation = { '.', ',', ')', ']', '!', '?', ':', ';' };
+
+    /// <summary>
+    /// True (with the fully-qualified form in <paramref name="url"/>) for anything that looks
+    /// like a web link a browser could open - "http://"/"https://" as-is, or a bare "www."
+    /// address with an assumed "https://" in front (the most common way people actually type a
+    /// link in chat, without a scheme). Validated via Uri.TryCreate rather than ad-hoc string
+    /// checks so genuinely malformed text never gets linkified.
+    /// </summary>
+    private static bool TryGetUrl(string word, out string url)
+    {
+        var candidate = word.TrimEnd(UrlTrailingPunctuation);
+
+        if (candidate.StartsWith("www.", StringComparison.OrdinalIgnoreCase))
+        {
+            candidate = "https://" + candidate;
+        }
+
+        if ((candidate.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || candidate.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            && Uri.TryCreate(candidate, UriKind.Absolute, out var uri)
+            && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps)
+            && uri.Host.Contains('.'))
+        {
+            url = candidate;
+            return true;
+        }
+
+        url = string.Empty;
+        return false;
+    }
+
     public static void Draw(
         string text,
         Vector4 defaultColor,
         Vector4 emoteColor,
         Vector4 oocColor,
         Vector4 mentionColor,
+        Vector4 linkColor,
         float availableWidth,
         string mentionTerm = "",
         float initialLineWidthUsed = 0f,
         string highlightTerm = "",
-        Vector4? highlightColor = null)
+        Vector4? highlightColor = null,
+        Action<LinkTarget>? onLinkClicked = null)
     {
         var state = new TokenizeState();
         DrawSequence(
             Enumerate(Tokenize(text, mentionTerm, state)),
-            defaultColor, emoteColor, oocColor, mentionColor, default,
-            availableWidth, initialLineWidthUsed, highlightTerm, highlightColor, null);
+            defaultColor, emoteColor, oocColor, mentionColor, linkColor,
+            availableWidth, initialLineWidthUsed, highlightTerm, highlightColor, onLinkClicked);
 
-        static IEnumerable<(string Word, TextSegmentKind Kind, Payload? Link, Vector4? Foreground)> Enumerate(IEnumerable<(string Word, TextSegmentKind Kind)> words)
+        static IEnumerable<(string Word, TextSegmentKind Kind, LinkTarget? Link, Vector4? Foreground)> Enumerate(IEnumerable<(string Word, TextSegmentKind Kind)> words)
         {
             foreach (var (word, kind) in words)
             {
-                yield return (word, kind, null, null);
+                var link = TryGetUrl(word, out var url) ? new LinkTarget(url) : null;
+                yield return (word, kind, link, null);
             }
         }
     }
@@ -61,8 +120,8 @@ internal static class ColoredTextRenderer
         float initialLineWidthUsed,
         string highlightTerm,
         Vector4? highlightColor,
-        Action<Payload> onLinkClicked,
-        Action<Payload>? onLinkHovered = null)
+        Action<LinkTarget> onLinkClicked,
+        Action<LinkTarget>? onLinkHovered = null)
     {
         DrawSequence(
             BuildRuns(payloads, mentionTerm),
@@ -81,7 +140,7 @@ internal static class ColoredTextRenderer
     // internal (not private) so Services/ColoredTextSegmenter can reuse this exact same
     // payload-walking/tokenization logic to build data for the web client, instead of
     // reimplementing OOC/emote/mention/link parsing a second time in JavaScript.
-    internal static IEnumerable<(string Word, TextSegmentKind Kind, Payload? Link, Vector4? Foreground)> BuildRuns(IReadOnlyList<Payload> payloads, string mentionTerm)
+    internal static IEnumerable<(string Word, TextSegmentKind Kind, LinkTarget? Link, Vector4? Foreground)> BuildRuns(IReadOnlyList<Payload> payloads, string mentionTerm)
     {
         var state = new TokenizeState();
         Payload? currentLink = null;
@@ -110,9 +169,15 @@ internal static class ColoredTextRenderer
                     break;
                 case ITextProvider textProvider:
                     var currentForeground = foregroundStack.Count > 0 ? foregroundStack.Peek() : (Vector4?)null;
+                    var currentLinkTarget = currentLink != null ? new LinkTarget(currentLink) : null;
                     foreach (var (word, kind) in Tokenize(textProvider.Text, mentionTerm, state))
                     {
-                        yield return (word, kind, currentLink, currentForeground);
+                        // A plain-typed URL sitting inside a run that's *already* linked to
+                        // something else (a map/item/Dalamud link's own label text) keeps that
+                        // existing link rather than being reinterpreted as a web link - only
+                        // otherwise-plain text gets checked for a URL at all.
+                        var link = currentLinkTarget ?? (TryGetUrl(word, out var url) ? new LinkTarget(url) : null);
+                        yield return (word, kind, link, currentForeground);
                     }
 
                     break;
@@ -139,7 +204,7 @@ internal static class ColoredTextRenderer
     /// (its only caller until now) so Services/ColoredTextSegmenter can resolve the exact same
     /// color for the web client's JSON without re-deriving this precedence rule a second time.
     /// </summary>
-    internal static Vector4 ResolveColor(Vector4? foreground, Payload? link, TextSegmentKind kind, Vector4 defaultColor, Vector4 emoteColor, Vector4 oocColor, Vector4 mentionColor, Vector4 linkColor)
+    internal static Vector4 ResolveColor(Vector4? foreground, LinkTarget? link, TextSegmentKind kind, Vector4 defaultColor, Vector4 emoteColor, Vector4 oocColor, Vector4 mentionColor, Vector4 linkColor)
     {
         return foreground ?? (link != null
             ? linkColor
@@ -153,7 +218,7 @@ internal static class ColoredTextRenderer
     }
 
     private static void DrawSequence(
-        IEnumerable<(string Word, TextSegmentKind Kind, Payload? Link, Vector4? Foreground)> words,
+        IEnumerable<(string Word, TextSegmentKind Kind, LinkTarget? Link, Vector4? Foreground)> words,
         Vector4 defaultColor,
         Vector4 emoteColor,
         Vector4 oocColor,
@@ -163,8 +228,8 @@ internal static class ColoredTextRenderer
         float initialLineWidthUsed,
         string highlightTerm,
         Vector4? highlightColor,
-        Action<Payload>? onLinkClicked,
-        Action<Payload>? onLinkHovered = null)
+        Action<LinkTarget>? onLinkClicked,
+        Action<LinkTarget>? onLinkHovered = null)
     {
         // See the remarks on Draw's initialLineWidthUsed parameter in git history/callers - this
         // is measured once per frame by the caller, at the left edge of the log area before any
@@ -188,7 +253,7 @@ internal static class ColoredTextRenderer
         List<string>? runWords = null;
         var runWidth = 0f;
         Vector4 runColor = default;
-        Payload? runLink = null;
+        LinkTarget? runLink = null;
 
         void FlushRun()
         {
@@ -285,7 +350,7 @@ internal static class ColoredTextRenderer
     /// handling. Callers own line-wrap decisions and call ImGui.SameLine beforehand as needed -
     /// this only draws.
     /// </summary>
-    private static void DrawUnit(string display, string bareText, Vector4 color, Payload? link, Action<Payload>? onLinkClicked, Action<Payload>? onLinkHovered)
+    private static void DrawUnit(string display, string bareText, Vector4 color, LinkTarget? link, Action<LinkTarget>? onLinkClicked, Action<LinkTarget>? onLinkHovered)
     {
         ImGui.TextColored(color, display);
 

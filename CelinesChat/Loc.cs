@@ -198,6 +198,8 @@ internal static class Loc
         ["Tabs.RemoveButton"] = ("Remove tab", "Tab entfernen"),
         ["Tabs.CannotRemoveDefault"] = ("The default tab can't be removed.", "Der Standard-Tab kann nicht entfernt werden."),
         ["Tabs.PositionLocked"] = ("Lock position", "Position sperren"),
+        ["Tabs.Muted"] = ("Muted", "Stummgeschaltet"),
+        ["Tabs.MutedTooltip"] = ("Missed messages in this tab no longer show an unread number - the tab still works normally otherwise.", "Verpasste Nachrichten in diesem Tab zeigen keine Zahl mehr an - der Tab funktioniert ansonsten ganz normal weiter."),
         ["Tabs.CloseConversation"] = ("Close conversation", "Unterhaltung schliessen"),
         ["Tabs.WhisperColorLabel"] = ("Color for this person", "Farbe fuer diese Person"),
         ["Tabs.BackgroundColorLabel"] = ("Tab background", "Tab-Hintergrund"),

@@ -14,5 +14,6 @@ internal static class Changelog
         ("1.0.9", "Some fixes and Features"),
         ("1.0.10", "Major Stuff added"),
         ("1.0.11", "Scrollfix"),
+        ("1.0.12", "Added Link support"),
     };
 }

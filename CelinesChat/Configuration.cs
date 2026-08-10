@@ -57,6 +57,14 @@ public class CharacterState
     /// </summary>
     public HashSet<string> LockedWhisperTargets { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Whisper targets whose tab no longer bumps its unread badge for a missed message - set via
+    /// the same right-click quick-edit popup as LockedWhisperTargets above. The conversation is
+    /// still tracked and still shows up when you switch to it, it just doesn't demand attention
+    /// with a number while you're not looking.
+    /// </summary>
+    public HashSet<string> MutedWhisperTargets { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
     public int LinkshellNumber { get; set; } = 1;
 
     public int CrossWorldLinkshellNumber { get; set; } = 1;

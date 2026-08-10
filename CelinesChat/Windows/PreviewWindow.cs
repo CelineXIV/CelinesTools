@@ -6,6 +6,11 @@ namespace CelinesChat.Windows;
 
 internal sealed class PreviewWindow : Window
 {
+    // Matches ChatWindow/SecondaryChatWindow's own link color - a plain URL in the outgoing draft
+    // gets linkified here too (see ColoredTextRenderer.TryGetUrl), same as it would once actually
+    // sent and shown in the log.
+    private static readonly Vector4 LinkColor = new(0.4f, 0.7f, 1f, 1f);
+
     private readonly Plugin plugin;
 
     public PreviewWindow(Plugin plugin) : base(WindowTitles.Preview)
@@ -44,7 +49,7 @@ internal sealed class PreviewWindow : Window
         var availableWidth = ImGui.GetContentRegionAvail().X;
         for (var i = 0; i < chunks.Count; i++)
         {
-            ColoredTextRenderer.Draw(chunks[i], config.DefaultTextColor, config.EmoteTextColor, config.OocTextColor, config.MentionColor, availableWidth);
+            ColoredTextRenderer.Draw(chunks[i], config.DefaultTextColor, config.EmoteTextColor, config.OocTextColor, config.MentionColor, LinkColor, availableWidth);
             ImGui.TextDisabled(Loc.T("Compose.CharCount", chunks[i].Length, config.MaxMessageLength));
             if (i < chunks.Count - 1)
             {

@@ -42,8 +42,10 @@ internal static class ColoredTextSegmenter
         return Merge(Widen(ColoredTextRenderer.Tokenize(text, mentionTerm, state)), defaultColor, emoteColor, oocColor, mentionColor, default, null);
 
         // Mirrors ColoredTextRenderer.Draw's own local "Enumerate" helper - plain tokenized words
-        // have no link/native-foreground-color concept, so both are always null here.
-        static IEnumerable<(string Word, ColoredTextRenderer.TextSegmentKind Kind, Payload? Link, Vector4? Foreground)> Widen(
+        // have no native-foreground-color concept, and (unlike the desktop window) this history
+        // path doesn't linkify plain-text URLs either, since a history segment has no click
+        // dispatch wired up on the web client side yet.
+        static IEnumerable<(string Word, ColoredTextRenderer.TextSegmentKind Kind, ColoredTextRenderer.LinkTarget? Link, Vector4? Foreground)> Widen(
             IEnumerable<(string Word, ColoredTextRenderer.TextSegmentKind Kind)> words)
         {
             foreach (var (word, kind) in words)
@@ -59,7 +61,7 @@ internal static class ColoredTextSegmenter
     /// count, just emitting data instead of draw calls.
     /// </summary>
     private static List<WebTextSegmentDto> Merge(
-        IEnumerable<(string Word, ColoredTextRenderer.TextSegmentKind Kind, Payload? Link, Vector4? Foreground)> words,
+        IEnumerable<(string Word, ColoredTextRenderer.TextSegmentKind Kind, ColoredTextRenderer.LinkTarget? Link, Vector4? Foreground)> words,
         Vector4 defaultColor,
         Vector4 emoteColor,
         Vector4 oocColor,
@@ -70,7 +72,7 @@ internal static class ColoredTextSegmenter
         var segments = new List<WebTextSegmentDto>();
         List<string>? runWords = null;
         var runColor = default(Vector4);
-        Payload? runLink = null;
+        ColoredTextRenderer.LinkTarget? runLink = null;
 
         void Flush()
         {
@@ -83,7 +85,12 @@ internal static class ColoredTextSegmenter
             {
                 Text = string.Join(' ', runWords),
                 ColorCss = ToCssColor(runColor),
-                LinkIndex = FindPayloadIndex(payloads, runLink),
+                // A plain-typed web URL (LinkTarget.Url) has no backing Payload at all, so it has
+                // no index into entry.Payloads to give the web client - FindPayloadIndex naturally
+                // returns null for it, same as any other unlinked run. The web client doesn't
+                // linkify those yet (see BuildSegments' history-path remarks); only real map/item/
+                // Dalamud link payloads are clickable there for now.
+                LinkIndex = FindPayloadIndex(payloads, runLink?.Payload),
             });
             runWords = null;
         }

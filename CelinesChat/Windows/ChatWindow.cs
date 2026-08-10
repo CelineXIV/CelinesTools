@@ -1090,7 +1090,7 @@ internal sealed class ChatWindow : Window
                 continue;
             }
 
-            if (!tab.Matches(entry.ChatType))
+            if (!tab.Matches(entry.ChatType) || tab.Muted)
             {
                 continue;
             }
@@ -1124,7 +1124,7 @@ internal sealed class ChatWindow : Window
 
         plugin.RememberWhisperTarget(state, tabKey);
 
-        if (!IsViewingWhisperTarget(tabKey, entry.Sender))
+        if (!IsViewingWhisperTarget(tabKey, entry.Sender) && !state.MutedWhisperTargets.Contains(tabKey))
         {
             whisperUnreadCounts[tabKey] = whisperUnreadCounts.GetValueOrDefault(tabKey) + 1;
         }
@@ -1266,8 +1266,24 @@ internal sealed class ChatWindow : Window
                 prefixSize.X + namePartSize.X,
                 logSearchFilter,
                 SearchHighlightColor,
-                payload => plugin.HandleChatLinkClicked(payload, payloads),
-                plugin.OnChatLinkHovered);
+                target =>
+                {
+                    if (target.Url != null)
+                    {
+                        OpenUrl(target.Url, plugin);
+                    }
+                    else if (target.Payload != null)
+                    {
+                        plugin.HandleChatLinkClicked(target.Payload, payloads);
+                    }
+                },
+                target =>
+                {
+                    if (target.Payload != null)
+                    {
+                        plugin.OnChatLinkHovered(target.Payload);
+                    }
+                });
         }
         else
         {
@@ -1277,11 +1293,19 @@ internal sealed class ChatWindow : Window
                 config.EmoteTextColor,
                 config.OocTextColor,
                 config.MentionColor,
+                LinkColor,
                 availableWidth,
                 mentionTerm,
                 prefixSize.X + namePartSize.X,
                 logSearchFilter,
-                SearchHighlightColor);
+                SearchHighlightColor,
+                target =>
+                {
+                    if (target.Url != null)
+                    {
+                        OpenUrl(target.Url, plugin);
+                    }
+                });
         }
 
         ImGui.Spacing();
@@ -2613,6 +2637,24 @@ internal sealed class ChatWindow : Window
     }
 
     /// <summary>
+    /// Opens a plain-typed web URL (see ColoredTextRenderer.LinkTarget/TryGetUrl) in the user's
+    /// default browser - the same UseShellExecute launch already used elsewhere in this file for
+    /// opening the logs folder, just handed a URL instead of a file path. Shared by both windows'
+    /// link-click handlers rather than duplicated.
+    /// </summary>
+    internal static void OpenUrl(string url, Plugin plugin)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            plugin.Log.Warning(ex, $"[CelinesChat] Konnte Link nicht oeffnen: {url}");
+        }
+    }
+
+    /// <summary>
     /// Switches to a fixed tab, saving the current send-channel selection into whichever fixed
     /// tab is being left (skipped if a whisper conversation was being viewed instead - its
     /// "Whisper" channel isn't something to save back into the fixed tab underneath it, since
@@ -2725,6 +2767,18 @@ internal sealed class ChatWindow : Window
             plugin.SaveConfiguration();
         }
 
+        var muted = tab.Muted;
+        if (ImGui.Checkbox(Loc.T("Tabs.Muted") + "##mute" + tab.Id, ref muted))
+        {
+            tab.Muted = muted;
+            plugin.SaveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Tabs.MutedTooltip"));
+        }
+
         // Falls back to Configuration.TabStripBackgroundColor (if enabled) when null - see
         // DrawTabBackgroundFill's callers.
         var tabBg = tab.BackgroundColor ?? plugin.Configuration.TabStripBackgroundColor;
@@ -2786,6 +2840,26 @@ internal sealed class ChatWindow : Window
             }
 
             plugin.SaveConfiguration();
+        }
+
+        var muted = state.MutedWhisperTargets.Contains(targetName);
+        if (ImGui.Checkbox(Loc.T("Tabs.Muted") + "##muteWhisper" + targetName, ref muted))
+        {
+            if (muted)
+            {
+                state.MutedWhisperTargets.Add(targetName);
+            }
+            else
+            {
+                state.MutedWhisperTargets.Remove(targetName);
+            }
+
+            plugin.SaveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Tabs.MutedTooltip"));
         }
 
         var config = plugin.Configuration;

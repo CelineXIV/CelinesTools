@@ -419,8 +419,24 @@ internal sealed class SecondaryChatWindow : Window
                 prefixSize.X + namePartSize.X,
                 string.Empty,
                 null,
-                payload => plugin.HandleChatLinkClicked(payload, payloads),
-                plugin.OnChatLinkHovered);
+                target =>
+                {
+                    if (target.Url != null)
+                    {
+                        ChatWindow.OpenUrl(target.Url, plugin);
+                    }
+                    else if (target.Payload != null)
+                    {
+                        plugin.HandleChatLinkClicked(target.Payload, payloads);
+                    }
+                },
+                target =>
+                {
+                    if (target.Payload != null)
+                    {
+                        plugin.OnChatLinkHovered(target.Payload);
+                    }
+                });
         }
         else
         {
@@ -430,9 +446,19 @@ internal sealed class SecondaryChatWindow : Window
                 config.EmoteTextColor,
                 config.OocTextColor,
                 config.MentionColor,
+                LinkColor,
                 availableWidth,
                 plugin.MentionFirstName,
-                prefixSize.X + namePartSize.X);
+                prefixSize.X + namePartSize.X,
+                string.Empty,
+                null,
+                target =>
+                {
+                    if (target.Url != null)
+                    {
+                        ChatWindow.OpenUrl(target.Url, plugin);
+                    }
+                });
         }
 
         ImGui.Spacing();

@@ -65,6 +65,13 @@ public sealed class ChatTab
     public Vector4? BackgroundColor { get; set; }
 
     /// <summary>
+    /// Suppresses this tab's unread badge for a missed message - set via the right-click
+    /// quick-edit popup. The tab still tracks and shows everything as normal while you're
+    /// actually looking at it; it just stops demanding attention with a number while you aren't.
+    /// </summary>
+    public bool Muted { get; set; }
+
+    /// <summary>
     /// Whether a message of this type belongs in this tab - the category check every tab has
     /// always done, refined for Linkshell/CrossWorldLinkshell by which specific numbers were
     /// picked (see IncludedLinkshellNumbers/IncludedCrossWorldLinkshellNumbers above).
