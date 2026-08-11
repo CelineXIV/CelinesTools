@@ -48,6 +48,9 @@ public class Configuration : IPluginConfiguration
     /// <summary>Off by default - opens a separate window that live-mirrors Glamourer's own design list, letting you attach a preview image per design and apply it to yourself.</summary>
     public bool GlamourerPreviewEnabled { get; set; }
 
+    /// <summary>Off (classic tree+details view) by default - switches GlamourerPreviewWindow to the folder-tabs+thumbnail-grid view instead.</summary>
+    public bool GlamourerPreviewGridView { get; set; }
+
     /// <summary>Off by default - shows overlay(s) marking the slidecast window near the end of a cast.</summary>
     public bool SlidecastEnabled { get; set; }
 

@@ -1,6 +1,9 @@
 using System;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface;
+using Dalamud.Interface.Components;
 using FFXIVClientStructs.FFXIV.Client.UI;
+using CelinesChat.Windows;
 
 namespace CelinesChat.Windows.SettingsPages;
 
@@ -136,6 +139,13 @@ internal sealed class GeneralPage
             plugin.SaveConfiguration();
         }
 
+        var blinkWhisperTabs = config.BlinkUnreadWhisperTabs;
+        if (ImGui.Checkbox(Loc.T("Settings.BlinkUnreadWhisperTabs"), ref blinkWhisperTabs))
+        {
+            config.BlinkUnreadWhisperTabs = blinkWhisperTabs;
+            plugin.SaveConfiguration();
+        }
+
         // Applies to every tab that doesn't have its own override - a fixed tab via its
         // right-click quick-edit popup, a whisper tab via the same popup's color picker.
         ImGui.BeginDisabled(!tabBgEnabled);
@@ -149,7 +159,82 @@ internal sealed class GeneralPage
 
         ImGui.Unindent();
         ImGui.EndDisabled();
+
+        ImGui.Separator();
+        ImGui.TextUnformatted(Loc.T("Settings.ToolbarHeader"));
+
+        ImGui.SetNextItemWidth(180);
+        var iconPackIndex = (int)config.ToolbarIconPack;
+        if (ImGui.Combo(Loc.T("Settings.ToolbarIconPack"), ref iconPackIndex, ToolbarIconPackLabels, ToolbarIconPackLabels.Length))
+        {
+            config.ToolbarIconPack = (ToolbarIconPack)iconPackIndex;
+            plugin.SaveConfiguration();
+        }
+
+        // Only meaningful for the glass packs - Classic keeps using ImGui's own theme colors
+        // untouched, same as it always did.
+        var isGlassPack = config.ToolbarIconPack != ToolbarIconPack.Classic;
+        ImGui.BeginDisabled(!isGlassPack);
+        ImGui.Indent();
+
+        var iconBgColor = config.ToolbarIconBackgroundColor;
+        if (ImGui.ColorEdit4(Loc.T("Settings.ToolbarIconBackgroundColor"), ref iconBgColor))
+        {
+            config.ToolbarIconBackgroundColor = iconBgColor;
+            plugin.SaveConfiguration();
+        }
+
+        var useCustomIconColor = config.ToolbarUseCustomIconColor;
+        if (ImGui.Checkbox(Loc.T("Settings.ToolbarUseCustomIconColor"), ref useCustomIconColor))
+        {
+            config.ToolbarUseCustomIconColor = useCustomIconColor;
+            plugin.SaveConfiguration();
+        }
+
+        ImGui.BeginDisabled(!useCustomIconColor);
+        var iconColor = config.ToolbarIconColor;
+        if (ImGui.ColorEdit4(Loc.T("Settings.ToolbarIconColor"), ref iconColor))
+        {
+            config.ToolbarIconColor = iconColor;
+            plugin.SaveConfiguration();
+        }
+
+        ImGui.EndDisabled();
+
+        ImGui.Unindent();
+        ImGui.EndDisabled();
+
+        // A couple of real toolbar buttons rendered right here in whichever pack/colors are
+        // currently selected - a combo label and color swatches alone don't convey what the
+        // result actually looks like.
+        ImGui.TextDisabled(Loc.T("Settings.ToolbarIconPackPreview"));
+        ImGui.SameLine();
+
+        if (config.ToolbarIconPack == ToolbarIconPack.Classic)
+        {
+            ImGuiComponents.IconButton(FontAwesomeIcon.Cog);
+            ImGui.SameLine();
+            ImGuiComponents.IconButton(FontAwesomeIcon.Wifi);
+            ImGui.SameLine();
+            ImGuiComponents.IconButton(FontAwesomeIcon.Users);
+        }
+        else
+        {
+            var previewIconColor = useCustomIconColor ? iconColor : ImGui.GetStyle().Colors[(int)ImGuiCol.Text];
+            GlassIconButton.Draw(FontAwesomeIcon.Cog, config.ToolbarIconPack, iconBgColor, previewIconColor, "##preview1");
+            ImGui.SameLine();
+            GlassIconButton.Draw(FontAwesomeIcon.Wifi, config.ToolbarIconPack, iconBgColor, previewIconColor, "##preview2");
+            ImGui.SameLine();
+            GlassIconButton.Draw(FontAwesomeIcon.Users, config.ToolbarIconPack, iconBgColor, previewIconColor, "##preview3");
+        }
     }
+
+    private static readonly string[] ToolbarIconPackLabels =
+    {
+        Loc.T("Settings.ToolbarIconPack.Classic"),
+        Loc.T("Settings.ToolbarIconPack.AeroGlass"),
+        Loc.T("Settings.ToolbarIconPack.FrostedGlass"),
+    };
 
     /// <summary>
     /// A 1-16 picker for one of the game's own built-in sound effect slots (the same ones

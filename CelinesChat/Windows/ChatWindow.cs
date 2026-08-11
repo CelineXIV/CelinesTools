@@ -199,9 +199,14 @@ internal sealed class ChatWindow : Window
         IsOpen = true;
 
         var initialState = plugin.GetCharacterState();
-        if (initialState.LastChannel == ChatChannel.Whisper)
+        if (initialState.LastChannel == ChatChannel.Whisper && !string.IsNullOrEmpty(initialState.LastWhisperTarget))
         {
-            activeWhisperTabTarget = initialState.LastWhisperTarget;
+            // Routed through RememberWhisperTarget (not a direct assignment) for the same reason
+            // EnterWhisperView now does - restoring last session's active whisper view used to
+            // just set activeWhisperTabTarget straight from the saved value with no guarantee a
+            // tab for it was actually still in the list (e.g. if that conversation had been
+            // evicted from a previous, buggier build) - correct content, no visible tab.
+            activeWhisperTabTarget = plugin.RememberWhisperTarget(initialState, initialState.LastWhisperTarget);
             pendingTabForceSelect = activeWhisperTabTarget;
         }
 
@@ -271,8 +276,10 @@ internal sealed class ChatWindow : Window
 
         if (plugin.PendingWhisperTarget is { } pendingTarget)
         {
+            // EnterWhisperView now resolves/ensures the tab and sets pendingTabForceSelect
+            // itself - doing it again here with the raw (possibly unresolved) pendingTarget would
+            // overwrite that with a key that might not actually match anything in the tab list.
             EnterWhisperView(config, state, pendingTarget);
-            pendingTabForceSelect = pendingTarget;
             plugin.PendingWhisperTarget = null;
         }
 
@@ -495,7 +502,7 @@ internal sealed class ChatWindow : Window
     /// </summary>
     private void DrawChannelPickerButton(Configuration config, CharacterState state)
     {
-        if (ImGuiComponents.IconButton(FontAwesomeIcon.Comment))
+        if (DrawToolbarIconButton(FontAwesomeIcon.Comment))
         {
             ImGui.OpenPopup("##channelPicker");
         }
@@ -591,7 +598,6 @@ internal sealed class ChatWindow : Window
         if (channel == ChatChannel.Whisper && !string.IsNullOrEmpty(state.LastWhisperTarget))
         {
             EnterWhisperView(config, state, state.LastWhisperTarget);
-            pendingTabForceSelect = activeWhisperTabTarget;
         }
         else
         {
@@ -602,23 +608,47 @@ internal sealed class ChatWindow : Window
         ViewChanged?.Invoke();
     }
 
+    /// <summary>
+    /// Every log-toolbar icon button (see DrawLogToolbar/DrawRpActionsMenu) routes through here
+    /// instead of calling ImGuiComponents.IconButton directly, so Configuration.ToolbarIconPack
+    /// picks the chrome for the whole row in one place rather than needing every call site to
+    /// branch on it individually.
+    /// </summary>
+    /// <param name="colorOverride">
+    /// A per-button dynamic color (the search icon turning orange while a filter's active, Novice
+    /// Network's connected/connecting pulse) - takes priority over Configuration.ToolbarIconColor
+    /// even when the user's turned that on, exactly like it did back when these were plain
+    /// PushStyleColor(ImGuiCol.Text, ...) wraps around a bare ImGuiComponents.IconButton call.
+    /// </param>
+    private bool DrawToolbarIconButton(FontAwesomeIcon icon, Vector4? colorOverride = null)
+    {
+        var config = plugin.Configuration;
+        if (config.ToolbarIconPack == ToolbarIconPack.Classic)
+        {
+            if (colorOverride is { } classicColor)
+            {
+                ImGui.PushStyleColor(ImGuiCol.Text, classicColor);
+                var clicked = ImGuiComponents.IconButton(icon);
+                ImGui.PopStyleColor();
+                return clicked;
+            }
+
+            return ImGuiComponents.IconButton(icon);
+        }
+
+        var iconColor = colorOverride
+            ?? (config.ToolbarUseCustomIconColor ? config.ToolbarIconColor : ImGui.GetStyle().Colors[(int)ImGuiCol.Text]);
+
+        return GlassIconButton.Draw(icon, config.ToolbarIconPack, config.ToolbarIconBackgroundColor, iconColor);
+    }
+
     private void DrawLogToolbar(Configuration config, CharacterState state)
     {
         // No left-click action on purpose - the search box used to sit inline here all the time;
         // now it only shows up in a small popup on right-click, to keep this row compact. The
         // icon still turns orange while a filter is active as a reminder it's not "just empty".
         var hasActiveSearch = logSearchFilter.Length > 0;
-        if (hasActiveSearch)
-        {
-            ImGui.PushStyleColor(ImGuiCol.Text, SearchHighlightColor);
-        }
-
-        ImGuiComponents.IconButton(FontAwesomeIcon.Search);
-
-        if (hasActiveSearch)
-        {
-            ImGui.PopStyleColor();
-        }
+        DrawToolbarIconButton(FontAwesomeIcon.Search, hasActiveSearch ? SearchHighlightColor : null);
 
         if (ImGui.IsItemHovered())
         {
@@ -633,7 +663,7 @@ internal sealed class ChatWindow : Window
         }
 
         ImGui.SameLine();
-        if (ImGuiComponents.IconButton(FontAwesomeIcon.CalendarAlt))
+        if (DrawToolbarIconButton(FontAwesomeIcon.CalendarAlt))
         {
             ImGui.OpenPopup("##historyDatesPopup");
         }
@@ -646,7 +676,7 @@ internal sealed class ChatWindow : Window
         DrawHistoryDatesPopup();
 
         ImGui.SameLine();
-        if (ImGuiComponents.IconButton(FontAwesomeIcon.FolderOpen))
+        if (DrawToolbarIconButton(FontAwesomeIcon.FolderOpen))
         {
             Process.Start(new ProcessStartInfo(plugin.ChatLog.LogsFolderPath) { UseShellExecute = true });
         }
@@ -657,7 +687,7 @@ internal sealed class ChatWindow : Window
         }
 
         ImGui.SameLine();
-        if (ImGuiComponents.IconButton(FontAwesomeIcon.Eraser))
+        if (DrawToolbarIconButton(FontAwesomeIcon.Eraser))
         {
             ImGui.OpenPopup("##confirmClearTab");
         }
@@ -670,7 +700,7 @@ internal sealed class ChatWindow : Window
         DrawClearTabConfirmationPopup(config);
 
         ImGui.SameLine();
-        if (ImGuiComponents.IconButton(FontAwesomeIcon.EyeSlash))
+        if (DrawToolbarIconButton(FontAwesomeIcon.EyeSlash))
         {
             plugin.HideChatWindow();
         }
@@ -681,7 +711,7 @@ internal sealed class ChatWindow : Window
         }
 
         ImGui.SameLine();
-        if (ImGuiComponents.IconButton(FontAwesomeIcon.Cog))
+        if (DrawToolbarIconButton(FontAwesomeIcon.Cog))
         {
             plugin.ToggleSettingsWindow();
         }
@@ -693,7 +723,7 @@ internal sealed class ChatWindow : Window
 
         ImGui.SameLine();
         var locked = plugin.Configuration.ChatWindowLocked;
-        if (ImGuiComponents.IconButton(locked ? FontAwesomeIcon.Lock : FontAwesomeIcon.LockOpen))
+        if (DrawToolbarIconButton(locked ? FontAwesomeIcon.Lock : FontAwesomeIcon.LockOpen))
         {
             plugin.Configuration.ChatWindowLocked = !locked;
             plugin.SaveConfiguration();
@@ -705,7 +735,7 @@ internal sealed class ChatWindow : Window
         }
 
         ImGui.SameLine();
-        if (ImGuiComponents.IconButton(FontAwesomeIcon.WindowRestore))
+        if (DrawToolbarIconButton(FontAwesomeIcon.WindowRestore))
         {
             plugin.TogglePreviewWindow();
         }
@@ -725,22 +755,24 @@ internal sealed class ChatWindow : Window
         // here, clicking Connect gave no feedback at all until either the green (connected) or red
         // (JoinFailed) state appeared several seconds later, reading as if the click did nothing.
         var noviceTrying = (NoviceNetworkService.IsJoining || noviceAutoRetrying) && !noviceConnected;
+
+        // Pulses gently between the normal text color and orange rather than sitting flat while
+        // trying, so "actively trying to connect" reads as an ongoing process at a glance instead
+        // of looking identical to the plain disconnected state until you happen to hover it.
+        Vector4? wifiColorOverride = null;
         if (noviceConnected)
         {
-            ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.3f, 0.9f, 0.3f, 1f));
+            wifiColorOverride = new Vector4(0.3f, 0.9f, 0.3f, 1f);
         }
         else if (noviceTrying)
         {
-            // Pulses gently between the normal text color and orange rather than sitting flat, so
-            // "actively trying to connect" reads as an ongoing process at a glance instead of
-            // looking identical to the plain disconnected state until you happen to hover it.
             var pulse = (MathF.Sin(Environment.TickCount64 / 250f) + 1f) * 0.5f;
             var normal = ImGui.GetStyle().Colors[(int)ImGuiCol.Text];
             var orange = new Vector4(1f, 0.65f, 0.15f, 1f);
-            ImGui.PushStyleColor(ImGuiCol.Text, Vector4.Lerp(normal, orange, pulse));
+            wifiColorOverride = Vector4.Lerp(normal, orange, pulse);
         }
 
-        if (ImGuiComponents.IconButton(FontAwesomeIcon.Wifi))
+        if (DrawToolbarIconButton(FontAwesomeIcon.Wifi, wifiColorOverride))
         {
             if (noviceConnected)
             {
@@ -750,11 +782,6 @@ internal sealed class ChatWindow : Window
             {
                 NoviceNetworkService.Connect(plugin.Log);
             }
-        }
-
-        if (noviceConnected || noviceTrying)
-        {
-            ImGui.PopStyleColor();
         }
 
         // The game's own "channel is full" (or any other silent join rejection) notice is a
@@ -806,7 +833,7 @@ internal sealed class ChatWindow : Window
         }
 
         ImGui.SameLine();
-        if (ImGuiComponents.IconButton(FontAwesomeIcon.Users))
+        if (DrawToolbarIconButton(FontAwesomeIcon.Users))
         {
             NoviceNetworkService.OpenNativeMemberList(plugin.Log);
         }
@@ -824,7 +851,7 @@ internal sealed class ChatWindow : Window
             ImGui.SameLine();
             ImGui.TextDisabled($"({loadedHistoryLabel})");
             ImGui.SameLine();
-            if (ImGuiComponents.IconButton(FontAwesomeIcon.Bolt))
+            if (DrawToolbarIconButton(FontAwesomeIcon.Bolt))
             {
                 loadedHistoryEntries = null;
                 loadedHistoryLabel = null;
@@ -1120,33 +1147,28 @@ internal sealed class ChatWindow : Window
     private void TrackIncomingWhisper(CharacterState state, ChatLogEntry entry)
     {
         var senderIdentity = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
-        var tabKey = ResolveWhisperTabKey(state, senderIdentity, entry.Sender);
 
-        plugin.RememberWhisperTarget(state, tabKey);
+        // RememberWhisperTarget now does its own first-name-only fallback match (see its own
+        // remarks) - the separate ResolveWhisperTabKey this used to call first has been folded
+        // into it, so every caller (not just this one) benefits from the same de-duplication
+        // instead of two copies of similar logic quietly drifting apart.
+        var tabKey = plugin.RememberWhisperTarget(state, senderIdentity);
 
         if (!IsViewingWhisperTarget(tabKey, entry.Sender) && !state.MutedWhisperTargets.Contains(tabKey))
         {
             whisperUnreadCounts[tabKey] = whisperUnreadCounts.GetValueOrDefault(tabKey) + 1;
-        }
-    }
 
-    /// <summary>
-    /// A whisper target may already be tracked under a slightly different string (e.g. "Name"
-    /// from a manually-typed target vs. "Name@World" from an incoming message's payload) -
-    /// reuse whatever form is already there instead of creating a second, duplicate tab for the
-    /// same person.
-    /// </summary>
-    private static string ResolveWhisperTabKey(CharacterState state, string preferredIdentity, string nameOnly)
-    {
-        foreach (var existing in state.RecentWhisperTargets)
-        {
-            if (string.Equals(existing.Split('@')[0], nameOnly, StringComparison.OrdinalIgnoreCase))
-            {
-                return existing;
-            }
+            // Scroll this tab into view whenever it picks up a new unread message and the user
+            // isn't already looking at it - not just the very first time a conversation is ever
+            // created (an earlier attempt at this only covered that case, which missed anyone
+            // whose conversation already existed from a previous session: it's just as easy for
+            // an *existing* tab to end up scrolled out of view once enough others are open, and a
+            // new message arriving there is exactly when the user needs to be able to see it, not
+            // just stumble onto it later while scrolling around). Muted tabs are deliberately
+            // excluded here too, same as the unread bump above - forcing a muted tab into view
+            // would undo the entire point of muting it.
+            pendingTabForceSelect = tabKey;
         }
-
-        return preferredIdentity;
     }
 
     private bool IsViewingWhisperTarget(string tabKey, string senderNameOnly)
@@ -1865,7 +1887,7 @@ internal sealed class ChatWindow : Window
     /// </summary>
     private void DrawRpActionsMenu(CharacterState state)
     {
-        if (ImGuiComponents.IconButton(FontAwesomeIcon.Magic))
+        if (DrawToolbarIconButton(FontAwesomeIcon.Magic))
         {
             ImGui.OpenPopup("##rpActionsMenu");
         }
@@ -2225,7 +2247,7 @@ internal sealed class ChatWindow : Window
         // The toolbar's collapse toggle (search/history/clear/hide/settings/lock/preview/RP
         // actions - see DrawLogToolbar).
         var toolbarExpanded = config.ChatToolbarExpanded;
-        if (ImGuiComponents.IconButton(toolbarExpanded ? FontAwesomeIcon.ChevronUp : FontAwesomeIcon.ChevronDown))
+        if (DrawToolbarIconButton(toolbarExpanded ? FontAwesomeIcon.ChevronUp : FontAwesomeIcon.ChevronDown))
         {
             config.ChatToolbarExpanded = !toolbarExpanded;
             plugin.SaveConfiguration();
@@ -2246,12 +2268,25 @@ internal sealed class ChatWindow : Window
         // indistinguishable in practice (layout only changes when a tab is added/removed/resized,
         // never within a single still frame).
         var stripWidth = MathF.Max(1f, ImGui.GetContentRegionAvail().X - (arrowSize + spacing) * 2f);
-        var maxScroll = MathF.Max(0f, tabStripContentWidth - stripWidth);
+
+        // totalWidth - stripWidth alone isn't always enough to actually reach the last tab's own
+        // boundary: on a narrow strip that only fits a couple of tabs at once, that value can land
+        // strictly *between* the second-to-last and last tab's boundaries. SnapScrollToTabBoundary
+        // then rounds it down to the second-to-last tab, and the right chevron's own target (a
+        // legitimate boundary from NextTabBoundaryAfter) gets clamped back down to that same
+        // in-between value by MathF.Min(maxScroll, ...) - which the very next frame's snap rounds
+        // straight back down again, undoing the scroll every time. That made the last tab
+        // permanently unreachable (reported as "nothing shows up after Wynn", the second-to-last
+        // whisper tab, as if there were a hard tab-count limit) even though it was always present
+        // in the data. Flooring maxScroll at the last tab's own start offset guarantees it's always
+        // at least reachable, exactly like the force-scroll-into-view logic below already assumes.
+        var lastTabStart = tabStripTabStartOffsets.Count > 0 ? tabStripTabStartOffsets[^1] : 0f;
+        var maxScroll = MathF.Max(MathF.Max(0f, tabStripContentWidth - stripWidth), lastTabStart);
         tabStripScrollRawTarget = Math.Clamp(tabStripScrollRawTarget, 0f, maxScroll);
         tabStripScrollX = SnapScrollToTabBoundary(tabStripScrollRawTarget);
 
         ImGui.BeginDisabled(tabStripScrollX <= 0f);
-        if (ImGuiComponents.IconButton(FontAwesomeIcon.ChevronLeft))
+        if (DrawToolbarIconButton(FontAwesomeIcon.ChevronLeft))
         {
             tabStripScrollX = PrevTabBoundaryBefore(tabStripScrollX);
             tabStripScrollRawTarget = tabStripScrollX;
@@ -2472,7 +2507,25 @@ internal sealed class ChatWindow : Window
                 // frame with no bookkeeping of its own to sync, so nothing extra is needed for
                 // *selection* here - scrolling this tab into view is handled unconditionally
                 // above instead, since it has to work even while the tab isn't drawn at all.
+                //
+                // The name itself pulses while unread (see Configuration.BlinkUnreadWhisperTabs'
+                // own remarks) - whisperUnread is already guaranteed 0 for whichever tab is
+                // currently being viewed (cleared the moment it becomes active tab, above), so
+                // this can never blink the tab you're already looking at.
+                var blinking = whisperUnread > 0 && config.BlinkUnreadWhisperTabs;
+                if (blinking)
+                {
+                    var pulse = (MathF.Sin(Environment.TickCount64 / 250f) + 1f) * 0.5f;
+                    var normal = ImGui.GetStyle().Colors[(int)ImGuiCol.Text];
+                    ImGui.PushStyleColor(ImGuiCol.Text, Vector4.Lerp(normal, SearchHighlightColor, pulse));
+                }
+
                 var clicked = ImGui.Selectable(whisperText + "##whisper" + targetName, isSelected, ImGuiSelectableFlags.None, tabSize);
+
+                if (blinking)
+                {
+                    ImGui.PopStyleColor();
+                }
 
                 DrawUnreadBadge(whisperUnread);
 
@@ -2544,21 +2597,32 @@ internal sealed class ChatWindow : Window
         // Bring a just-force-selected whisper tab (see forceScrollTabStart/End above) fully into
         // view if it isn't already - e.g. a brand new conversation's tab appearing off the end of
         // an already-full strip, which nothing would otherwise ever scroll to.
-        if (forceScrollTabStart is { } scrollStart && forceScrollTabEnd is { } scrollEnd)
+        //
+        // Both branches land on scrollStart specifically - that tab's own start offset, already
+        // recorded in tabStripTabStartOffsets this same frame - rather than some other computed
+        // pixel position. The right-scroll branch used to target scrollEnd - stripWidth + spacing
+        // (lining the tab up flush against the strip's right edge instead), which isn't
+        // necessarily any tab's own boundary - the very next frame's top-of-function clamp snaps
+        // whatever raw value is stored down to the nearest *actual* boundary at or before it (see
+        // SnapScrollToTabBoundary), and if that landed before this tab had enough room to fully
+        // fit, it silently undid the reveal, leaving the tab just as invisible as before -
+        // reported as a specific, real conversation's tab (the whisper strip's very last one, so
+        // the reveal always had to scroll all the way right for it) never appearing at all despite
+        // definitely being in the list. Landing on an already-guaranteed boundary here instead
+        // means that next frame's snap is a no-op, not a silent revert.
+        if (forceScrollTabStart is { } scrollStart && forceScrollTabEnd is { } scrollEnd
+            && (scrollStart < tabStripScrollX || scrollEnd > tabStripScrollX + stripWidth))
         {
-            if (scrollStart < tabStripScrollX)
-            {
-                tabStripScrollX = MathF.Max(0f, scrollStart - spacing);
-                tabStripScrollRawTarget = tabStripScrollX;
-            }
-            else if (scrollEnd > tabStripScrollX + stripWidth)
-            {
-                tabStripScrollX = scrollEnd - stripWidth + spacing;
-                tabStripScrollRawTarget = tabStripScrollX;
-            }
+            tabStripScrollX = scrollStart;
+            tabStripScrollRawTarget = tabStripScrollX;
         }
 
         tabStripContentWidth = runningX;
+
+        // Same floor as maxScroll above (and for the same reason - the last tab's own boundary
+        // can sit beyond totalWidth - stripWidth on a narrow strip) - tabStripTabStartOffsets is
+        // this frame's fresh list by now, since the loop above already finished.
+        var wheelMaxScroll = MathF.Max(MathF.Max(0f, tabStripContentWidth - stripWidth), tabStripTabStartOffsets.Count > 0 ? tabStripTabStartOffsets[^1] : 0f);
 
         if (config.TabStripWheelScrollEnabled && ImGui.IsWindowHovered())
         {
@@ -2568,7 +2632,7 @@ internal sealed class ChatWindow : Window
                 // Accumulates into the raw target, not the (snapped) display position directly -
                 // see tabStripScrollRawTarget's remarks for why adjusting the snapped value itself
                 // made the wheel appear to do nothing whenever a tab was wider than one tick.
-                tabStripScrollRawTarget = Math.Clamp(tabStripScrollRawTarget - wheel * TabStripWheelStepPx, 0f, MathF.Max(0f, tabStripContentWidth - stripWidth));
+                tabStripScrollRawTarget = Math.Clamp(tabStripScrollRawTarget - wheel * TabStripWheelStepPx, 0f, wheelMaxScroll);
                 tabStripScrollX = SnapScrollToTabBoundary(tabStripScrollRawTarget);
             }
         }
@@ -2578,7 +2642,7 @@ internal sealed class ChatWindow : Window
 
         ImGui.SameLine();
         ImGui.BeginDisabled(tabStripScrollX >= maxScroll);
-        if (ImGuiComponents.IconButton(FontAwesomeIcon.ChevronRight))
+        if (DrawToolbarIconButton(FontAwesomeIcon.ChevronRight))
         {
             tabStripScrollX = MathF.Min(maxScroll, NextTabBoundaryAfter(tabStripScrollX));
             tabStripScrollRawTarget = tabStripScrollX;
@@ -2708,6 +2772,18 @@ internal sealed class ChatWindow : Window
     /// through this, since whichever fixed tab is being left behind needs its current send
     /// channel saved *before* state.LastChannel gets forced to Whisper immediately below, not
     /// afterwards where it'd already be overwritten.
+    ///
+    /// Also guarantees a tab actually exists for the target and resolves to whichever key it's
+    /// really stored under (see Plugin.RememberWhisperTarget's own remarks), and scrolls it into
+    /// view - every caller needs both of those, and used to each have to remember to do it
+    /// themselves; a couple of them (the channel picker's Whisper option re-entering
+    /// state.LastWhisperTarget directly, and this window's own startup restore of whatever
+    /// whisper view was active last session) simply never did, so re-opening a conversation whose
+    /// tab wasn't already in the list showed its history correctly (message filtering only ever
+    /// needed activeWhisperTabTarget, never the tab list itself) but never actually produced a
+    /// tab for it - reported as "I can open the conversation and read it, but the tab doesn't
+    /// appear at all." Centralizing both here means a future new caller gets them for free
+    /// instead of being one more place this exact bug can quietly reappear.
     /// </summary>
     internal void EnterWhisperView(Configuration config, CharacterState state, string target)
     {
@@ -2716,9 +2792,12 @@ internal sealed class ChatWindow : Window
             SaveChannelSelection(config.ChatTabs.Find(t => t.Id == activeTabId), state);
         }
 
-        state.LastWhisperTarget = target;
+        var resolvedTarget = plugin.RememberWhisperTarget(state, target);
+
+        state.LastWhisperTarget = resolvedTarget;
         state.LastChannel = ChatChannel.Whisper;
-        activeWhisperTabTarget = target;
+        activeWhisperTabTarget = resolvedTarget;
+        pendingTabForceSelect = resolvedTarget;
 
         // See SwitchToFixedTab's matching remark - same reason this has to be cleared here too.
         noviceNetworkTabActive = false;

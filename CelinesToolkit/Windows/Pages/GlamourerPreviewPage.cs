@@ -1,4 +1,6 @@
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface;
+using Dalamud.Interface.Components;
 
 namespace CelinesToolkit.Windows.Pages;
 
@@ -22,6 +24,12 @@ internal sealed class GlamourerPreviewPage
         if (ImGui.Checkbox(Loc.T("GlamourerPreview.EnableCheckbox"), ref enabled))
         {
             plugin.SetGlamourerPreviewEnabled(enabled);
+        }
+
+        ImGui.Spacing();
+        if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.ExternalLinkAlt, Loc.T("GlamourerPreview.OpenWindow")))
+        {
+            plugin.ToggleGlamourerPreviewWindow();
         }
     }
 }

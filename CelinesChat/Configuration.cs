@@ -21,6 +21,23 @@ public enum ChatFontChoice
     InconsolataRegular,
 }
 
+/// <summary>
+/// Visual chrome for the log toolbar's icon buttons (see ChatWindow.DrawLogToolbar and
+/// AeroGlassIconButton) - a whole-toolbar choice rather than per-button, since mixing styles in
+/// the same row would look inconsistent.
+/// </summary>
+public enum ToolbarIconPack
+{
+    /// <summary>ImGui's own flat theme-colored button, unchanged from every earlier version.</summary>
+    Classic,
+
+    /// <summary>Translucent, glossy Windows-Vista-style button with a top highlight sheen.</summary>
+    AeroGlass,
+
+    /// <summary>Near-invisible frosted/transparent glass, only really showing itself on hover.</summary>
+    FrostedGlass,
+}
+
 public enum ChatChannel
 {
     Say,
@@ -252,6 +269,31 @@ public class Configuration : IPluginConfiguration
     /// there (e.g. it conflicting with some other hover-scroll expectation).
     /// </summary>
     public bool TabStripWheelScrollEnabled { get; set; } = true;
+
+    /// <summary>On by default - a whisper tab's own name pulses while it has an unread message, the same attention-grabbing effect an early build of CelinesChat had before it was lost along the way. Fixed tabs only ever show their plain unread-count badge, not this - the ask was specifically about whisper conversations standing out from the rest of the strip.</summary>
+    public bool BlinkUnreadWhisperTabs { get; set; } = true;
+
+    /// <summary>Which chrome the log toolbar's icon buttons (search/history/settings/lock/Novice Network/etc.) use - see ToolbarIconPack.</summary>
+    public ToolbarIconPack ToolbarIconPack { get; set; } = ToolbarIconPack.Classic;
+
+    /// <summary>
+    /// Idle-state tint and transparency (via its own alpha) for a glass-pack icon button's
+    /// background - see GlassIconButton. Hover/active states are brightened/darkened relative to
+    /// this rather than a separate hardcoded color per pack, so this one setting covers both Aero
+    /// Glass and Frosted Glass. Has no effect while ToolbarIconPack is Classic.
+    /// </summary>
+    public Vector4 ToolbarIconBackgroundColor { get; set; } = new(0.28f, 0.48f, 0.72f, 0.55f);
+
+    /// <summary>
+    /// Off by default - when on, glass-pack icon glyphs use ToolbarIconColor instead of the
+    /// theme's normal text color. Has no effect while ToolbarIconPack is Classic. Per-button
+    /// dynamic colors (the search icon turning orange while a filter's active, Novice Network's
+    /// connected/connecting state) still take priority over this - see
+    /// ChatWindow.DrawToolbarIconButton's colorOverride parameter.
+    /// </summary>
+    public bool ToolbarUseCustomIconColor { get; set; }
+
+    public Vector4 ToolbarIconColor { get; set; } = new(1f, 1f, 1f, 1f);
 
     public float WindowOpacity { get; set; } = 0.661f;
 

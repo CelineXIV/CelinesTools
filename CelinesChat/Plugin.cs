@@ -32,7 +32,6 @@ public sealed class Plugin : IDalamudPlugin
 {
     private const string CommandName = "/celineschat";
     private const string LogCommandName = "/celineschatlog";
-    private const int MaxRecentWhisperTargets = 6;
     private const int MaxSentHistory = 10;
 
     // How long an Enter-triggered activation is trusted on its own, even before IsChatInputActive
@@ -992,7 +991,15 @@ public sealed class Plugin : IDalamudPlugin
     internal void OpenWhisperTab(string target)
     {
         var state = GetCharacterState();
-        RememberWhisperTarget(state, target);
+
+        // Use whatever key RememberWhisperTarget actually resolved this to (see its own remarks)
+        // - not necessarily the same string passed in here. Using the raw target unconditionally
+        // used to mean e.g. right-clicking a same-world sender's name (whose SenderWorld is null,
+        // so target arrives as just "Name" here) while their real tab was already on file as
+        // "Name@World" from an earlier cross-world message would silently open a second, empty
+        // duplicate tab instead of switching to their actual conversation - reported as "the tab
+        // strip visibly jumps and the tab that opens isn't the right one."
+        var resolvedTarget = RememberWhisperTarget(state, target);
 
         // Deliberately NOT setting state.LastWhisperTarget/LastChannel here directly - that used
         // to stomp state.LastChannel to Whisper immediately, before ChatWindow.EnterWhisperView
@@ -1003,7 +1010,7 @@ public sealed class Plugin : IDalamudPlugin
         // Whisper too instead of restoring Say/Party/whatever it was actually showing.
         // PendingWhisperTarget already routes through EnterWhisperView, which sets both of these
         // correctly *after* preserving the tab being left.
-        PendingWhisperTarget = target;
+        PendingWhisperTarget = resolvedTarget;
         SaveConfiguration();
         chatManuallyHidden = false;
         chatWindow.IsOpen = true;
@@ -1061,16 +1068,49 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
-    internal void RememberWhisperTarget(CharacterState state, string target)
+    /// <summary>
+    /// Makes sure a whisper tab exists for this target - appends it once, at the end, if it's not
+    /// already there - and returns whichever key actually ended up representing it, which the
+    /// caller should use from that point on (see OpenWhisperTab). Used to unconditionally
+    /// Remove+Insert(0, ...) on every call (moving the target to the front) plus cap the list at
+    /// MaxRecentWhisperTargets (evicting whoever fell off the end) - meaning every single
+    /// incoming/outgoing message reshuffled the *entire* tab strip's order regardless of whether
+    /// the user had manually arranged it (directly undoing the drag-to-reorder feature the moment
+    /// any conversation got a new message), and a whisper tab could silently vanish from the strip
+    /// entirely once 6 other conversations became more "recent" - reported as "tabs reorder
+    /// themselves" and "whisper messages disappear after a while" respectively. Fixed tabs have
+    /// never had either behavior (no auto-reorder, no auto-eviction) - whisper tabs now match
+    /// that: they only ever move via an explicit drag, and only ever disappear via an explicit
+    /// close.
+    ///
+    /// The same person can arrive here under different string forms depending on the call site -
+    /// a same-world sender's SenderWorld is null, producing just "Name" instead of "Name@World";
+    /// a manually-typed target might omit the world too - so an *exact* Contains check alone
+    /// (which is all this used to do) would silently create a second, differently-keyed duplicate
+    /// tab for the same person instead of reusing their real one. Falling back to a first-name-only
+    /// match (same idea ChatWindow.IsViewingWhisperTarget already uses to recognize you're on
+    /// someone's tab regardless of which form is active) finds and reuses whatever form is
+    /// already on file before ever creating a new entry.
+    /// </summary>
+    internal string RememberWhisperTarget(CharacterState state, string target)
     {
-        state.RecentWhisperTargets.Remove(target);
-        state.RecentWhisperTargets.Insert(0, target);
-        while (state.RecentWhisperTargets.Count > MaxRecentWhisperTargets)
+        if (state.RecentWhisperTargets.Contains(target))
         {
-            state.RecentWhisperTargets.RemoveAt(state.RecentWhisperTargets.Count - 1);
+            return target;
         }
 
+        var nameOnly = target.Split('@')[0];
+        foreach (var existing in state.RecentWhisperTargets)
+        {
+            if (string.Equals(existing.Split('@')[0], nameOnly, StringComparison.OrdinalIgnoreCase))
+            {
+                return existing;
+            }
+        }
+
+        state.RecentWhisperTargets.Add(target);
         SaveConfiguration();
+        return target;
     }
 
     private string BuildChannelPrefix(CharacterState state) => state.LastChannel switch

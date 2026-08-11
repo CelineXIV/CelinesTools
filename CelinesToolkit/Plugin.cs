@@ -33,6 +33,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly UniversalisClient universalisClient;
     private readonly PaissaClient paissaClient;
     private readonly GlamourerIpcService glamourerIpcService;
+    private readonly GlamourerZoomWindow glamourerZoomWindow;
     private readonly GlamourerPreviewWindow glamourerPreviewWindow;
     private readonly SlidecastCastBarWindow slidecastCastBarWindow;
     private readonly SlidecastCursorOverlayWindow slidecastCursorOverlayWindow;
@@ -105,7 +106,10 @@ public sealed class Plugin : IDalamudPlugin
         windowSystem.AddWindow(quickBarWindow);
         quickBarWindow.IsOpen = Configuration.QuickBarEnabled;
 
-        glamourerPreviewWindow = new GlamourerPreviewWindow(this.pluginInterface, glamourerIpcService, objectTable, targetManager, PreviewTextureCache, PreviewImageService, FileDialogManager);
+        glamourerZoomWindow = new GlamourerZoomWindow(this.pluginInterface, glamourerIpcService, PreviewTextureCache, PreviewImageService, FileDialogManager);
+        windowSystem.AddWindow(glamourerZoomWindow);
+
+        glamourerPreviewWindow = new GlamourerPreviewWindow(this, this.pluginInterface, glamourerIpcService, objectTable, targetManager, PreviewTextureCache, PreviewImageService, FileDialogManager, glamourerZoomWindow);
         windowSystem.AddWindow(glamourerPreviewWindow);
 
         var slidecastService = new SlidecastService(objectTable, dataManager);
@@ -162,6 +166,9 @@ public sealed class Plugin : IDalamudPlugin
         SaveConfiguration();
         glamourerPreviewWindow.IsOpen = enabled;
     }
+
+    /// <summary>Same action as the "/ctglamourer" command - a dedicated button on the settings page for anyone who'd rather click than type.</summary>
+    public void ToggleGlamourerPreviewWindow() => glamourerPreviewWindow.Toggle();
 
     public void SetAutoAcceptTradeEnabled(bool enabled)
     {
