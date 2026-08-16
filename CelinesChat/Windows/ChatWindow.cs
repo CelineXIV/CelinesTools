@@ -366,13 +366,30 @@ internal sealed class ChatWindow : Window
 
         HandleSendHotkey(state, config);
 
+        // Same ChromeBackgroundOpacity as DrawLogTabBar's own row fill, but this row's true height
+        // isn't known until after DrawPreviewToggle/the validation message are drawn (it varies by
+        // whether a validation message is showing right now). Rather than wrap it in a new BeginChild
+        // sized off a hand-rolled row-count guess (real risk of drifting from the actual measured
+        // content by a pixel, which is exactly the category of bug this session spent a long time
+        // chasing out of this window), this reuses measuredFooterHeight - already a one-frame-lagged
+        // cache of this exact row's real height, feeding composeAreaHeight below - so the background
+        // rect drawn now (before this frame's content) matches what got measured last frame, same
+        // trick this field already relies on elsewhere.
+        var footerBgOrigin = ImGui.GetCursorScreenPos();
+        ImGui.GetWindowDrawList().AddRectFilled(
+            footerBgOrigin,
+            footerBgOrigin + new Vector2(ImGui.GetContentRegionAvail().X, measuredFooterHeight),
+            ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, config.ChromeBackgroundOpacity)));
+
         DrawPreviewToggle(config, state, chunks);
 
-        if (string.IsNullOrEmpty(validationMessage))
-        {
-            ImGui.Dummy(new Vector2(0f, ImGui.GetTextLineHeight()));
-        }
-        else
+        // Used to always reserve a full text line here even with nothing to show, purely so the
+        // layout wouldn't shift on the rare frame a validation message appears - but that meant
+        // permanently wasting a whole line of footer height for the common case (no message),
+        // directly underneath the channel/count row with nothing visually explaining why it's
+        // there. A validation message popping in now shifts the layout by one line instead, which
+        // is a fair trade for not wasting that space the rest of the time.
+        if (!string.IsNullOrEmpty(validationMessage))
         {
             ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f), validationMessage);
         }
@@ -1295,6 +1312,17 @@ internal sealed class ChatWindow : Window
                     plugin.InviteToParty(entry.Sender, entry.SenderWorld, entry.ContentId);
                 }
 
+                // See EstateTeleportService's own remarks for the full chain this triggers - only
+                // shown at all once the setting is on and the sender is a real friend, so it doesn't
+                // clutter this menu otherwise.
+                if (config.EstateTeleportContextMenuEnabled && plugin.IsFriend(entry.Sender, entry.SenderWorld))
+                {
+                    if (ImGui.Selectable(Loc.T("ChatLog.EstateTeleportAction")))
+                    {
+                        plugin.TriggerEstateTeleport(entry.Sender, entry.SenderWorld);
+                    }
+                }
+
                 if (ImGui.BeginMenu(Loc.T("ChatLog.BlockFunctionsMenu")))
                 {
                     if (ImGui.Selectable(Loc.T("ChatLog.AddToBlacklistAction")))
@@ -2124,6 +2152,20 @@ internal sealed class ChatWindow : Window
 
     private void DrawLogTabBar(Configuration config, CharacterState state)
     {
+        // ChromeBackgroundOpacity - a plain opacity fill behind the *whole* tab bar row (collapse
+        // arrow, scroll arrows, and the scrolling tab strip together), separate from
+        // TabStripBackgroundColor (which only tints individual tab buttons' own selection/hover
+        // fill, not this row as a whole). arrowSize/GetFrameHeight() is deterministic from the
+        // current font/style alone, not dependent on anything drawn yet, so this can size and draw
+        // itself before any of the row's own content - no need for the previous-frame-lag trick
+        // DrawPreviewToggle's own equivalent needs below.
+        var rowHeight = ImGui.GetFrameHeight();
+        var rowOrigin = ImGui.GetCursorScreenPos();
+        ImGui.GetWindowDrawList().AddRectFilled(
+            rowOrigin,
+            rowOrigin + new Vector2(ImGui.GetContentRegionAvail().X, rowHeight),
+            ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, config.ChromeBackgroundOpacity)));
+
         var toolbarExpanded = config.ChatToolbarExpanded;
         if (DrawToolbarIconButton(toolbarExpanded ? FontAwesomeIcon.ChevronUp : FontAwesomeIcon.ChevronDown))
         {

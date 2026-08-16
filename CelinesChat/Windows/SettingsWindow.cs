@@ -56,11 +56,6 @@ internal sealed class SettingsWindow : Window
         infoPage = new InfoPage(plugin);
     }
 
-    public override void PreDraw()
-    {
-        ImGui.SetNextWindowBgAlpha(plugin.Configuration.WindowOpacity);
-    }
-
     public override void Draw()
     {
         ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 0f);

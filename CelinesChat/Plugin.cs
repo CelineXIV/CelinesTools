@@ -64,6 +64,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly PreviewWindow previewWindow;
     private readonly CommandInfo openCommandInfo;
     private readonly CommandInfo openLogCommandInfo;
+    private readonly EstateTeleportService estateTeleportService;
     private readonly List<string> sentHistory = new();
 
     public Configuration Configuration { get; }
@@ -110,6 +111,10 @@ public sealed class Plugin : IDalamudPlugin
         chatFontManager.EnsureFont(Configuration.ChatFont, Configuration.ChatFontSizePx);
         return chatFontManager.IsAvailable ? chatFontManager.Push() : null;
     }
+
+    internal bool IsFriend(string name, string? world) => estateTeleportService.IsFriend(name, world);
+
+    internal void TriggerEstateTeleport(string name, string? world) => estateTeleportService.TryTriggerEstateTeleport(name, world);
 
     internal bool IsValidCommand(string command) =>
         commandManager.Commands.ContainsKey(command) || commandValidator.IsKnownNativeCommand(command);
@@ -192,6 +197,7 @@ public sealed class Plugin : IDalamudPlugin
         ChatLog = new ChatLogService(chatGui, Configuration, this.pluginInterface, log, gameInteropProvider, playerState);
         chatActivationWatcher = new ChatActivationWatcher(gameInteropProvider, log);
         chatActivationWatcher.TextToInsert += text => PendingChatPrefillText = text;
+        estateTeleportService = new EstateTeleportService(dataManager, log);
 
         EnsureCommandValidatorLoaded();
 

@@ -88,6 +88,9 @@ public class Configuration : IPluginConfiguration
 
     public bool ShowSenderStatusIcons { get; set; } = true;
 
+    /// <summary>Off by default, Phase 1 (see EstateTeleportService) - shows an "Estate Teleportation" entry in a chat message's right-click menu when the sender is a friend. Not wired up to actually teleport yet.</summary>
+    public bool EstateTeleportContextMenuEnabled { get; set; }
+
     public Vector4 ValidCommandColor { get; set; } = new(0.8830769f, 0.44017988f, 0f, 1f);
 
     public Vector4 InvalidCommandColor { get; set; } = new(1f, 0.4f, 0.4f, 1f);
@@ -191,6 +194,9 @@ public class Configuration : IPluginConfiguration
     public float UnfocusedWindowOpacity { get; set; } = 0.62f;
 
     public float ChatLogBackgroundOpacity { get; set; } = 0.496f;
+
+    /// <summary>Off (fully transparent) by default - background fill behind the tab strip row and the footer/compose-preview row, independent of TabStripBackgroundColor (which only tints individual tab buttons, not the strip itself) and of the main window opacity.</summary>
+    public float ChromeBackgroundOpacity { get; set; }
 
     public Vector4 SendAccentColor { get; set; } = new(0.16f, 0.45f, 0.24f, 1f);
 

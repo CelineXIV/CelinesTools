@@ -43,6 +43,14 @@ internal sealed class DisplayPage
             plugin.SaveConfiguration();
         }
 
+        ImGui.SetNextItemWidth(150);
+        var chromeBgOpacity = config.ChromeBackgroundOpacity;
+        if (ImGui.SliderFloat(Loc.T("Settings.ChromeBackgroundOpacity"), ref chromeBgOpacity, 0.0f, 1.0f))
+        {
+            config.ChromeBackgroundOpacity = chromeBgOpacity;
+            plugin.SaveConfiguration();
+        }
+
         var showSenderStatusIcons = config.ShowSenderStatusIcons;
         if (ImGui.Checkbox(Loc.T("Settings.ShowSenderStatusIcons"), ref showSenderStatusIcons))
         {

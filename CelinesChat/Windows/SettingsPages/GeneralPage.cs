@@ -255,6 +255,21 @@ internal sealed class GeneralPage
             ImGui.SameLine();
             GlassIconButton.Draw(FontAwesomeIcon.Users, config.ToolbarIconPack, iconBgColor, previewIconColor, "##preview3");
         }
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+
+        var estateTeleportEnabled = config.EstateTeleportContextMenuEnabled;
+        if (ImGui.Checkbox(Loc.T("Settings.EstateTeleportContextMenu"), ref estateTeleportEnabled))
+        {
+            config.EstateTeleportContextMenuEnabled = estateTeleportEnabled;
+            plugin.SaveConfiguration();
+        }
+
+        ImGui.PushStyleColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);
+        ImGui.TextWrapped(Loc.T("Settings.EstateTeleportContextMenuHint"));
+        ImGui.PopStyleColor();
     }
 
     private static readonly string[] ToolbarIconPackLabels =

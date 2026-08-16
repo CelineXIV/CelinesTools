@@ -158,6 +158,14 @@ internal sealed class SecondaryChatWindow : Window
 
         var lineHeight = ImGui.GetFrameHeight();
 
+        // See ChatWindow.DrawLogTabBar's matching remarks - same plain opacity fill behind the whole
+        // tab strip row, same config value shared with the main window.
+        var tabBarOrigin = ImGui.GetCursorScreenPos();
+        ImGui.GetWindowDrawList().AddRectFilled(
+            tabBarOrigin,
+            tabBarOrigin + new Vector2(ImGui.GetContentRegionAvail().X, lineHeight),
+            ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, config.ChromeBackgroundOpacity)));
+
         ImGui.BeginChild("##secondaryTabStrip", new Vector2(-1, lineHeight), false, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
 
         if (TabDragHelper.DrawDropZone(ImGui.GetContentRegionAvail().X, lineHeight) is { } droppedHere)
