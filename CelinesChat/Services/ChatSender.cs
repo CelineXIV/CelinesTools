@@ -5,19 +5,6 @@ namespace CelinesChat.Services;
 
 internal static unsafe class ChatSender
 {
-    /// <summary>
-    /// Sends raw message bytes exactly as given - no UTF8 re-encoding - so a buffer built by
-    /// <see cref="MessageMarkerEncoder" /> (plain text mixed with raw SeString payload bytes,
-    /// like an embedded auto-translate entry or map link) reaches the game's chat box parser
-    /// intact instead of being mangled by a string round-trip.
-    ///
-    /// Matches Chat2's own SendMessageUnsafe exactly (verified against its source): explicitly
-    /// append a trailing 0x00 and use the static Utf8String.FromSequence(ReadOnlySpan&lt;byte&gt;)
-    /// helper. An earlier version used the instance Ctor_FromSequence(byte*, length) native call
-    /// instead to avoid relying on null-termination at all - that turned out to be the wrong
-    /// native function for this (embedded auto-translate payloads sent as empty/garbage), even
-    /// though its signature looked like the more "correct", explicit-length option.
-    /// </summary>
     public static void Send(byte[] messageBytes)
     {
         if (messageBytes.Length == 0)

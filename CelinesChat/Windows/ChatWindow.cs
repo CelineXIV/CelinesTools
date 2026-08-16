@@ -18,17 +18,17 @@ internal sealed class ChatWindow : Window
     private const float SplitterHeight = 6f;
     private const float MaxComposeAreaHeight = 400f;
 
-    // A little slack added on top of the footer's own exact measured height (see
-    // measuredFooterHeight below) - without it, the channel-picker/message-count row at the very
-    // bottom sat flush against the window's own edge with zero margin, reading as slightly cut
-    // off rather than cleanly finished.
     private const float FooterBottomPaddingPx = 6f;
+
+    // See nearBottomBeforeDraw's own remarks - deliberately small, well under one rendered line's
+    // height, so it absorbs SetScrollHereY(1f)'s own few-pixel settling gap without reintroducing the
+    // old wide-tolerance manual-scroll-hijack bug.
+    private const float BottomToleranceForNewMessagePx = 12f;
     private static readonly Vector4 SearchHighlightColor = new(1f, 0.65f, 0.15f, 1f);
     private static readonly Vector4 LinkColor = new(0.4f, 0.7f, 1f, 1f);
 
     private readonly Plugin plugin;
 
-    // Compose state
     private string inputText = string.Empty;
     private string currentDraftKey = string.Empty;
     private string validationMessage = string.Empty;
@@ -36,7 +36,6 @@ internal sealed class ChatWindow : Window
     private string snippetSearchFilter = string.Empty;
     private string activeWhisperTabTarget = string.Empty;
 
-    /// <summary>Whether the auto-appearing/disappearing Novice Network tab (see DrawLogTabBar) is the one currently being viewed - it exists only while NoviceNetworkService.IsConnected, so this gets force-cleared the moment that stops being true.</summary>
     private bool noviceNetworkTabActive;
 
     private int noviceNetworkUnread;
@@ -44,28 +43,16 @@ internal sealed class ChatWindow : Window
     private int selectionStart;
     private int selectionEnd;
     private int cursorPos;
+
+    private int? pendingCursorCharIndex;
     private string cachedInput = string.Empty;
     private int cachedMaxLength = -1;
     private List<string> cachedChunks = new();
 
-    // Up/Down-arrow recall through plugin.SentHistory (see TrackTextState's CallbackHistory
-    // branch) - -1 means "not currently browsing", 0 is the most recently sent message, counting
-    // up from there. historyBrowseOriginalDraft is whatever was actually being typed right before
-    // the first Up press, restored once Down cycles back past the most recent entry, the same way
-    // a shell's own command history leaves an in-progress line intact if you back out of it.
     private int historyBrowseIndex = -1;
     private string historyBrowseOriginalDraft = string.Empty;
     private bool splitterDragging;
 
-    // How tall the preview-toggle row + action row + (sometimes) the validation message actually
-    // rendered last frame, in real screen pixels - measured after drawing them (see Draw()), not
-    // guessed from GetFrameHeightWithSpacing() formulas. Estimating that footprint from font
-    // metrics went through three different formulas across this file's history and each one was
-    // only right for some font/row-count combination, either starving the input box (jittery caret
-    // scroll-into-view) or over-reserving space for it (dead margin at the bottom of the window).
-    // A real, one-frame-stale measurement is exact for whatever's actually on screen and adapts to
-    // any font size or row count automatically. Seeded with a reasonable guess for the very first
-    // frame only; every frame after that overwrites it with the real value.
     private float measuredFooterHeight = 60f;
     private bool pendingSendFromEnter;
     private bool pendingFocusInput;
@@ -74,150 +61,122 @@ internal sealed class ChatWindow : Window
     private string autoTranslateSearch = string.Empty;
     private uint? autoTranslateBrowseGroup;
 
-    // Log state
     private Guid activeTabId;
+
+    // Global watermark, advanced to the newest entry across *all* channels every frame - used only
+    // to decide, exactly once per entry, whether TrackUnreadForNewEntry still needs to route it to
+    // an unread badge somewhere. Deliberately global: unread badges live on tabs/whispers that may
+    // not be the active view right now, so "is this entry new" for badge purposes has to mean "new
+    // since I last looked at anything", not "new to whatever's on screen this frame".
     private long lastSeenSequence;
 
-    /// <summary>
-    /// Read-only views of the fields above for Services/Web - it needs to know (and filter
-    /// messages against) whichever tab/whisper is currently active regardless of whether this
-    /// window is even open right now, which is common for a phone-based use case (cutscenes,
-    /// loading screens, or the user having manually hidden the desktop window - see
-    /// Plugin.ApplyGameStateVisibility). SelectChannel/SwitchToFixedTab/EnterWhisperView are the
-    /// matching internal setters the web layer calls to change these.
-    /// </summary>
+    // "Highest sequence this specific view has actually drawn", keyed by viewKey (same key space as
+    // viewScrollPositions) - separate from lastSeenSequence above. The auto-scroll-to-bottom trigger
+    // used to key off that same global watermark, which meant a busy fixed tab's own traffic (or any
+    // other channel's) could race a low-traffic whisper tab's watermark past a whisper message before
+    // that view ever got credit for it as "new" - the message still rendered fine, just without the
+    // scroll, since by the time the whisper tab was actually drawn the global watermark had already
+    // moved past it. Tracking per view means each view's own "have I auto-scrolled for this yet"
+    // watermark only advances based on entries that actually matched *its own* filter.
+    private readonly Dictionary<string, long> lastSeenSequenceByView = new();
+    private long initialSeenSequence;
+    private long nextPreloadSequence = -1;
+
+    private bool lastKnownFontAvailable = true;
+
+    // Last-measured render height per entry (keyed by ChatLogEntry.Sequence, stable across frames
+    // and buffer eviction - see PreloadWhisperHistoryForFirstView/DrawHistoryDatesPopup for why
+    // file-loaded entries get their own negative Sequence range so they can't collide with each
+    // other or with live entries here). Lets DrawChatLogEntries skip the real per-word ImGui work
+    // for an entry sitting well outside the visible scroll area and draw a plain placeholder of its
+    // last-known height instead - see its own remarks for why this matters once a tab holds enough
+    // messages for the *volume* of full per-frame redraw work itself to become the bottleneck.
+    private readonly Dictionary<long, float> entryHeightCache = new();
+    private readonly HashSet<long> provisionalHeightSequences = new();
+
     internal Guid ActiveTabId => activeTabId;
 
     internal string ActiveWhisperTabTarget => activeWhisperTabTarget;
 
-    /// <summary>
-    /// Fired at the end of SelectChannel/SwitchToFixedTab/EnterWhisperView, regardless of which
-    /// of the many call sites (a desktop tab click, the channel picker, a web client's
-    /// /api/view/* or /api/channel request, ...) triggered it - Services/Web subscribes once to
-    /// push a fresh view snapshot to every connected browser whenever it fires, so the phone and
-    /// the desktop window always agree on "what am I looking at / sending to" no matter which one
-    /// last changed it.
-    /// </summary>
     internal event Action? ViewChanged;
 
-    // Hand-rolled horizontal scroll position for the tab strip (see DrawLogTabBar) and its last-
-    // measured total content width (one frame stale - see DrawLogTabBar's remarks on why that's
-    // fine), both in pixels.
     private float tabStripScrollX;
 
-    // The continuous, unsnapped scroll position wheel input accumulates into - tabStripScrollX
-    // itself is always a snapped tab boundary (see tabStripTabStartOffsets), so if wheel scrolling
-    // adjusted that directly, each tick's small delta got rounded straight back down to the exact
-    // boundary it started from whenever a tab was wider than one tick's worth of movement - visibly
-    // "the wheel does nothing at all" rather than just "it snaps a bit late". Keeping this separate
-    // lets ticks keep accumulating underneath the snapped display position until they've actually
-    // crossed into the next tab. The chevrons jump straight to a boundary, so they reset this to
-    // match rather than leaving stale progress toward whatever boundary the wheel last aimed at.
     private float tabStripScrollRawTarget;
     private float tabStripContentWidth;
 
-    // Each tab's own starting X within the strip's total content width (same one-frame-stale
-    // deal as tabStripContentWidth) - lets every scroll path (chevrons, wheel, the general clamp)
-    // snap onto an actual tab boundary instead of resting at an arbitrary pixel offset. Landing
-    // mid-tab looked broken: the tab straddling that offset gets skipped entirely (see the "only
-    // draw a tab if it fits whole" rule below), so whatever's drawn next starts partway across the
-    // strip instead of flush with its left edge, leaving a chunk of blank space in front of it.
     private readonly List<float> tabStripTabStartOffsets = new();
+
+    // Reused every frame (Clear() keeps the backing array, no reallocation once warmed up) for the
+    // active view's own capped, filtered entry list - see DrawChatLogEntries' matching remarks.
+    private readonly List<ChatLogEntry> viewMatchingLiveEntriesBuffer = new();
+    private bool unreadTabScrolledLeft;
+    private bool unreadTabScrolledRight;
     private List<ChatLogEntry>? loadedHistoryEntries;
     private string? loadedHistoryLabel;
     private string logSearchFilter = string.Empty;
     private string historySearchFilter = string.Empty;
     private string lastViewKey = string.Empty;
+    private readonly Dictionary<string, float> viewScrollPositions = new();
     private readonly Dictionary<string, int> whisperUnreadCounts = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<Guid, int> fixedTabUnreadCounts = new();
 
-    // Recorded when a whisper tab is closed *or* explicitly cleared (the newest sequence number
-    // at that moment) so that conversation's view only shows what's been said since then - not
-    // the entire history still sitting in the shared buffer. Both events mean the same thing to a
-    // reader ("hide everything up to here"), so one cutoff serves both rather than tracking them
-    // separately - whichever happened most recently naturally wins, since sequence only grows.
+    private readonly HashSet<string> whisperHistoryShownThisSession = new(StringComparer.OrdinalIgnoreCase);
+
+    private readonly Dictionary<string, List<ChatLogEntry>> whisperPreloadedHistory = new(StringComparer.OrdinalIgnoreCase);
+
     private readonly Dictionary<string, long> whisperCloseCutoff = new(StringComparer.OrdinalIgnoreCase);
 
-    // Same idea as whisperCloseCutoff, but for the "Alle"/custom fixed tabs - set when the
-    // Eraser button is confirmed on one of them. The shared entry buffer itself is never
-    // touched, so clearing one tab can't blank out another tab's (or "Alle"'s) view of the same
-    // underlying messages.
     private readonly Dictionary<Guid, long> fixedTabClearCutoff = new();
 
-    // Same idea again, for the single auto-managed Novice Network tab.
     private long? noviceNetworkClearCutoff;
 
-    // Whether the most recent right-click on a log entry's group landed specifically on the
-    // sender name (vs. elsewhere in the row) - see DrawLogEntry's merged "##logEntryContext"
-    // popup for why this can't just be two separate BeginPopupContextItem calls.
     private bool rightClickedOnName;
 
-    // The always-on window flags set once in the constructor - see PreDraw, which rebuilds Flags
-    // from this every frame plus NoMove/NoResize whenever the position-lock toggle is on.
     private ImGuiWindowFlags baseFlags;
 
     public ChatWindow(Plugin plugin) : base(WindowTitles.Chat)
     {
         this.plugin = plugin;
-        // Matches where the user actually keeps this window day to day (read from Dalamud's own
-        // saved ImGui window state) - only takes effect the very first time this window is ever
-        // shown for a given install, same as any other FirstUseEver default.
         Position = new Vector2(18, 868);
         PositionCondition = ImGuiCond.FirstUseEver;
         Size = new Vector2(658, 511);
         SizeCondition = ImGuiCond.FirstUseEver;
 
-        // Only the "##chatLogScroll" child in the middle should ever scroll - the channel row,
-        // toolbar and compose area above/below it are meant to stay fixed. Without these flags,
-        // even a tiny (few-pixel) mismatch in the compose-area height math turns the whole window
-        // scrollable, which drags the top toolbar and bottom action row along with it.
-        // NoTitleBar drops the title text, collapse triangle and close X entirely, so only the
-        // chat itself remains on screen - the window is toggled via the plugin's own command/
-        // hotkey instead of a close button.
+        SizeConstraints = new WindowSizeConstraints
+        {
+            MinimumSize = new Vector2(400, 220),
+            MaximumSize = new Vector2(float.MaxValue, float.MaxValue),
+        };
+
         Flags |= ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.NoTitleBar;
 
-        // Remembered separately from Flags itself - PreDraw recomputes Flags every frame from
-        // this plus NoMove/NoResize (see the position-lock toggle), so the always-on set here
-        // can't get lost or duplicated across frames.
         baseFlags = Flags;
 
-        // Without this, Escape (while this window is focused) closes the whole chat window -
-        // Dear ImGui's own text-input widgets already defocus themselves on Escape (reverting
-        // any in-progress edit) so the game regains movement input; that's all Escape should do
-        // here, not also hide the chat.
         RespectCloseHotkey = false;
 
-        // Dalamud's automatic "avoid overlapping native UI" collision handling can reposition
-        // and resize a window on its own as it crosses native UI regions - with no titlebar to
-        // judge the window's true edges against, that showed up as the wrap point seeming to
-        // shift just from dragging the window around. This plugin's whole compose+log layout
-        // manages its own size deliberately, so let it alone.
         InhibitAtkCollision = false;
 
-        // No titlebar/close button (see NoTitleBar above) means this is meant to stay open all
-        // the time, like the native chat log - toggled via the plugin's own command instead.
         IsOpen = true;
 
         var initialState = plugin.GetCharacterState();
         if (initialState.LastChannel == ChatChannel.Whisper && !string.IsNullOrEmpty(initialState.LastWhisperTarget))
         {
-            // Routed through RememberWhisperTarget (not a direct assignment) for the same reason
-            // EnterWhisperView now does - restoring last session's active whisper view used to
-            // just set activeWhisperTabTarget straight from the saved value with no guarantee a
-            // tab for it was actually still in the list (e.g. if that conversation had been
-            // evicted from a previous, buggier build) - correct content, no visible tab.
             activeWhisperTabTarget = plugin.RememberWhisperTarget(initialState, initialState.LastWhisperTarget);
             pendingTabForceSelect = activeWhisperTabTarget;
+
+            PreloadWhisperHistoryForFirstView(activeWhisperTabTarget);
         }
 
-        // ChatLogService pre-loads some recent history from log files on startup so the chat
-        // doesn't always open empty - fast-forward past all of it here so none of it gets
-        // treated as a brand new message once drawing starts (which would otherwise
-        // auto-create/blink whisper tabs and bump unread counts for stuff from hours or days ago).
-        var existingEntries = plugin.ChatLog.Entries;
+        var existingEntries = plugin.ChatLog.Snapshot();
         if (existingEntries.Count > 0)
         {
             lastSeenSequence = existingEntries[^1].Sequence;
+
+            // Seeds every view's own watermark the first time it's actually visited (see
+            // lastSeenSequenceByView's own remarks) - nothing that already existed before this
+            // window was created should ever be flagged "new" for any view.
+            initialSeenSequence = lastSeenSequence;
         }
     }
 
@@ -233,20 +192,6 @@ internal sealed class ChatWindow : Window
 
     public override void Draw()
     {
-        // Mirrors vanilla FFXIV: Enter opens the chat box for typing when it's not already
-        // focused, as long as some other native textbox isn't already using that Enter press.
-        // The actual detection happens in Plugin.OnFrameworkUpdate (see its remarks for why) -
-        // this just consumes the flag it sets.
-        //
-        // justActivatedThisFrame is deliberately a *local*, not a field: it only needs to
-        // suppress a same-frame '\n' echo from this exact activation reaching the char filter
-        // below (see pendingSendFromEnter) and flashing/closing the box it just opened. An
-        // earlier version used a persistent field for this and consuming the keystate in
-        // OnFrameworkUpdate turned out to prevent that echo from ever arriving at all, which
-        // left the field permanently stuck true - silently swallowing the user's *next* real
-        // Enter press (the one actually meant to close an empty box) instead of the phantom one
-        // it was written for. A local can't leak past this single Draw call, so it can't cause
-        // that regardless of whether the echo shows up or not.
         var justActivatedThisFrame = plugin.ConsumePendingChatActivation();
         if (justActivatedThisFrame)
         {
@@ -254,13 +199,35 @@ internal sealed class ChatWindow : Window
             ImGui.SetWindowFocus();
         }
 
-        // Scoped to the whole method (disposed whenever Draw returns, including any early
-        // return) rather than manually finding every exit point to pop it - the chosen font
-        // applies to the entire window: log, compose box, everything. Sizing is baked into the
-        // font itself (see ChatFontManager/FontsPage) rather than a runtime ImGui.SetWindowFontScale
-        // multiplier - that scale only stretches already-rasterized glyph bitmaps and was a
-        // confirmed source of shimmering/unstable text and caret placement while typing.
+        // Null specifically means the font isn't ready yet this frame (see Plugin.PushChatFont's
+        // own remarks) - drawing still proceeds (skipping the whole frame turned out to be worse:
+        // if the font flips available/unavailable often, that made the entire window blink in and
+        // out rather than just occasionally mismeasuring text). What DrawChatLogEntries does do is
+        // skip caching any height measured while the font isn't the real chat font, so a bad
+        // measurement never lingers in entryHeightCache waiting to snap once the real font is back.
         using var chatFontScope = plugin.PushChatFont();
+
+        var fontAvailableNow = plugin.IsChatFontAvailable;
+        if (fontAvailableNow != lastKnownFontAvailable)
+        {
+            lastKnownFontAvailable = fontAvailableNow;
+
+            if (fontAvailableNow && provisionalHeightSequences.Count > 0)
+            {
+                // Any entry first measured while the font wasn't ready got cached with the wrong
+                // (fallback) font's metrics. Previously that bad height just sat there until the
+                // entry happened to scroll back into view later, at which point it got re-measured
+                // and snapped to the correct height - a visible, delayed "text jumps" glitch with no
+                // obvious trigger. Purging them the instant the real font comes back forces an
+                // immediate, correct re-measurement this frame instead of an unpredictable one later.
+                foreach (var seq in provisionalHeightSequences)
+                {
+                    entryHeightCache.Remove(seq);
+                }
+
+                provisionalHeightSequences.Clear();
+            }
+        }
 
         var config = plugin.Configuration;
 
@@ -276,9 +243,6 @@ internal sealed class ChatWindow : Window
 
         if (plugin.PendingWhisperTarget is { } pendingTarget)
         {
-            // EnterWhisperView now resolves/ensures the tab and sets pendingTabForceSelect
-            // itself - doing it again here with the raw (possibly unresolved) pendingTarget would
-            // overwrite that with a key that might not actually match anything in the tab list.
             EnterWhisperView(config, state, pendingTarget);
             plugin.PendingWhisperTarget = null;
         }
@@ -291,18 +255,16 @@ internal sealed class ChatWindow : Window
             InsertChatPrefillText(state, prefillText);
         }
 
-        // Being on a whisper tab means "you're whispering that person," full stop - it shouldn't
-        // matter what channel was selected before switching to this tab. Re-asserting this every
-        // frame (not just on tab click) means clicking any other channel icon while viewing a
-        // whisper tab has no lasting effect, which is what makes the manual target field below
-        // unnecessary while an existing conversation tab is open.
         if (!string.IsNullOrEmpty(activeWhisperTabTarget))
         {
             state.LastChannel = ChatChannel.Whisper;
             state.LastWhisperTarget = activeWhisperTabTarget;
 
-            // Whatever tab you're currently viewing obviously can't also be "unread"/blinking.
             whisperUnreadCounts.Remove(activeWhisperTabTarget);
+        }
+        else if (!noviceNetworkTabActive)
+        {
+            fixedTabUnreadCounts.Remove(activeTabId);
         }
 
         if (state.LastChannel == ChatChannel.Whisper)
@@ -317,10 +279,6 @@ internal sealed class ChatWindow : Window
             }
         }
 
-        // Tab bar first, toolbar second (reversed from how this used to read top-to-bottom) - the
-        // toolbar's collapse toggle lives at the start of the tab bar row (see DrawLogTabBar), so
-        // the row it controls has to follow directly under it to read as "this expands/collapses
-        // that", not float disconnected above its own toggle.
         DrawLogTabBar(config, state);
 
         if (config.ChatToolbarExpanded)
@@ -331,37 +289,19 @@ internal sealed class ChatWindow : Window
         var chunks = GetChunks(inputText, config.MaxMessageLength);
         plugin.CurrentPreviewChunks = chunks;
 
-        // The input box's own minimum has to be at least one full visible line of the *currently
-        // active* font, not a flat guessed pixel value - GetFrameHeight() (line height + top/bottom
-        // FramePadding, using whatever font PushChatFont put in effect above) is exactly that,
-        // live. A flat constant here (previously 30px, chosen without regard to font/size) can end
-        // up smaller than a single real line once someone picks a bigger font size, and asking
-        // Dear ImGui's multiline InputText to fit less than one full line makes its internal
-        // scroll-into-view logic for the caret hunt between two slightly different states frame to
-        // frame - visible exactly as "the input field jitters, but only when it's dragged small".
         var minInputBoxHeight = ImGui.GetFrameHeight();
 
-        // The lower bound on composeAreaHeight has to guarantee room for the footer (preview-toggle
-        // row + action row + sometimes the validation message) *plus* that minimum usable input
-        // box - using measuredFooterHeight (the real height that footer rendered at last frame,
-        // see its own remarks) instead of a formula, since every formula tried here so far was
-        // only correct for some specific font-size/row-count combination.
         var minComposeAreaHeight = minInputBoxHeight + measuredFooterHeight;
         var composeAreaHeight = Math.Clamp(config.ComposeAreaHeight, minComposeAreaHeight, MaxComposeAreaHeight);
         var inputBoxHeight = Math.Max(minInputBoxHeight, composeAreaHeight - measuredFooterHeight);
 
         ImGui.PushStyleColor(ImGuiCol.ChildBg, new Vector4(0f, 0f, 0f, config.ChatLogBackgroundOpacity));
 
-        // AlwaysVerticalScrollbar reserves the scrollbar's own width permanently, whether content
-        // currently overflows or not - without it, DrawChatLogEntries' one-per-frame availableWidth
-        // measurement (which every entry that frame wraps its text against) would shrink by the
-        // scrollbar's width the instant content height crossed the overflow threshold and grow back
-        // the instant it dropped back under it. Content height sits right at that threshold often
-        // (every new message, every evicted old one), so without this, text kept visibly reflowing
-        // between two different wrap widths for no reason a user could ever pin down - reported as
-        // "the chat sometimes jitters, no clear pattern," which is exactly what this looks like.
         ImGui.BeginChild("##chatLogScroll", new Vector2(-1, -(composeAreaHeight + SplitterHeight)), true, ImGuiWindowFlags.AlwaysVerticalScrollbar);
-        DrawChatLogEntries(config, state);
+
+        ImGui.SetScrollX(0f);
+
+        DrawChatLogEntries(config, state, composeAreaHeight, inputBoxHeight);
         ImGui.EndChild();
         ImGui.PopStyleColor();
 
@@ -369,13 +309,6 @@ internal sealed class ChatWindow : Window
 
         if (composeBoxActive && ImGui.IsKeyPressed(ImGuiKey.Escape))
         {
-            // Dear ImGui's own Escape handling for InputText reverts the buffer to whatever it
-            // held when editing started and only *then* deactivates - clobbering everything
-            // typed since, when all Escape should do here is give up keyboard focus (so
-            // movement resumes) while leaving the draft alone. Deactivating it ourselves before
-            // the widget below runs skips that internal revert entirely: by the time it checks
-            // "am I still the active widget" this frame, we've already said no, so it has
-            // nothing left to revert and just redraws using inputText as-is.
             ImGuiP.ClearActiveID();
         }
 
@@ -386,14 +319,7 @@ internal sealed class ChatWindow : Window
         }
 
         ImGui.SetNextItemWidth(-1);
-        // AllowTabInput stops Tab from doing its default "move focus to the next widget" thing -
-        // needed so it reaches the char filter below as a literal '\t' to intercept for the
-        // auto-translate picker, the same way Enter is intercepted for sending.
-        // CallbackHistory is what lets TrackTextState see Up/Down at all - Dear ImGui only fires
-        // it once a multiline input is already at the first/last line respectively (so it can't
-        // move the cursor there any further itself), which is exactly the "only recall history
-        // once there's nowhere left to navigate" behavior a shell's own input has.
-        const ImGuiInputTextFlags composeFlags = ImGuiInputTextFlags.CallbackAlways | ImGuiInputTextFlags.CallbackCharFilter | ImGuiInputTextFlags.CallbackHistory | ImGuiInputTextFlags.AllowTabInput;
+        const ImGuiInputTextFlags composeFlags = ImGuiInputTextFlags.CallbackAlways | ImGuiInputTextFlags.CallbackCharFilter | ImGuiInputTextFlags.AllowTabInput;
         var commandTint = GetCommandTint(config);
         if (commandTint is { } tint)
         {
@@ -406,8 +332,6 @@ internal sealed class ChatWindow : Window
             plugin.SaveConfiguration();
         }
 
-        // Bottom edge of the input box itself, in screen space - the starting point for measuring
-        // the footer's real footprint below (see measuredFooterHeight's remarks).
         var inputBoxBottom = ImGui.GetItemRectMax().Y;
 
         if (commandTint != null)
@@ -415,13 +339,6 @@ internal sealed class ChatWindow : Window
             ImGui.PopStyleColor();
         }
 
-        // A precise, per-frame "does our own box actually have keyboard focus right now" signal
-        // for Plugin.OnFrameworkUpdate - see its remarks for why this has to be widget-level,
-        // not just "is this window focused". IsItemActive (tied to ImGui's ActiveId), not
-        // IsItemFocused (tied to nav focus, which ClearActiveID does NOT clear) - using
-        // IsItemFocused here left this stuck true after the empty-Enter-defocuses-like-Escape
-        // path called ClearActiveID, since nav focus stayed pinned to this box until some other
-        // widget (e.g. clicking a tab) took it away - blocking every activation in between.
         composeBoxActive = ImGui.IsItemActive();
         plugin.IsChatInputActive = composeBoxActive;
 
@@ -429,7 +346,8 @@ internal sealed class ChatWindow : Window
         {
             pendingAutoTranslatePopup = false;
             plugin.EnsureAutoTranslateLoaded();
-            autoTranslateSearch = string.Empty;
+
+            autoTranslateSearch = GetWordAtCursor();
             autoTranslateBrowseGroup = null;
             ImGui.OpenPopup("##autoTranslatePopup");
         }
@@ -440,8 +358,6 @@ internal sealed class ChatWindow : Window
         {
             pendingSendFromEnter = false;
 
-            // See justActivatedThisFrame's own comment above: only swallow a '\n' that arrives
-            // on the exact same frame this box was just given focus, never anything after.
             if (!justActivatedThisFrame)
             {
                 TrySend(state);
@@ -452,18 +368,26 @@ internal sealed class ChatWindow : Window
 
         DrawPreviewToggle(config, state, chunks);
 
-        DrawActionRow();
-
-        if (!string.IsNullOrEmpty(validationMessage))
+        if (string.IsNullOrEmpty(validationMessage))
+        {
+            ImGui.Dummy(new Vector2(0f, ImGui.GetTextLineHeight()));
+        }
+        else
         {
             ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f), validationMessage);
         }
 
-        // The real, exact footprint of everything below the input box this frame - see
-        // measuredFooterHeight's remarks. Feeds next frame's inputBoxHeight/minComposeAreaHeight
-        // instead of a formula, so it's always right for whatever font size and row count (2 rows
-        // normally, 3 whenever the validation message is showing) actually rendered.
-        measuredFooterHeight = Math.Max(0f, ImGui.GetCursorScreenPos().Y - inputBoxBottom) + FooterBottomPaddingPx;
+        // Rounded up to a whole pixel - this feeds into composeAreaHeight below, and with the
+        // default ComposeAreaHeight (70f) sitting under the natural minComposeAreaHeight for most
+        // font sizes, composeAreaHeight sits clamped at minComposeAreaHeight for most users, which
+        // tracks this value 1:1. Any sub-pixel noise in the raw measurement (ImGui's own text/frame
+        // layout math isn't guaranteed to land on an exact whole pixel every frame) would otherwise
+        // feed straight into ##chatLogScroll's own height every single frame - invisible on its own,
+        // but while pinned to the bottom (see DrawChatLogEntries' scroll-follow logic), a viewport
+        // that grows or shrinks by a fraction of a pixel shifts which whole pixel row the last line of
+        // text rounds to, which is exactly a visible one-pixel "jitter" at the bottom and nowhere
+        // else. Ceiling (not Round) so this never under-reserves space by rounding down.
+        measuredFooterHeight = MathF.Ceiling(Math.Max(0f, ImGui.GetCursorScreenPos().Y - inputBoxBottom) + FooterBottomPaddingPx);
 
         ImGui.PopStyleVar(8);
     }
@@ -493,13 +417,6 @@ internal sealed class ChatWindow : Window
         }
     }
 
-    /// <summary>
-    /// The speech-bubble icon button that opens a dropdown-style popup listing every send
-    /// channel, mirroring the game's own native chat-channel picker (right down to only listing
-    /// linkshells/cross-world linkshells that actually exist, with their real names) instead of
-    /// a row of one icon button per channel. Sits bottom-left of the compose area, followed
-    /// immediately by the current channel's name in its configured color.
-    /// </summary>
     private void DrawChannelPickerButton(Configuration config, CharacterState state)
     {
         if (DrawToolbarIconButton(FontAwesomeIcon.Comment))
@@ -588,13 +505,6 @@ internal sealed class ChatWindow : Window
 
     internal void SelectChannel(Configuration config, CharacterState state, ChatChannel channel)
     {
-        // Only jump the log view when switching TO Whisper *and* there's an actual target to
-        // whisper (to your last conversation, same convenience as before) - switching to any
-        // other send channel, or to Whisper with nothing to whisper yet, must leave whatever tab
-        // the user is currently viewing alone. The log tab bar is always visible now (unlike
-        // before, when it only existed while Whisper was selected), so clearing
-        // activeWhisperTabTarget here would desync it from what ImGui's tab bar still visually
-        // shows as selected.
         if (channel == ChatChannel.Whisper && !string.IsNullOrEmpty(state.LastWhisperTarget))
         {
             EnterWhisperView(config, state, state.LastWhisperTarget);
@@ -608,18 +518,6 @@ internal sealed class ChatWindow : Window
         ViewChanged?.Invoke();
     }
 
-    /// <summary>
-    /// Every log-toolbar icon button (see DrawLogToolbar/DrawRpActionsMenu) routes through here
-    /// instead of calling ImGuiComponents.IconButton directly, so Configuration.ToolbarIconPack
-    /// picks the chrome for the whole row in one place rather than needing every call site to
-    /// branch on it individually.
-    /// </summary>
-    /// <param name="colorOverride">
-    /// A per-button dynamic color (the search icon turning orange while a filter's active, Novice
-    /// Network's connected/connecting pulse) - takes priority over Configuration.ToolbarIconColor
-    /// even when the user's turned that on, exactly like it did back when these were plain
-    /// PushStyleColor(ImGuiCol.Text, ...) wraps around a bare ImGuiComponents.IconButton call.
-    /// </param>
     private bool DrawToolbarIconButton(FontAwesomeIcon icon, Vector4? colorOverride = null)
     {
         var config = plugin.Configuration;
@@ -644,9 +542,6 @@ internal sealed class ChatWindow : Window
 
     private void DrawLogToolbar(Configuration config, CharacterState state)
     {
-        // No left-click action on purpose - the search box used to sit inline here all the time;
-        // now it only shows up in a small popup on right-click, to keep this row compact. The
-        // icon still turns orange while a filter is active as a reminder it's not "just empty".
         var hasActiveSearch = logSearchFilter.Length > 0;
         DrawToolbarIconButton(FontAwesomeIcon.Search, hasActiveSearch ? SearchHighlightColor : null);
 
@@ -662,15 +557,24 @@ internal sealed class ChatWindow : Window
             ImGui.EndPopup();
         }
 
+        var showingWhisperForHistory = !string.IsNullOrEmpty(activeWhisperTabTarget);
+
         ImGui.SameLine();
         if (DrawToolbarIconButton(FontAwesomeIcon.CalendarAlt))
         {
-            ImGui.OpenPopup("##historyDatesPopup");
+            if (showingWhisperForHistory)
+            {
+                RefreshWhisperHistoryForTarget(activeWhisperTabTarget);
+            }
+            else
+            {
+                ImGui.OpenPopup("##historyDatesPopup");
+            }
         }
 
         if (ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip(Loc.T("ChatLog.LoadHistory"));
+            ImGui.SetTooltip(showingWhisperForHistory ? Loc.T("ChatLog.LoadWhisperHistory") : Loc.T("ChatLog.LoadHistory"));
         }
 
         DrawHistoryDatesPopup();
@@ -746,90 +650,29 @@ internal sealed class ChatWindow : Window
         }
 
         ImGui.SameLine();
-        var noviceConnected = NoviceNetworkService.IsConnected;
-        var noviceJoinFailed = NoviceNetworkService.JoinFailed;
-        var noviceAutoRetrying = NoviceNetworkService.AutoRetryEnabled && !noviceConnected;
-
-        // Covers both a plain single click (IsJoining, the first few seconds before it's had time
-        // to succeed or be judged failed) and auto-retry's repeated attempts - without IsJoining
-        // here, clicking Connect gave no feedback at all until either the green (connected) or red
-        // (JoinFailed) state appeared several seconds later, reading as if the click did nothing.
-        var noviceTrying = (NoviceNetworkService.IsJoining || noviceAutoRetrying) && !noviceConnected;
-
-        // Pulses gently between the normal text color and orange rather than sitting flat while
-        // trying, so "actively trying to connect" reads as an ongoing process at a glance instead
-        // of looking identical to the plain disconnected state until you happen to hover it.
-        Vector4? wifiColorOverride = null;
-        if (noviceConnected)
+        if (DrawToolbarIconButton(FontAwesomeIcon.Wifi))
         {
-            wifiColorOverride = new Vector4(0.3f, 0.9f, 0.3f, 1f);
-        }
-        else if (noviceTrying)
-        {
-            var pulse = (MathF.Sin(Environment.TickCount64 / 250f) + 1f) * 0.5f;
-            var normal = ImGui.GetStyle().Colors[(int)ImGuiCol.Text];
-            var orange = new Vector4(1f, 0.65f, 0.15f, 1f);
-            wifiColorOverride = Vector4.Lerp(normal, orange, pulse);
-        }
-
-        if (DrawToolbarIconButton(FontAwesomeIcon.Wifi, wifiColorOverride))
-        {
-            if (noviceConnected)
-            {
-                NoviceNetworkService.Disconnect(plugin.Log);
-            }
-            else
-            {
-                NoviceNetworkService.Connect(plugin.Log);
-            }
-        }
-
-        // The game's own "channel is full" (or any other silent join rejection) notice is a
-        // native banner, not a chat line - it never reaches our log no matter what's shown here,
-        // so this small red dot is the only cue that the last connect attempt didn't go through.
-        // Suppressed while still trying (either a fresh single attempt or auto-retry) - that state
-        // already has its own pulsing indicator above, and a fail badge on top of it would just
-        // read as "still failing" on every single attempt in between successes.
-        if (noviceJoinFailed && !noviceTrying)
-        {
-            var badgeMax = ImGui.GetItemRectMax();
-            var badgeRadius = 4f;
-            var badgeCenter = new Vector2(badgeMax.X - badgeRadius, badgeMax.Y - badgeRadius);
-            ImGui.GetWindowDrawList().AddCircleFilled(badgeCenter, badgeRadius, ImGui.GetColorU32(new Vector4(0.9f, 0.15f, 0.15f, 1f)));
-        }
-
-        // Right-click offers to keep retrying on its own every few seconds until a slot actually
-        // opens up - for a channel that's often full, that beats sitting there re-clicking Connect
-        // by hand. Ticked from Plugin.OnFrameworkUpdate (see NoviceNetworkService.TickAutoRetry) so
-        // it keeps working even if this window gets hidden mid-retry.
-        if (ImGui.BeginPopupContextItem("##noviceNetworkAutoRetryMenu"))
-        {
-            if (NoviceNetworkService.AutoRetryEnabled)
-            {
-                if (ImGui.Selectable(Loc.T("NoviceNetwork.StopAutoRetry")))
-                {
-                    NoviceNetworkService.StopAutoRetry();
-                }
-            }
-            else if (ImGui.Selectable(Loc.T("NoviceNetwork.StartAutoRetry")))
-            {
-                NoviceNetworkService.StartAutoRetry(plugin.Log);
-            }
-
-            ImGui.EndPopup();
+            ImGui.OpenPopup("##noviceNetworkMenu");
         }
 
         if (ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip(noviceAutoRetrying
-                ? Loc.T("NoviceNetwork.AutoRetrying")
-                : NoviceNetworkService.IsJoining
-                    ? Loc.T("NoviceNetwork.Connecting")
-                    : noviceJoinFailed
-                        ? Loc.T("NoviceNetwork.JoinFailed")
-                        : noviceConnected
-                            ? Loc.T("NoviceNetwork.Connected")
-                            : Loc.T("NoviceNetwork.Disconnected"));
+            ImGui.SetTooltip(Loc.T("NoviceNetwork.MenuTooltip"));
+        }
+
+        if (ImGui.BeginPopup("##noviceNetworkMenu"))
+        {
+            if (ImGui.Selectable(Loc.T("NoviceNetwork.Join")))
+            {
+                NoviceNetworkService.Connect(plugin.Log);
+            }
+
+            if (ImGui.Selectable(Loc.T("NoviceNetwork.Leave")))
+            {
+                NoviceNetworkService.Disconnect(plugin.Log);
+            }
+
+            ImGui.EndPopup();
         }
 
         ImGui.SameLine();
@@ -872,17 +715,20 @@ internal sealed class ChatWindow : Window
         }
 
         var dates = plugin.ChatLog.GetAvailableLogDates();
-        if (dates.Count == 0)
+        var whisperTargets = plugin.ChatLog.GetWhisperLogTargets();
+        if (dates.Count == 0 && whisperTargets.Count == 0)
         {
             ImGui.TextDisabled(Loc.T("ChatLog.NoHistoryFiles"));
             ImGui.EndPopup();
             return;
         }
 
-        ImGui.SetNextItemWidth(180);
-        ImGui.InputTextWithHint("##historyDateSearch", Loc.T("ChatLog.HistorySearchHint"), ref historySearchFilter, 20);
+        ImGui.SetNextItemWidth(220);
+        ImGui.InputTextWithHint("##historyDateSearch", Loc.T("ChatLog.HistorySearchHint"), ref historySearchFilter, 40);
 
-        ImGui.BeginChild("##historyDateList", new Vector2(180, 220), true);
+        ImGui.BeginChild("##historyDateList", new Vector2(220, 260), true);
+
+        var anyDateShown = false;
         foreach (var date in dates)
         {
             if (historySearchFilter.Length > 0 && date.IndexOf(historySearchFilter, StringComparison.OrdinalIgnoreCase) < 0)
@@ -890,12 +736,56 @@ internal sealed class ChatWindow : Window
                 continue;
             }
 
+            if (!anyDateShown)
+            {
+                ImGui.TextDisabled(Loc.T("ChatLog.HistoryDatesHeader"));
+                anyDateShown = true;
+            }
+
             if (ImGui.Selectable(date))
             {
-                loadedHistoryEntries = plugin.ChatLog.LoadHistoryFile(date);
+                var dayEntries = plugin.ChatLog.LoadHistoryFile(date);
+
+                foreach (var dayEntry in dayEntries)
+                {
+                    dayEntry.Sequence = nextPreloadSequence--;
+                }
+
+                loadedHistoryEntries = dayEntries;
                 loadedHistoryLabel = date;
                 ImGui.CloseCurrentPopup();
             }
+        }
+
+        var anyWhisperShown = false;
+        foreach (var target in whisperTargets)
+        {
+            if (historySearchFilter.Length > 0 && target.IndexOf(historySearchFilter, StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                continue;
+            }
+
+            if (!anyWhisperShown)
+            {
+                if (anyDateShown)
+                {
+                    ImGui.Separator();
+                }
+
+                ImGui.TextDisabled(Loc.T("ChatLog.HistoryWhispersHeader"));
+                anyWhisperShown = true;
+            }
+
+            if (ImGui.Selectable(target + "##histWhisper" + target))
+            {
+                OpenWhisperTabWithHistory(target);
+                ImGui.CloseCurrentPopup();
+            }
+        }
+
+        if (!anyDateShown && !anyWhisperShown)
+        {
+            ImGui.TextDisabled(Loc.T("ChatLog.NoHistoryFiles"));
         }
 
         ImGui.EndChild();
@@ -903,13 +793,6 @@ internal sealed class ChatWindow : Window
         ImGui.EndPopup();
     }
 
-    /// <summary>
-    /// Confirms before the Eraser button takes effect - clearing used to nuke the entire shared
-    /// log instantly with no way back, which is exactly the kind of one-click-and-it's-gone
-    /// action worth a speed bump for. Only ever hides messages from *this* tab's view (see
-    /// whisperCloseCutoff/fixedTabClearCutoff) - the shared buffer itself, and every other tab's
-    /// view of it, is untouched.
-    /// </summary>
     private void DrawClearTabConfirmationPopup(Configuration config)
     {
         if (!ImGui.BeginPopupModal("##confirmClearTab", ImGuiWindowFlags.AlwaysAutoResize))
@@ -929,7 +812,7 @@ internal sealed class ChatWindow : Window
 
         if (ImGui.Button(Loc.T("ChatLog.ClearTabConfirmYes")))
         {
-            var entries = plugin.ChatLog.Entries;
+            var entries = plugin.ChatLog.Snapshot();
             var cutoff = entries.Count > 0 ? entries[^1].Sequence : 0;
 
             if (showingWhisper)
@@ -957,18 +840,24 @@ internal sealed class ChatWindow : Window
         ImGui.EndPopup();
     }
 
-    private void DrawChatLogEntries(Configuration config, CharacterState state)
+    private void DrawChatLogEntries(Configuration config, CharacterState state, float composeAreaHeight, float inputBoxHeight)
     {
         var viewingHistory = loadedHistoryEntries != null;
-        IReadOnlyList<ChatLogEntry> entries = loadedHistoryEntries ?? plugin.ChatLog.Entries;
 
-        // The scroll position of "##chatLogScroll" is a single value tied to that child's ID,
-        // shared across every tab (switching tabs doesn't draw a new child, just different
-        // content in the same one) - without this, opening a different tab kept whatever scroll
-        // offset was left over from the previous one instead of showing the bottom of the new
-        // tab's content. Comparing against the view shown last frame catches every way the view
-        // can change: clicking a different tab, a whisper tab auto-opening, browsing to a loaded
-        // history file, etc.
+        // Snapshot(), not the live Entries property directly - Entries hands back the service's
+        // own internal list with no copy and no lock, while writes to it (a new message arriving,
+        // eviction once the buffer's full) DO take entriesLock. Iterating that same live list here
+        // with a plain foreach had no protection against a message landing mid-iteration - rare,
+        // but exactly the kind of one-frame-only glitch that's near-impossible to catch on camera
+        // (a single bad frame surrounded by good ones on either side) yet still very real.
+        var liveEntries = plugin.ChatLog.Snapshot();
+
+        List<ChatLogEntry>? whisperPreload = null;
+        if (!viewingHistory && !string.IsNullOrEmpty(activeWhisperTabTarget))
+        {
+            whisperPreloadedHistory.TryGetValue(activeWhisperTabTarget, out whisperPreload);
+        }
+
         var viewKey = viewingHistory
             ? $"H:{loadedHistoryLabel}"
             : !string.IsNullOrEmpty(activeWhisperTabTarget)
@@ -977,21 +866,28 @@ internal sealed class ChatWindow : Window
                     ? "NN"
                     : $"T:{activeTabId}";
         var viewChanged = viewKey != lastViewKey;
+        if (viewChanged && lastViewKey.Length > 0)
+        {
+            viewScrollPositions[lastViewKey] = ImGui.GetScrollY();
+        }
+
         lastViewKey = viewKey;
 
-        // Was a flat 5px, which turned out too strict - a frame or two of height churn (a new
-        // entry wrapping to a slightly different line count, the footer's measured height
-        // settling, ...) could leave the scroll position a handful of pixels short of the exact
-        // max on the very frame a new message arrives, silently breaking auto-follow until the
-        // user nudged the scrollbar themselves. Widened to "within about a line or two" instead
-        // of "essentially exact", which still respects "scrolled up on purpose" for anything more
-        // than a nudge.
-        const float nearBottomThresholdPx = 60f;
-        var nearBottomBeforeDraw = ImGui.GetScrollY() >= ImGui.GetScrollMaxY() - nearBottomThresholdPx;
+        // Chat2's own condition for this, verified against its actual source (ChatLog.Window.cs) -
+        // was exact equality with no tolerance window at all for a while, on the theory that once
+        // GetScrollY() equals GetScrollMaxY() both advance together every frame content grows, so
+        // there's nothing to paper over with a band. That held up for busy tabs, but a live repro on
+        // a whisper tab showed SetScrollHereY(1f) itself can settle a handful of pixels (4-8px, well
+        // under one line height) short of the true GetScrollMaxY() it was aiming for - close enough
+        // to look and feel like the bottom, but exact equality never fires again afterward, so every
+        // later incoming message permanently stops auto-scrolling too (this check is self-reinforcing
+        // once it goes false). BottomToleranceForNewMessagePx is deliberately small - far below a
+        // single line's height - specifically so it can't reintroduce the old wide-band bug (a manual
+        // scroll gesture passing through a several-line-tall "near enough" zone getting yanked the
+        // rest of the way regardless of whether anything new had happened).
+        var nearBottomBeforeDraw = ImGui.GetScrollMaxY() - ImGui.GetScrollY() <= BottomToleranceForNewMessagePx;
         var mentionTerm = plugin.MentionFirstName;
 
-        // Measured once per frame, at the log area's left edge before any entry is drawn, so
-        // every entry this frame wraps against the exact same width - see ColoredTextRenderer.
         var availableWidth = ImGui.GetContentRegionAvail().X;
 
         var showingWhisper = !string.IsNullOrEmpty(activeWhisperTabTarget);
@@ -1001,96 +897,212 @@ internal sealed class ChatWindow : Window
         var hasNewEntries = false;
         var hasNewOwnMessageInView = false;
 
-        var index = 0;
-        foreach (var entry in entries)
-        {
-            // Sequence-based (not count-based) so this still works once the buffer fills up and
-            // starts evicting from the front - at that point the count stops changing at all,
-            // which would otherwise permanently break auto-scroll and unread tracking below.
-            var isNew = !viewingHistory && entry.Sequence > lastSeenSequence;
-            if (isNew)
-            {
-                TrackUnreadForNewEntry(config, state, entry, showingWhisper, showingNoviceNetwork, activeTab?.Id);
-            }
+        var viewSeenBefore = lastSeenSequenceByView.GetValueOrDefault(viewKey, initialSeenSequence);
+        var viewSeenMax = viewSeenBefore;
 
+        bool MatchesActiveView(ChatLogEntry entry)
+        {
             if (showingWhisper)
             {
-                if (!MatchesWhisperTarget(entry, activeWhisperTabTarget))
-                {
-                    continue;
-                }
+                return MatchesWhisperTarget(entry, activeWhisperTabTarget);
             }
-            else if (showingNoviceNetwork)
+
+            if (showingNoviceNetwork)
             {
-                if (!IsNoviceNetworkMessage(entry.ChatType))
-                {
-                    continue;
-                }
-
-                if (noviceNetworkClearCutoff is { } nnClearCutoff && entry.Sequence <= nnClearCutoff)
-                {
-                    continue;
-                }
+                return IsNoviceNetworkMessage(entry.ChatType)
+                    && (noviceNetworkClearCutoff is not { } nnClearCutoff || entry.Sequence > nnClearCutoff);
             }
-            else if (activeTab != null)
+
+            if (activeTab != null)
             {
-                if (!activeTab.Matches(entry.ChatType))
-                {
-                    continue;
-                }
-
-                // See fixedTabClearCutoff - hides everything up to whenever this tab was last
-                // cleared, without touching the shared buffer other tabs still read from.
-                if (fixedTabClearCutoff.TryGetValue(activeTab.Id, out var clearCutoff) && entry.Sequence <= clearCutoff)
-                {
-                    continue;
-                }
+                return activeTab.Matches(entry.ChatType)
+                    && (!fixedTabClearCutoff.TryGetValue(activeTab.Id, out var clearCutoff) || entry.Sequence > clearCutoff);
             }
 
+            return false;
+        }
+
+        // Badges (unread counts on tabs/whispers other than the active one) need to see every
+        // channel's traffic, not just what matches the active view, so this can't share the
+        // view-specific cap below - but it doesn't need a full forward scan of up to 3000 entries
+        // either: liveEntries is in ascending Sequence order, lastSeenSequence only ever advances,
+        // so walking backward from the newest and stopping at the first already-seen entry visits
+        // exactly the (usually single-digit) handful that are actually new, not the whole buffer.
+        if (!viewingHistory)
+        {
+            for (var i = liveEntries.Count - 1; i >= 0; i--)
+            {
+                var entry = liveEntries[i];
+                if (entry.Sequence <= lastSeenSequence)
+                {
+                    break;
+                }
+
+                TrackUnreadForNewEntry(config, state, entry, showingWhisper, showingNoviceNetwork, activeTab?.Id);
+            }
+        }
+
+        // Filter to the active view *before* capping, not after - capping the raw global stream
+        // first (as this used to) meant a busy, unrelated channel's volume alone could push a lower-
+        // traffic view's own recent messages (e.g. a whisper conversation) out of the "last 600"
+        // window entirely, while its *older*, file-preloaded history (via whisperPreload below,
+        // which isn't subject to this cap) kept showing - reported as "the newest messages vanish
+        // but old ones stay". Filtering first means each view's cap is judged against its own
+        // traffic, not everyone else's.
+        //
+        // Walking liveEntries backward and stopping once maxLiveEntriesConsidered matches are found
+        // (rather than collecting every match forward and trimming afterward) means a busy tab that
+        // matches most of the buffer only ever visits its own last 600, not the full ~3000 - and
+        // reusing viewMatchingLiveEntriesBuffer across frames (Clear(), not a fresh List) avoids
+        // repeated backing-array growth from allocating a new list every single frame, which was
+        // producing enough GC pressure to show up as an actual UI hitch.
+        const int maxLiveEntriesConsidered = 600;
+        viewMatchingLiveEntriesBuffer.Clear();
+        for (var i = liveEntries.Count - 1; i >= 0 && viewMatchingLiveEntriesBuffer.Count < maxLiveEntriesConsidered; i--)
+        {
+            var entry = liveEntries[i];
+            if (MatchesActiveView(entry))
+            {
+                viewMatchingLiveEntriesBuffer.Add(entry);
+            }
+        }
+
+        viewMatchingLiveEntriesBuffer.Reverse();
+
+        IReadOnlyList<ChatLogEntry> entries = loadedHistoryEntries ?? viewMatchingLiveEntriesBuffer;
+
+        void ProcessEntry(ChatLogEntry entry)
+        {
             if (logSearchFilter.Length > 0
                 && entry.Text.IndexOf(logSearchFilter, StringComparison.OrdinalIgnoreCase) < 0
-                && entry.Sender.IndexOf(logSearchFilter, StringComparison.OrdinalIgnoreCase) < 0)
+                && entry.Sender.IndexOf(logSearchFilter, StringComparison.OrdinalIgnoreCase) < 0
+                && entry.Timestamp.ToString("yyyy-MM-dd HH:mm:ss").IndexOf(logSearchFilter, StringComparison.OrdinalIgnoreCase) < 0)
             {
-                continue;
+                return;
             }
 
-            // Only counts as "something new arrived" for the auto-scroll decision below once an
-            // entry has actually made it past every filter above and is really part of *this*
-            // view - counting it the instant it's merely new anywhere in the shared buffer (this
-            // used to run before all those filters) meant activity in a completely different
-            // channel/tab - one you're not even looking at - could still yank your current view
-            // back to the bottom, which looked exactly like the chat randomly jumping for no
-            // reason whenever you'd scrolled up even slightly to reread something.
-            if (isNew)
+            if (!viewingHistory && entry.Sequence > viewSeenMax)
+            {
+                viewSeenMax = entry.Sequence;
+            }
+
+            if (!viewingHistory && entry.Sequence > viewSeenBefore)
             {
                 hasNewEntries = true;
 
-                // A message you just sent yourself should always scroll into view regardless of
-                // where you'd scrolled to - unlike someone else's message, there's no "reading
-                // history on purpose" case where you wouldn't want to see your own reply land.
                 if (IsSelfAuthored(entry))
                 {
                     hasNewOwnMessageInView = true;
                 }
             }
 
-            DrawLogEntry(entry, config, mentionTerm, index, availableWidth, showingWhisper);
-            index++;
+            // Same technique as Chat2's own DrawMessages (verified against its actual source) -
+            // ImGui.IsItemVisible() is ImGui's own authoritative visibility check against its real,
+            // current clip rect, not a hand-rolled approximation. An earlier version compared
+            // entryTop against a scrollY/viewHeight/cullMarginPx captured once at the top of this
+            // whole method - close enough most of the time, but never exactly what ImGui itself
+            // considers visible, and that gap was a real, ongoing source of position drift.
+            var hadCache = entryHeightCache.TryGetValue(entry.Sequence, out var cachedHeight);
+            if (hadCache)
+            {
+                var beforeDummy = ImGui.GetCursorPos();
+                ImGui.Dummy(new Vector2(availableWidth, cachedHeight));
+
+                if (!ImGui.IsItemVisible())
+                {
+                    return;
+                }
+
+                ImGui.SetCursorPos(beforeDummy);
+            }
+
+            var entryTop = ImGui.GetCursorPosY();
+            DrawLogEntry(entry, config, mentionTerm, availableWidth, showingWhisper);
+            var newHeight = ImGui.GetCursorPosY() - entryTop;
+
+            if (!plugin.IsChatFontAvailable)
+            {
+                // Track this entry as provisional so Draw's own font-availability-restored check
+                // can purge and correctly re-measure it the instant the real font is back, instead
+                // of leaving a wrong height to linger until the entry happens to scroll back into
+                // view naturally (which is what showed up as a delayed, seemingly random "text
+                // jumps" glitch).
+                provisionalHeightSequences.Add(entry.Sequence);
+
+                if (hadCache)
+                {
+                    // Measured with whatever font ImGui had active, not the real chat font (see
+                    // Draw's own remarks) - don't let this overwrite an entry that's already got a
+                    // real, correctly-measured cached height. This check only applies when a cached
+                    // height already exists, though - an entry with no cache yet still needs
+                    // *something* written so culling has a height to work with at all; skipping
+                    // that unconditionally meant every uncached entry (e.g. all 3000 right after a
+                    // plugin reload) got fully redrawn every single frame for as long as the font
+                    // stayed unavailable, with culling never getting the chance to kick in - a
+                    // real, severe performance regression, not just an occasional bad measurement.
+                    return;
+                }
+            }
+
+            entryHeightCache[entry.Sequence] = newHeight;
         }
 
-        // Opening/switching to a tab always jumps to the bottom, unconditionally. Otherwise, new
-        // messages only pull the view down if it was already at (or very near) the bottom - if
-        // the user has scrolled up to read something older, a new message doesn't yank them back
-        // down; scrolling to the bottom themselves is what re-enables auto-follow again. A new
-        // message from yourself is the one exception - see hasNewOwnMessageInView above.
-        if (viewChanged || hasNewOwnMessageInView || (!viewingHistory && hasNewEntries && nearBottomBeforeDraw))
+        // whisperPreload (per-whisper-target file history, loaded once) used to always draw entirely
+        // before entries (the live/daily-log-sourced list), on the assumption that preloaded history
+        // is always older than everything live. That's not actually guaranteed - the preload file
+        // and the live list are two independent sources with their own coverage/date ranges/caps, so
+        // the preload file can (and did, in a live report) contain messages *newer* than some of
+        // what's in the live list, putting a whole newer conversation above older live messages.
+        // Both lists are individually sorted ascending by Timestamp already (LoadWhisperHistory's own
+        // stable sort; entries built ascending above), so a proper merge - not two sequential loops -
+        // is what actually produces correct chronological order either way.
+        if (whisperPreload != null)
         {
+            foreach (var entry in MergeByTimestamp(whisperPreload, entries))
+            {
+                ProcessEntry(entry);
+            }
+        }
+        else
+        {
+            foreach (var entry in entries)
+            {
+                ProcessEntry(entry);
+            }
+        }
+
+        if (viewChanged)
+        {
+            if (config.ScrollToBottomOnTabSwitch || !viewScrollPositions.TryGetValue(viewKey, out var savedScrollY))
+            {
+                ImGui.SetScrollHereY(1f);
+            }
+            else
+            {
+                ImGui.SetScrollY(savedScrollY);
+            }
+        }
+        else if (hasNewOwnMessageInView || (!viewingHistory && hasNewEntries && nearBottomBeforeDraw))
+        {
+            // Only snaps when something actually new arrived while already exactly at the bottom -
+            // matches Chat2's own condition (switchedTab || GetScrollY() >= GetScrollMaxY()), not a
+            // tolerance window around it. A wide "near enough" band was only ever there to paper
+            // over the old visibility check's own imprecision (see ProcessEntry's remarks) - with
+            // that fixed at its actual source, a tolerance band just meant a manual scroll crossing
+            // into that zone (mouse wheel almost never lands on the exact pixel maximum) got
+            // hijacked and yanked the rest of the way regardless of whether anything new had
+            // happened, reported as "scrolling up and back down starts the jitter".
             ImGui.SetScrollHereY(1f);
         }
 
-        if (!viewingHistory && entries.Count > 0)
+        if (!viewingHistory && liveEntries.Count > 0)
         {
-            lastSeenSequence = entries[^1].Sequence;
+            lastSeenSequence = liveEntries[^1].Sequence;
+        }
+
+        if (!viewingHistory)
+        {
+            lastSeenSequenceByView[viewKey] = viewSeenMax;
         }
     }
 
@@ -1098,11 +1110,6 @@ internal sealed class ChatWindow : Window
         entry.ChatType == XivChatType.TellOutgoing
         || string.Equals(entry.Sender, plugin.OwnCharacterName, StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>
-    /// Bumps the unread badge on every tab a freshly-arrived message would show up in, except
-    /// whichever one you're currently looking at. Your own outgoing messages never count as
-    /// "missed".
-    /// </summary>
     private void TrackUnreadForNewEntry(Configuration config, CharacterState state, ChatLogEntry entry, bool showingWhisper, bool showingNoviceNetwork, Guid? activeFixedTabId)
     {
         if (IsSelfAuthored(entry))
@@ -1139,35 +1146,15 @@ internal sealed class ChatWindow : Window
     private static bool IsNoviceNetworkMessage(XivChatType type) =>
         type is XivChatType.NoviceNetwork or XivChatType.NoviceNetworkSystem;
 
-    /// <summary>
-    /// Makes sure a newly-arrived whisper has a tab to show up in (conversations used to only
-    /// get a tab once you replied to them) and bumps its unread count (which also drives the
-    /// blink) if you're not already looking at it.
-    /// </summary>
     private void TrackIncomingWhisper(CharacterState state, ChatLogEntry entry)
     {
         var senderIdentity = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
 
-        // RememberWhisperTarget now does its own first-name-only fallback match (see its own
-        // remarks) - the separate ResolveWhisperTabKey this used to call first has been folded
-        // into it, so every caller (not just this one) benefits from the same de-duplication
-        // instead of two copies of similar logic quietly drifting apart.
         var tabKey = plugin.RememberWhisperTarget(state, senderIdentity);
 
         if (!IsViewingWhisperTarget(tabKey, entry.Sender) && !state.MutedWhisperTargets.Contains(tabKey))
         {
             whisperUnreadCounts[tabKey] = whisperUnreadCounts.GetValueOrDefault(tabKey) + 1;
-
-            // Scroll this tab into view whenever it picks up a new unread message and the user
-            // isn't already looking at it - not just the very first time a conversation is ever
-            // created (an earlier attempt at this only covered that case, which missed anyone
-            // whose conversation already existed from a previous session: it's just as easy for
-            // an *existing* tab to end up scrolled out of view once enough others are open, and a
-            // new message arriving there is exactly when the user needs to be able to see it, not
-            // just stumble onto it later while scrolling around). Muted tabs are deliberately
-            // excluded here too, same as the unread bump above - forcing a muted tab into view
-            // would undo the entire point of muting it.
-            pendingTabForceSelect = tabKey;
         }
     }
 
@@ -1186,9 +1173,9 @@ internal sealed class ChatWindow : Window
         return string.Equals(activeWhisperTabTarget.Split('@')[0], senderNameOnly, StringComparison.OrdinalIgnoreCase);
     }
 
-    private void DrawLogEntry(ChatLogEntry entry, Configuration config, string mentionTerm, int index, float availableWidth, bool showingWhisper)
+    private void DrawLogEntry(ChatLogEntry entry, Configuration config, string mentionTerm, float availableWidth, bool showingWhisper)
     {
-        ImGui.PushID(index);
+        ImGui.PushID((int)entry.Sequence);
         ImGui.BeginGroup();
 
         var prefixSize = Vector2.Zero;
@@ -1204,42 +1191,18 @@ internal sealed class ChatWindow : Window
         ImGui.SameLine(0, 0);
         prefixSize += ImGui.CalcTextSize(tag);
 
-        // For an outgoing tell, entry.Sender actually holds the RECIPIENT's name (that's how the
-        // game itself reports XivChatType.TellOutgoing) - showing it as-is made both sides of a
-        // whisper conversation display under the other person's name, with no way to tell who
-        // said what. Label it "You"/"Du" instead, in the send-accent color so it's visually
-        // distinct from the other party's messages too.
         var isOutgoingTell = entry.ChatType == XivChatType.TellOutgoing;
-        if (!isOutgoingTell)
+        if (!isOutgoingTell && config.ShowSenderStatusIcons)
         {
             prefixSize.X += StatusIconRenderer.Draw(plugin, entry.SenderPayloads);
         }
 
-        // SanitizeSenderName strips the world back out of entry.Sender for a cross-world sender
-        // (see its own remarks) - it has to be appended back on here for the visible name, or the
-        // sender's world silently disappears from the log entirely instead of just no longer
-        // being garbled together with an unrenderable glyph.
         var displayName = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
 
-        // Inside the whisper tab for this exact conversation the target is already obvious from
-        // context, so your own outgoing side just reads "You". Anywhere else (the general tab, a
-        // fixed tab that also happens to show Whisper) that context is gone - entry.Sender is the
-        // RECIPIENT for an outgoing tell (see remark above displayName), so showing the target's
-        // name there makes it clear who you sent it to instead of just showing your own name again.
-        // The tag drawn just above (ChannelDisplay.DisplayTag) already renders "[T>]" in front of
-        // this for TellOutgoing - do not add it again here.
         var rawName = isOutgoingTell && showingWhisper ? plugin.OwnCharacterName : displayName;
 
-        // System/Error/Urgent/Echo messages (and similar) have no sender at all - entry.Sender is
-        // just "" for these. Appending ": " unconditionally used to leave a dangling " : " right
-        // after the channel tag (its own trailing space, then the empty name's ": ") with nothing
-        // in front of the colon, which read as a formatting glitch rather than "no sender to show".
         var namePart = string.IsNullOrEmpty(rawName) ? string.Empty : rawName + ": ";
 
-        // Per-conversation-partner colors (see DrawWhisperTabQuickEdit) only ever tint the
-        // partner's own NAME - not the [T</T>] tag or the message text, which stay in the
-        // regular whisper color so the rest of the conversation doesn't also change color per
-        // person.
         var senderColor = isOutgoingTell
             ? config.SendAccentColor
             : logSearchFilter.Length > 0 && entry.Sender.Contains(logSearchFilter, StringComparison.OrdinalIgnoreCase)
@@ -1254,7 +1217,7 @@ internal sealed class ChatWindow : Window
         var nameRectMin = Vector2.Zero;
         var nameRectMax = Vector2.Zero;
 
-        if (!isOutgoingTell)
+        if (!IsSelfAuthored(entry))
         {
             nameHovered = ImGui.IsItemHovered();
             var nameClicked = ImGui.IsItemClicked();
@@ -1262,73 +1225,45 @@ internal sealed class ChatWindow : Window
             nameRectMax = ImGui.GetItemRectMax();
             whisperTarget = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
 
-            // Plain left-click intentionally does nothing (it used to set the whisper target,
-            // which was too easy to trigger by accident while just reading). Ctrl+click is the
-            // fast path to the same "Whisper" action the right-click context menu offers.
             if (nameHovered && nameClicked && ImGui.GetIO().KeyCtrl)
             {
-                plugin.OpenWhisperTab(whisperTarget);
+                OpenWhisperTabWithHistory(whisperTarget);
             }
         }
 
         var namePartSize = ImGui.CalcTextSize(namePart);
 
         ImGui.SameLine(0, 0);
-        if (entry.Payloads is { } payloads)
-        {
-            ColoredTextRenderer.DrawRich(
-                payloads,
-                channelColor,
-                config.EmoteTextColor,
-                config.OocTextColor,
-                config.MentionColor,
-                LinkColor,
-                availableWidth,
-                mentionTerm,
-                prefixSize.X + namePartSize.X,
-                logSearchFilter,
-                SearchHighlightColor,
-                target =>
+        ColoredTextRenderer.DrawForEntry(
+            entry,
+            channelColor,
+            config.EmoteTextColor,
+            config.OocTextColor,
+            config.MentionColor,
+            LinkColor,
+            availableWidth,
+            mentionTerm,
+            prefixSize.X + namePartSize.X,
+            logSearchFilter,
+            SearchHighlightColor,
+            target =>
+            {
+                if (target.Url != null)
                 {
-                    if (target.Url != null)
-                    {
-                        OpenUrl(target.Url, plugin);
-                    }
-                    else if (target.Payload != null)
-                    {
-                        plugin.HandleChatLinkClicked(target.Payload, payloads);
-                    }
-                },
-                target =>
+                    OpenUrl(target.Url, plugin);
+                }
+                else if (target.Payload != null && entry.Payloads != null)
                 {
-                    if (target.Payload != null)
-                    {
-                        plugin.OnChatLinkHovered(target.Payload);
-                    }
-                });
-        }
-        else
-        {
-            ColoredTextRenderer.Draw(
-                entry.Text,
-                channelColor,
-                config.EmoteTextColor,
-                config.OocTextColor,
-                config.MentionColor,
-                LinkColor,
-                availableWidth,
-                mentionTerm,
-                prefixSize.X + namePartSize.X,
-                logSearchFilter,
-                SearchHighlightColor,
-                target =>
+                    plugin.HandleChatLinkClicked(target.Payload, entry.Payloads);
+                }
+            },
+            target =>
+            {
+                if (target.Payload != null)
                 {
-                    if (target.Url != null)
-                    {
-                        OpenUrl(target.Url, plugin);
-                    }
-                });
-        }
+                    plugin.OnChatLinkHovered(target.Payload);
+                }
+            });
 
         ImGui.Spacing();
 
@@ -1341,12 +1276,6 @@ internal sealed class ChatWindow : Window
             ImGui.GetWindowDrawList().AddRect(min, max, ImGui.GetColorU32(new Vector4(1f, 1f, 1f, 0.35f)), 3f, ImDrawFlags.None, 1.3f);
         }
 
-        // The name's hover rect sits entirely inside this whole-row group, so a right click on
-        // the name also counts as a right click on the group - two separate BeginPopupContextItem
-        // calls (one on the name, one on the group) would both react to that same click, and the
-        // group's (evaluated second) would always win, meaning the name-specific menu could never
-        // actually show. Recording which one the click was really on here, then building a single
-        // merged popup below, avoids that race instead of trying to win it.
         if (ImGui.IsItemHovered() && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
         {
             rightClickedOnName = nameHovered;
@@ -1358,7 +1287,7 @@ internal sealed class ChatWindow : Window
             {
                 if (ImGui.Selectable(Loc.T("ChatLog.WhisperAction")))
                 {
-                    plugin.OpenWhisperTab(whisperTarget);
+                    OpenWhisperTabWithHistory(whisperTarget);
                 }
 
                 if (ImGui.Selectable(Loc.T("ChatLog.InvitePartyAction")))
@@ -1424,8 +1353,6 @@ internal sealed class ChatWindow : Window
             ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
             ImGui.SetTooltip(Loc.T("ChatLog.ClickToWhisper"));
 
-            // Highlight just the name text itself while hovered, not the whole message row
-            // (that's the separate outline drawn around the whole group above).
             var underlineY = nameRectMax.Y - 1f;
             ImGui.GetWindowDrawList().AddLine(
                 new Vector2(nameRectMin.X, underlineY),
@@ -1455,19 +1382,9 @@ internal sealed class ChatWindow : Window
         inputText = state.Drafts.TryGetValue(key, out var draft) ? draft : string.Empty;
         currentDraftKey = key;
 
-        // A history-browsing session (see historyBrowseIndex) belongs to whichever draft it
-        // started on - carrying it over into a freshly-switched-to tab's own draft would let a
-        // Down-arrow there overwrite it with a leftover line from a completely different
-        // conversation.
         historyBrowseIndex = -1;
     }
 
-    /// <summary>
-    /// Tints the whole compose box while it starts with a slash command - green for one the game
-    /// or some loaded plugin actually recognises ("/dance"), red for one that doesn't exist at all
-    /// ("/blabliblubb") - matching Chat2's own InputHandler (same whole-box tint approach, verified
-    /// against their real source). Null (no tint, normal text color) for plain non-command text.
-    /// </summary>
     private Vector4? GetCommandTint(Configuration config)
     {
         var trimmed = inputText.TrimStart();
@@ -1484,21 +1401,12 @@ internal sealed class ChatWindow : Window
     {
         if (data.EventFlag == ImGuiInputTextFlags.CallbackCharFilter)
         {
-            // Enter always reaches this filter as a plain '\n' character (ImGui inserts newlines
-            // in multiline inputs through the same char-insertion path as typed characters) -
-            // rejecting it here (return 1) stops it from ever being inserted, which is far more
-            // reliable than letting it in and trying to strip it back out afterwards. Shift+Enter
-            // is left alone so it still inserts a real paragraph break.
             if (data.EventChar == '\n' && plugin.Configuration.SendOnEnter && !ImGui.GetIO().KeyShift)
             {
                 pendingSendFromEnter = true;
                 return 1;
             }
 
-            // Same trick as Enter above: Tab reaches the char filter as a literal '\t' (allowed
-            // through in the first place by ImGuiInputTextFlags.AllowTabInput, which otherwise
-            // would've made Tab move focus off the box instead). Rejecting it here and opening
-            // the auto-translate picker instead mirrors vanilla FFXIV/Chat2's Tab behavior.
             if (data.EventChar == '\t')
             {
                 pendingAutoTranslatePopup = true;
@@ -1508,32 +1416,47 @@ internal sealed class ChatWindow : Window
             return 0;
         }
 
-        if (data.EventFlag == ImGuiInputTextFlags.CallbackHistory)
+        // ImGuiInputTextFlags.CallbackHistory can't be combined with Multiline - ImGui itself
+        // asserts against that combination (surfaced as "CelinesChat is creating Errors" at
+        // startup, an ImGui assertion fired from InputTextMultiline every time this box drew), since
+        // up/down are needed for moving the cursor between lines in a real multiline box, not just
+        // for history recall. Reimplemented here instead, on top of the CallbackAlways invocation
+        // this box already gets every frame regardless: only treat up/down as "recall history" when
+        // the cursor is already at the very start/end of the whole buffer - otherwise they move the
+        // cursor between lines as normal multiline editing expects.
+        if (data.CursorPos == 0 && ImGui.IsKeyPressed(ImGuiKey.UpArrow))
         {
-            HandleHistoryRecall(ref data);
+            HandleHistoryRecall(ref data, up: true);
             return 0;
         }
 
-        // data.CursorPos/SelectionStart/SelectionEnd are byte offsets into ImGui's internal
-        // UTF8 text buffer, not char indices into the C# (UTF16) inputText string - with any
-        // multi-byte character before the cursor (e.g. ae/oe/ue/ss in German text) the two
-        // diverge, so every inputText[cursorPos] lookup elsewhere silently reads the wrong
-        // character unless it's converted here first.
+        if (data.CursorPos == data.BufTextLen && ImGui.IsKeyPressed(ImGuiKey.DownArrow))
+        {
+            HandleHistoryRecall(ref data, up: false);
+            return 0;
+        }
+
+        if (pendingCursorCharIndex is { } targetCharIndex)
+        {
+            pendingCursorCharIndex = null;
+            var clampedIndex = Math.Clamp(targetCharIndex, 0, inputText.Length);
+            var byteOffset = Encoding.UTF8.GetByteCount(inputText[..clampedIndex]);
+            data.CursorPos = byteOffset;
+            data.SelectionStart = byteOffset;
+            data.SelectionEnd = byteOffset;
+            cursorPos = clampedIndex;
+            selectionStart = clampedIndex;
+            selectionEnd = clampedIndex;
+            return 0;
+        }
+
         selectionStart = ByteOffsetToCharIndex(data, data.SelectionStart);
         selectionEnd = ByteOffsetToCharIndex(data, data.SelectionEnd);
         cursorPos = ByteOffsetToCharIndex(data, data.CursorPos);
         return 0;
     }
 
-    /// <summary>
-    /// Up/Down-arrow recall through plugin.SentHistory, most-recent first (index 0) - Up walks
-    /// further back, Down walks forward again and eventually restores whatever was actually being
-    /// typed before the first Up press (historyBrowseOriginalDraft), the same as a shell's own
-    /// command history leaves an in-progress line alone if you back all the way out of it. Only
-    /// reached at all once Dear ImGui itself decides there's nowhere left to move the cursor
-    /// within the text (see composeFlags' remarks) - not on every Up/Down press.
-    /// </summary>
-    private unsafe void HandleHistoryRecall(ref ImGuiInputTextCallbackData data)
+    private unsafe void HandleHistoryRecall(ref ImGuiInputTextCallbackData data, bool up)
     {
         var history = plugin.SentHistory;
         if (history.Count == 0)
@@ -1541,7 +1464,7 @@ internal sealed class ChatWindow : Window
             return;
         }
 
-        if (data.EventKey == ImGuiKey.UpArrow)
+        if (up)
         {
             if (historyBrowseIndex == -1)
             {
@@ -1553,7 +1476,7 @@ internal sealed class ChatWindow : Window
                 historyBrowseIndex++;
             }
         }
-        else if (data.EventKey == ImGuiKey.DownArrow)
+        else
         {
             if (historyBrowseIndex == -1)
             {
@@ -1561,10 +1484,6 @@ internal sealed class ChatWindow : Window
             }
 
             historyBrowseIndex--;
-        }
-        else
-        {
-            return;
         }
 
         var replacement = historyBrowseIndex == -1 ? historyBrowseOriginalDraft : history[historyBrowseIndex];
@@ -1579,13 +1498,6 @@ internal sealed class ChatWindow : Window
         return Encoding.UTF8.GetCharCount(data.Buf, length);
     }
 
-    /// <summary>
-    /// The Tab-triggered auto-translate picker: a search box, or (with nothing typed) a
-    /// browsable list of categories from the game's own "Completion" sheet - same data and
-    /// layout as vanilla FFXIV/Chat2's Tab popup. Selecting an entry inserts a
-    /// "[[Display Text#group.key]]" marker at the cursor (see MessageMarkerEncoder for how that
-    /// becomes the real payload at send time).
-    /// </summary>
     private void DrawAutoTranslatePopup(CharacterState state)
     {
         if (!ImGui.BeginPopup("##autoTranslatePopup"))
@@ -1614,11 +1526,6 @@ internal sealed class ChatWindow : Window
 
             foreach (var entry in results)
             {
-                // ImGui.Selectable uses its label as the widget's own ID - without a unique
-                // suffix, two entries that happen to share identical display text (e.g. the
-                // same word appearing in different categories, like several "retainer..."
-                // entries here) would collide and could report a click on the wrong one.
-                // Group+Key together are unique per entry, so they're a safe disambiguator.
                 if (ImGui.Selectable(entry.Text + "##at" + entry.Group + "_" + entry.Key))
                 {
                     InsertAutoTranslateEntry(state, entry);
@@ -1630,9 +1537,6 @@ internal sealed class ChatWindow : Window
         {
             if (ImGui.Selectable(Loc.T("Compose.AutoTranslateBack")))
             {
-                // Cleared for next frame - browseGroup (captured above) is still the group to
-                // show for the remainder of *this* frame, so the list below doesn't go straight
-                // from "back" to a null-group crash in the same click.
                 autoTranslateBrowseGroup = null;
             }
 
@@ -1673,35 +1577,15 @@ internal sealed class ChatWindow : Window
 
     private void InsertAutoTranslateEntry(CharacterState state, AutoTranslateService.Entry entry)
     {
-        // The group/key are embedded directly in the marker (parsed back out by
-        // MessageMarkerEncoder at send time) instead of being looked up from a separate
-        // dictionary keyed by display text - see MessageMarkerEncoder's own remarks for why
-        // that's not safe (two different sheet entries can share identical display text).
         InsertMarkerAtCursor(state, MessageMarkerEncoder.BuildAutoTranslateMarker(entry));
     }
 
-    /// <summary>
-    /// Applies text from a native "activate chat with this prefill" event (map flags, item links,
-    /// and similar - see ChatActivationWatcher) using the exact same rule Chat2's own Activated()
-    /// handler uses: a leading '/' means it's a full command and replaces the whole draft (e.g. a
-    /// tell reply target), otherwise it's appended to the end - and only if not already present,
-    /// so placing the same flag twice in a row doesn't spam duplicate "&lt;flag&gt;"s into the
-    /// draft. This is deliberately NOT inserted at the cursor (unlike auto-translate entries,
-    /// which the user explicitly picks mid-typing) - these events can land at any moment,
-    /// including while the compose box isn't even focused.
-    /// </summary>
     private void InsertChatPrefillText(CharacterState state, string text)
     {
         if (text.StartsWith('/'))
         {
             inputText = text;
 
-            // The native "Send Tell" context menu entry (party list, nameplate, target frame, ...)
-            // turned out to work exactly like map-flag/item-link prefill - it hands us the literal
-            // text "/tell Name@World " to drop into the chat box (see ChatActivationWatcher) - two
-            // earlier native-hook guesses at a separate "current Tell target" signal both fired
-            // zero times because neither one was actually involved. A fresh Tell target deserves
-            // its own tab the same as any other way of starting a whisper conversation.
             if (TryParseTellTarget(text, out var tellTarget))
             {
                 plugin.OpenWhisperTab(tellTarget);
@@ -1731,12 +1615,6 @@ internal sealed class ChatWindow : Window
             return false;
         }
 
-        // Confirmed via a live capture of the actual prefill text ("/tell Unholy Blacky@Shiva "):
-        // the game does NOT quote the "Forename Surname@World" target here even though the name
-        // itself contains a space - so it can't be split on the first space (that lands on just
-        // "Unholy", which never contains an "@" and made every earlier version of this silently do
-        // nothing). The world name itself never has a space, so the target actually ends at the
-        // first space AFTER the "@", not before it.
         var atIndex = rest.IndexOf('@');
         if (atIndex < 0)
         {
@@ -1760,9 +1638,6 @@ internal sealed class ChatWindow : Window
 
     private void HandleSendHotkey(CharacterState state, Configuration config)
     {
-        // When SendOnEnter is active, Enter is handled in TrackTextState's CallbackCharFilter
-        // branch instead (it has to run there, before the '\n' is ever inserted - see
-        // pendingSendFromEnter). This method only covers the legacy Ctrl+Enter-to-send hotkey.
         if (config.SendOnEnter)
         {
             return;
@@ -1794,11 +1669,6 @@ internal sealed class ChatWindow : Window
 
     private void TrySend(CharacterState state)
     {
-        // A message that itself starts with "/" is the user directly typing a game command (/r,
-        // /yes, /tell Name text, ...) rather than composing chat text - send it verbatim through
-        // the game's own command parser instead of wrapping it in our channel prefix and running
-        // it through the message splitter (which would both mangle the command and, for a long
-        // one, incorrectly split it into multiple numbered messages).
         var trimmedInput = inputText.TrimStart();
         if (trimmedInput.StartsWith('/'))
         {
@@ -1811,9 +1681,6 @@ internal sealed class ChatWindow : Window
 
         if (chunks.Count == 0)
         {
-            // Enter on an empty draft behaves like Escape: closes/defocuses the input box
-            // instead of complaining there's nothing to send, mirroring the game's own chat box
-            // and letting movement resume immediately.
             validationMessage = string.Empty;
             ImGuiP.ClearActiveID();
             return;
@@ -1822,6 +1689,12 @@ internal sealed class ChatWindow : Window
         if (state.LastChannel == ChatChannel.Whisper && string.IsNullOrWhiteSpace(state.LastWhisperTarget))
         {
             validationMessage = Loc.T("Compose.WhisperTargetMissing");
+            return;
+        }
+
+        if (state.LastChannel == ChatChannel.Whisper && plugin.IsOwnCharacterTarget(state.LastWhisperTarget))
+        {
+            validationMessage = Loc.T("Compose.WhisperTargetSelf");
             return;
         }
 
@@ -1838,17 +1711,8 @@ internal sealed class ChatWindow : Window
         plugin.SaveConfiguration();
         historyBrowseIndex = -1;
 
-        // While the multiline input keeps keyboard focus (always true for a keyboard-only send
-        // like Enter or Ctrl+Enter, unlike clicking the Send button), ImGui's InputText widget
-        // ignores external changes to its bound string and keeps rendering its own internal
-        // buffer - clearing inputText above has no visible effect until the widget deactivates
-        // and re-reads it. Forcing that here is what actually makes the field clear on screen.
         ImGuiP.ClearActiveID();
 
-        // KeepInputFocusAfterSend off (default): stop here, matching vanilla FFXIV - the box
-        // above just lost focus and stays that way. On: immediately re-request focus for next
-        // frame (the same pendingFocusInput hook Enter-activation already uses) so the box comes
-        // right back, now empty, ready to keep typing without an extra click.
         if (plugin.Configuration.KeepInputFocusAfterSend)
         {
             pendingFocusInput = true;
@@ -1861,30 +1725,20 @@ internal sealed class ChatWindow : Window
 
         ImGui.SameLine();
         ImGui.TextDisabled(Loc.T("Compose.MessageCount", chunks.Count));
-    }
 
-    private void DrawActionRow()
-    {
-        if (!plugin.IsSending)
+        if (plugin.IsSending)
         {
-            return;
-        }
-
-        var done = plugin.SendTotal - plugin.SendRemaining;
-        ImGui.TextUnformatted(Loc.T("Compose.Sending", done, plugin.SendTotal));
-        ImGui.SameLine();
-        if (ImGuiComponents.IconButton(FontAwesomeIcon.Ban, new Vector4(0.55f, 0.18f, 0.18f, 1f), new Vector4(0.55f, 0.18f, 0.18f, 1f), new Vector4(0.68f, 0.22f, 0.22f, 1f)))
-        {
-            plugin.CancelSending();
+            var done = plugin.SendTotal - plugin.SendRemaining;
+            ImGui.SameLine();
+            ImGui.TextUnformatted(Loc.T("Compose.Sending", done, plugin.SendTotal));
+            ImGui.SameLine();
+            if (ImGuiComponents.IconButton(FontAwesomeIcon.Ban, new Vector4(0.55f, 0.18f, 0.18f, 1f), new Vector4(0.55f, 0.18f, 0.18f, 1f), new Vector4(0.68f, 0.22f, 0.22f, 1f)))
+            {
+                plugin.CancelSending();
+            }
         }
     }
 
-    /// <summary>
-    /// Emote/OOC wrapping, templates, history and copy used to each be their own icon button in
-    /// a row - consolidated into one small menu behind a single button in the top toolbar (see
-    /// DrawLogToolbar), since Enter (see Plugin.OnFrameworkUpdate/TrackTextState) is now the
-    /// only way to send, freeing up the bottom action row entirely.
-    /// </summary>
     private void DrawRpActionsMenu(CharacterState state)
     {
         if (DrawToolbarIconButton(FontAwesomeIcon.Magic))
@@ -1920,9 +1774,6 @@ internal sealed class ChatWindow : Window
             ImGui.CloseCurrentPopup();
         }
 
-        // Normally a flag is inserted automatically the moment it's placed (see
-        // ChatActivationWatcher/Plugin.PendingChatPrefillText) - this manual entry covers the case
-        // where the flag was already standing before that watcher was ever wired up this session.
         if (ImGui.Selectable(Loc.T("Compose.InsertMapFlag")))
         {
             if (plugin.HasCurrentMapFlag())
@@ -1958,6 +1809,33 @@ internal sealed class ChatWindow : Window
         ImGui.EndPopup();
     }
 
+    private string GetWordAtCursor()
+    {
+        var start = Math.Clamp(Math.Min(selectionStart, selectionEnd), 0, inputText.Length);
+        var end = Math.Clamp(Math.Max(selectionStart, selectionEnd), 0, inputText.Length);
+
+        if (start != end)
+        {
+            return inputText.Substring(start, end - start);
+        }
+
+        var pos = Math.Clamp(cursorPos, 0, inputText.Length);
+
+        var wordStart = pos;
+        while (wordStart > 0 && !char.IsWhiteSpace(inputText[wordStart - 1]))
+        {
+            wordStart--;
+        }
+
+        var wordEnd = pos;
+        while (wordEnd < inputText.Length && !char.IsWhiteSpace(inputText[wordEnd]))
+        {
+            wordEnd++;
+        }
+
+        return wordStart < wordEnd ? inputText[wordStart..wordEnd] : string.Empty;
+    }
+
     private void WrapSelection(string open, string close)
     {
         var start = Math.Clamp(Math.Min(selectionStart, selectionEnd), 0, inputText.Length);
@@ -1967,12 +1845,16 @@ internal sealed class ChatWindow : Window
         {
             var selected = inputText.Substring(start, end - start);
             inputText = inputText[..start] + open + selected + close + inputText[end..];
+            pendingCursorCharIndex = start + open.Length + selected.Length + close.Length;
         }
         else
         {
             var pos = Math.Clamp(cursorPos, 0, inputText.Length);
             inputText = inputText[..pos] + open + close + inputText[pos..];
+            pendingCursorCharIndex = pos + open.Length;
         }
+
+        pendingFocusInput = true;
 
         plugin.GetCharacterState().Drafts[currentDraftKey] = inputText;
         plugin.SaveConfiguration();
@@ -2059,39 +1941,58 @@ internal sealed class ChatWindow : Window
         }
     }
 
-    // Plain icon + plain text was too easy to miss, which was a big part of "you still can't
-    // tell who you're writing to" - this now uses the same per-target color the whisper
-    // tab/sender name already uses (see ChannelDisplay.WhisperColor) and wraps it in a bordered
-    // badge so it visually stands out from the rest of the toolbar instead of blending in. Fixed
-    // height (one frame line) so this never changes size frame-to-frame.
     private static void DrawActiveWhisperIndicator(Configuration config, string target)
     {
         var color = ChannelDisplay.WhisperColor(target, config);
 
-        // A couple px more than the tightest single-line value, not a big flat pad - the real fix
-        // for baseline misalignment is the per-font AlignTextToFramePadding() calls below, not
-        // extra height. Padding this generously has a real cost here (unlike a one-off UI element):
-        // the window's total height is fixed, so anything this row grows by is space taken
-        // directly from the compose area at the bottom, which showed up as the send-channel
-        // button/footer getting pushed to (or past) the window's bottom edge.
         var lineHeight = MathF.Max(ImGui.GetTextLineHeight(), ImGui.GetFrameHeight()) + 2f;
         ImGui.PushStyleColor(ImGuiCol.ChildBg, new Vector4(color.X, color.Y, color.Z, 0.16f));
         ImGui.PushStyleColor(ImGuiCol.Border, new Vector4(color.X, color.Y, color.Z, 0.75f));
         ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 4f);
         ImGui.BeginChild("##activeWhisperIndicator", new Vector2(-1, lineHeight), true, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
 
-        // AlignTextToFramePadding() has to run once *per font* right before that font's own text
-        // call, not once up front - it bases its baseline math on whichever font is active at the
-        // moment it's called, so calling it only before the icon (in the old version) aligned the
-        // icon to the icon font's baseline but left the plain-text call after it with no alignment
-        // of its own.
+        // Centered against the child's own actually-measured content height, not
+        // AlignTextToFramePadding() - that assumes the surrounding frame height derives from the
+        // current FramePadding style value, which held up fine normally, but a UI theme plugin
+        // (e.g. FrostUI) that changes FramePadding independently of font/line metrics broke that
+        // assumption and the text stopped lining up with lineHeight above. Measuring each piece's
+        // own height and centering it directly works regardless of what any theme changes.
+        var contentHeight = ImGui.GetContentRegionAvail().Y;
+        var rowStartY = ImGui.GetCursorPosY();
+
         ImGui.PushFont(UiBuilder.IconFont);
-        ImGui.AlignTextToFramePadding();
-        ImGui.TextColored(color, FontAwesomeIcon.EnvelopeOpen.ToIconString());
+        var iconText = FontAwesomeIcon.EnvelopeOpen.ToIconString();
+        var iconHeight = ImGui.CalcTextSize(iconText).Y;
+        ImGui.SetCursorPosY(rowStartY + (contentHeight - iconHeight) / 2f);
+        ImGui.TextColored(color, iconText);
         ImGui.PopFont();
         ImGui.SameLine();
-        ImGui.AlignTextToFramePadding();
-        ImGui.TextColored(color, Loc.T("Whisper.ActiveIndicator", target));
+
+        var availableWidth = ImGui.GetContentRegionAvail().X;
+        var displayTarget = target;
+        var fullText = Loc.T("Whisper.ActiveIndicator", displayTarget);
+        if (ImGui.CalcTextSize(fullText).X > availableWidth)
+        {
+            for (var len = target.Length - 1; len > 0; len--)
+            {
+                var candidate = target[..len] + "...";
+                var candidateText = Loc.T("Whisper.ActiveIndicator", candidate);
+                if (ImGui.CalcTextSize(candidateText).X <= availableWidth)
+                {
+                    displayTarget = candidate;
+                    fullText = candidateText;
+                    break;
+                }
+            }
+        }
+
+        var textHeight = ImGui.CalcTextSize(fullText).Y;
+        ImGui.SetCursorPosY(rowStartY + (contentHeight - textHeight) / 2f);
+        ImGui.TextColored(color, fullText);
+        if (displayTarget != target && ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Whisper.ActiveIndicator", target));
+        }
 
         ImGui.EndChild();
         ImGui.PopStyleVar();
@@ -2176,25 +2077,6 @@ internal sealed class ChatWindow : Window
 
     private const float TabStripWheelStepPx = 60f;
 
-    /// <summary>
-    /// The one tab bar controlling what's shown in the log below: the default "Alle" tab plus any
-    /// custom tabs from <see cref="Configuration.ChatTabs"/> (pure display filters, never touch
-    /// the send target), followed by one closable tab per entry in
-    /// <see cref="CharacterState.RecentWhisperTargets"/> (clicking one both shows that
-    /// conversation and, like before, readies the compose area to reply to it).
-    ///
-    /// Hand-rolled (Selectable-per-tab inside a manually scrolled child) instead of Dear ImGui's
-    /// own BeginTabBar/BeginTabItem - its built-in overflow scroll buttons unavoidably also
-    /// change the *selected* tab when clicked (that's internal to the widget, not something a
-    /// flag can turn off), which read as "clicking the arrow jumps to a different conversation."
-    /// Selecting a tab now only ever happens from an explicit click on the tab itself; the arrows
-    /// (and an optional mouse wheel, see Configuration.TabStripWheelScrollEnabled) only move
-    /// which tabs are in view. Hover/tear-off (TabDragHelper) and the quick-edit popups
-    /// (DrawFixedTabQuickEdit/DrawWhisperTabQuickEdit) are all generic "act on the last drawn
-    /// item" helpers that don't care whether that item was a native tab or a Selectable, so they
-    /// carry over unchanged.
-    /// </summary>
-    /// <summary>Largest recorded tab-start offset that's still at or before value - see tabStripTabStartOffsets' remarks.</summary>
     private float SnapScrollToTabBoundary(float value)
     {
         var snapped = 0f;
@@ -2211,7 +2093,6 @@ internal sealed class ChatWindow : Window
         return snapped;
     }
 
-    /// <summary>The next recorded tab-start offset strictly after value, for the right-scroll chevron - falls back to value itself if there isn't one (nothing left to scroll to).</summary>
     private float NextTabBoundaryAfter(float value)
     {
         foreach (var offset in tabStripTabStartOffsets)
@@ -2225,7 +2106,6 @@ internal sealed class ChatWindow : Window
         return value;
     }
 
-    /// <summary>The previous recorded tab-start offset strictly before value, for the left-scroll chevron - falls back to 0 (the very start) if there isn't one.</summary>
     private float PrevTabBoundaryBefore(float value)
     {
         var result = 0f;
@@ -2244,8 +2124,6 @@ internal sealed class ChatWindow : Window
 
     private void DrawLogTabBar(Configuration config, CharacterState state)
     {
-        // The toolbar's collapse toggle (search/history/clear/hide/settings/lock/preview/RP
-        // actions - see DrawLogToolbar).
         var toolbarExpanded = config.ChatToolbarExpanded;
         if (DrawToolbarIconButton(toolbarExpanded ? FontAwesomeIcon.ChevronUp : FontAwesomeIcon.ChevronDown))
         {
@@ -2263,33 +2141,23 @@ internal sealed class ChatWindow : Window
         var arrowSize = ImGui.GetFrameHeight();
         var spacing = ImGui.GetStyle().ItemSpacing.X;
 
-        // tabStripContentWidth is last frame's measured total - the true value for *this* frame
-        // isn't known until after everything below is drawn, and using yesterday's is
-        // indistinguishable in practice (layout only changes when a tab is added/removed/resized,
-        // never within a single still frame).
         var stripWidth = MathF.Max(1f, ImGui.GetContentRegionAvail().X - (arrowSize + spacing) * 2f);
 
-        // totalWidth - stripWidth alone isn't always enough to actually reach the last tab's own
-        // boundary: on a narrow strip that only fits a couple of tabs at once, that value can land
-        // strictly *between* the second-to-last and last tab's boundaries. SnapScrollToTabBoundary
-        // then rounds it down to the second-to-last tab, and the right chevron's own target (a
-        // legitimate boundary from NextTabBoundaryAfter) gets clamped back down to that same
-        // in-between value by MathF.Min(maxScroll, ...) - which the very next frame's snap rounds
-        // straight back down again, undoing the scroll every time. That made the last tab
-        // permanently unreachable (reported as "nothing shows up after Wynn", the second-to-last
-        // whisper tab, as if there were a hard tab-count limit) even though it was always present
-        // in the data. Flooring maxScroll at the last tab's own start offset guarantees it's always
-        // at least reachable, exactly like the force-scroll-into-view logic below already assumes.
         var lastTabStart = tabStripTabStartOffsets.Count > 0 ? tabStripTabStartOffsets[^1] : 0f;
         var maxScroll = MathF.Max(MathF.Max(0f, tabStripContentWidth - stripWidth), lastTabStart);
         tabStripScrollRawTarget = Math.Clamp(tabStripScrollRawTarget, 0f, maxScroll);
         tabStripScrollX = SnapScrollToTabBoundary(tabStripScrollRawTarget);
 
         ImGui.BeginDisabled(tabStripScrollX <= 0f);
-        if (DrawToolbarIconButton(FontAwesomeIcon.ChevronLeft))
+        if (DrawToolbarIconButton(FontAwesomeIcon.ChevronLeft, unreadTabScrolledLeft ? SearchHighlightColor : null))
         {
             tabStripScrollX = PrevTabBoundaryBefore(tabStripScrollX);
             tabStripScrollRawTarget = tabStripScrollX;
+        }
+
+        if (unreadTabScrolledLeft && ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("ChatLog.UnreadTabScrolledOffScreen"));
         }
 
         ImGui.EndDisabled();
@@ -2297,9 +2165,6 @@ internal sealed class ChatWindow : Window
 
         ImGui.BeginChild("##logTabsStrip", new Vector2(stripWidth, arrowSize), false, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
 
-        // The whole strip is a drop target for tabs dragged out of the secondary window - see
-        // TabDragHelper.DrawDropZone's remarks. Whatever's dropped here always returns to the
-        // main window regardless of whether it's a fixed tab (a Guid) or a whisper (a plain name).
         if (TabDragHelper.DrawDropZone(stripWidth, arrowSize) is { } droppedOnMain)
         {
             if (Guid.TryParse(droppedOnMain, out var droppedTabId))
@@ -2312,9 +2177,6 @@ internal sealed class ChatWindow : Window
             }
         }
 
-        // Centers each tab's own label within its Selectable - the default (top-left) read as
-        // messy once tabs started getting an actual background fill (see DrawTabBackgroundFill)
-        // to visually anchor them.
         ImGui.PushStyleVar(ImGuiStyleVar.SelectableTextAlign, new Vector2(0.5f, 0.5f));
 
         var basePos = ImGui.GetCursorPos();
@@ -2323,25 +2185,12 @@ internal sealed class ChatWindow : Window
         float? forceScrollTabStart = null;
         float? forceScrollTabEnd = null;
 
-        // Rebuilt fresh every frame below - without this, offsets from every previous frame just
-        // kept accumulating on top of each other forever, and once a frame's freshly-appended
-        // values (which restart from 0) landed after the previous frame's larger ones, the list
-        // was no longer sorted ascending - silently breaking every snap/boundary lookup below
-        // (they all assume ascending order and bail out early), which is what made scrolling stop
-        // working at all rather than just occasionally landing mid-tab.
         tabStripTabStartOffsets.Clear();
+        var unreadOffScreenLeft = false;
+        var unreadOffScreenRight = false;
 
-        // Snapshotted, not iterated live - a completed reorder drop (see DrawReorderTarget below)
-        // can remove-and-reinsert an element of config.ChatTabs itself while this loop is still
-        // walking it, and a live foreach would either re-visit the tab that landed in its own old
-        // slot or skip over one it got inserted ahead of - both pure this-frame rendering glitches
-        // (the persisted order itself always ends up correct regardless) - but there's no reason
-        // to have to explain that away when snapshotting the draw order costs nothing noticeable
-        // for a handful of tabs.
         foreach (var tab in config.ChatTabs.ToArray())
         {
-            // Torn off into the secondary window (see TabDragHelper/Plugin.MoveTabToSecondaryWindow) -
-            // it lives exclusively over there until dragged back.
             if (plugin.IsTabInSecondaryWindow(tab.Id))
             {
                 continue;
@@ -2349,22 +2198,23 @@ internal sealed class ChatWindow : Window
 
             var tabWidth = ImGui.CalcTextSize(tab.Name).X + ImGui.GetStyle().FramePadding.X * 2f;
             tabStripTabStartOffsets.Add(runningX);
+            var fixedUnread = fixedTabUnreadCounts.GetValueOrDefault(tab.Id);
 
-            // Only actually drawn if it fits *entirely* within the visible strip - a tab
-            // straddling the left or right edge used to render however much of it the child's
-            // clip rect happened to allow, which looked like a rendering glitch rather than "there
-            // are more tabs, scroll for them." Skipping it here instead leaves a small margin of
-            // blank space at that edge and nothing else - one extra scroll step reveals the tab
-            // whole rather than sliced.
+            if (fixedUnread > 0)
+            {
+                if (runningX + tabWidth <= tabStripScrollX + 0.5f)
+                {
+                    unreadOffScreenLeft = true;
+                }
+                else if (runningX >= tabStripScrollX + stripWidth - 0.5f)
+                {
+                    unreadOffScreenRight = true;
+                }
+            }
+
             if (runningX >= tabStripScrollX - 0.5f && runningX + tabWidth <= tabStripScrollX + stripWidth + 0.5f)
             {
-                // Excluding noviceNetworkTabActive here matters for more than just the highlight:
-                // without it, clicking back onto whichever fixed tab was active before switching
-                // to Novice Network silently did nothing - isSelected already read true for that
-                // one tab (activeTabId never changed while viewing Novice Network), so "clicked &&
-                // !isSelected" below never fired for it.
                 var isSelected = string.IsNullOrEmpty(activeWhisperTabTarget) && !noviceNetworkTabActive && activeTabId == tab.Id;
-                var fixedUnread = fixedTabUnreadCounts.GetValueOrDefault(tab.Id);
                 var tabSize = new Vector2(tabWidth, arrowSize);
 
                 ImGui.SetCursorPos(new Vector2(basePos.X + runningX - tabStripScrollX, basePos.Y));
@@ -2375,11 +2225,6 @@ internal sealed class ChatWindow : Window
 
                 if (!tab.PositionLocked)
                 {
-                    // The distance-based fallback only ever creates the secondary window the
-                    // very first time (there's nothing to explicitly drop onto yet) - once it
-                    // exists, moving a tab there requires an actual drop onto its tab strip (see
-                    // SecondaryChatWindow's own DrawDropZone call), so a drop onto empty space
-                    // elsewhere no longer silently tears the tab off to it.
                     TabDragHelper.HandleHoverAndTearOff(tab.Id.ToString(), tab.Name, dropPos =>
                     {
                         if (!plugin.HasSecondaryWindow)
@@ -2390,12 +2235,6 @@ internal sealed class ChatWindow : Window
                     if (TabDragHelper.DrawReorderTarget(tab.Id.ToString(), out var insertBefore) is { } droppedTabIdStr
                         && Guid.TryParse(droppedTabIdStr, out var droppedTabId))
                     {
-                        // A drop landing on a specific tab's left/right half can come from the
-                        // secondary window just as easily as from elsewhere in this same strip -
-                        // without this, dropping there only ever reordered config.ChatTabs (a
-                        // single shared list for both windows), never actually joining this
-                        // window's own membership set, so the tab would just silently stay put in
-                        // whichever window it started in - the reported "nothing happens".
                         plugin.MoveTabToMainWindow(droppedTabId);
 
                         var draggedIndex = config.ChatTabs.FindIndex(t => t.Id == droppedTabId);
@@ -2422,15 +2261,23 @@ internal sealed class ChatWindow : Window
             runningX += tabWidth + spacing;
         }
 
-        // Auto-appears the moment NoviceNetworkService.IsConnected, disappears the moment it
-        // isn't - not a real ChatTab (never added to config.ChatTabs), so there's nothing to
-        // accidentally persist into the saved config while connected and nothing to clean up on
-        // disconnect beyond resetting this one flag.
         if (NoviceNetworkService.IsConnected)
         {
             var noviceLabel = Loc.T("Channel.NoviceNetwork");
             var noviceTabWidth = ImGui.CalcTextSize(noviceLabel).X + ImGui.GetStyle().FramePadding.X * 2f;
             tabStripTabStartOffsets.Add(runningX);
+
+            if (noviceNetworkUnread > 0)
+            {
+                if (runningX + noviceTabWidth <= tabStripScrollX + 0.5f)
+                {
+                    unreadOffScreenLeft = true;
+                }
+                else if (runningX >= tabStripScrollX + stripWidth - 0.5f)
+                {
+                    unreadOffScreenRight = true;
+                }
+            }
 
             if (runningX >= tabStripScrollX - 0.5f && runningX + noviceTabWidth <= tabStripScrollX + stripWidth + 0.5f)
             {
@@ -2453,15 +2300,11 @@ internal sealed class ChatWindow : Window
         }
         else if (noviceNetworkTabActive)
         {
-            // Disconnected while this was the active view - fall back silently. activeTabId was
-            // never touched the whole time this was showing, so whichever fixed tab was active
-            // before is still remembered and picks right back up.
             noviceNetworkTabActive = false;
             noviceNetworkUnread = 0;
             ViewChanged?.Invoke();
         }
 
-        // Snapshotted for the same reason as the fixed tabs above.
         foreach (var targetName in state.RecentWhisperTargets.ToArray())
         {
             if (plugin.IsWhisperInSecondaryWindow(targetName))
@@ -2469,29 +2312,32 @@ internal sealed class ChatWindow : Window
                 continue;
             }
 
-            // The tab label itself only shows the forename - the ##id half keeps the full target
-            // name so tab identity, drag/drop and quick-edit lookups are unaffected.
             var whisperText = FirstName(targetName);
             var tabWidth = ImGui.CalcTextSize(whisperText).X + ImGui.GetStyle().FramePadding.X * 2f;
             tabStripTabStartOffsets.Add(runningX);
+            var whisperUnread = whisperUnreadCounts.GetValueOrDefault(targetName);
 
-            // Computed (and, for a force-selected tab, acted on) regardless of whether this tab
-            // is actually drawn below - a brand new conversation's tab appearing off the end of an
-            // already-full strip is exactly the "not currently visible" case this needs to detect
-            // and scroll to, so it can't be skipped along with the rest of a not-fully-visible
-            // tab's drawing.
             if (targetName == pendingTabForceSelect)
             {
                 forceScrollTabStart = runningX;
                 forceScrollTabEnd = runningX + tabWidth;
             }
 
-            // Only actually drawn if it fits *entirely* within the visible strip - see the fixed
-            // tabs loop above for why.
+            if (whisperUnread > 0)
+            {
+                if (runningX + tabWidth <= tabStripScrollX + 0.5f)
+                {
+                    unreadOffScreenLeft = true;
+                }
+                else if (runningX >= tabStripScrollX + stripWidth - 0.5f)
+                {
+                    unreadOffScreenRight = true;
+                }
+            }
+
             if (runningX >= tabStripScrollX - 0.5f && runningX + tabWidth <= tabStripScrollX + stripWidth + 0.5f)
             {
                 var isSelected = activeWhisperTabTarget == targetName;
-                var whisperUnread = whisperUnreadCounts.GetValueOrDefault(targetName);
                 var tabSize = new Vector2(tabWidth, arrowSize);
 
                 ImGui.SetCursorPos(new Vector2(basePos.X + runningX - tabStripScrollX, basePos.Y));
@@ -2500,18 +2346,6 @@ internal sealed class ChatWindow : Window
                     : config.TabStripBackgroundColorEnabled ? config.TabStripBackgroundColor : (Vector4?)null;
                 DrawTabBackgroundFill(whisperBg, tabSize);
 
-                // Was pendingTabForceSelect + ImGuiTabItemFlags.SetSelected under the native tab
-                // bar - that flag existed purely to sync ImGui's own internal selection
-                // bookkeeping (which otherwise only follows clicks) with activeWhisperTabTarget
-                // having already changed elsewhere. A Selectable reads isSelected fresh every
-                // frame with no bookkeeping of its own to sync, so nothing extra is needed for
-                // *selection* here - scrolling this tab into view is handled unconditionally
-                // above instead, since it has to work even while the tab isn't drawn at all.
-                //
-                // The name itself pulses while unread (see Configuration.BlinkUnreadWhisperTabs'
-                // own remarks) - whisperUnread is already guaranteed 0 for whichever tab is
-                // currently being viewed (cleared the moment it becomes active tab, above), so
-                // this can never blink the tab you're already looking at.
                 var blinking = whisperUnread > 0 && config.BlinkUnreadWhisperTabs;
                 if (blinking)
                 {
@@ -2542,7 +2376,6 @@ internal sealed class ChatWindow : Window
                     if (TabDragHelper.DrawReorderTarget(targetName, out var insertBefore) is { } droppedTargetName
                         && !Guid.TryParse(droppedTargetName, out _))
                     {
-                        // See the fixed-tab reorder accept above for why this is needed.
                         plugin.MoveWhisperToMainWindow(droppedTargetName);
 
                         var draggedIndex = state.RecentWhisperTargets.IndexOf(droppedTargetName);
@@ -2556,23 +2389,11 @@ internal sealed class ChatWindow : Window
                     }
                 }
 
-                // Middle-click to close - a plain, well-known convention (browsers, IDEs, ...)
-                // that needs no visual affordance at all, unlike a corner "x" overlaid on the tab.
-                // An earlier version tried exactly that overlay and it neither looked right nor
-                // actually worked: Dear ImGui doesn't let a later, visually-overlapping widget
-                // steal hover/click away from an earlier one drawn in the same spot by default
-                // (that needs an explicit opt-in on the earlier widget), so clicks on the "x" were
-                // actually landing on the Selectable underneath it. Right-click's quick-edit popup
-                // (below) offers the same close action with no such ambiguity, for anyone who
-                // doesn't know/like the middle-click convention.
                 if (ImGui.IsItemHovered() && ImGui.IsMouseClicked(ImGuiMouseButton.Middle))
                 {
                     closedTarget = targetName;
                 }
 
-                // The tab label itself only shows the forename (see FirstName above) - show the
-                // full "Forename Surname@World" on hover so players with the same forename stay
-                // distinguishable.
                 if (ImGui.IsItemHovered() && !ImGui.IsMouseDragging(ImGuiMouseButton.Left))
                 {
                     ImGui.SetTooltip(targetName);
@@ -2594,22 +2415,6 @@ internal sealed class ChatWindow : Window
             runningX += tabWidth + spacing;
         }
 
-        // Bring a just-force-selected whisper tab (see forceScrollTabStart/End above) fully into
-        // view if it isn't already - e.g. a brand new conversation's tab appearing off the end of
-        // an already-full strip, which nothing would otherwise ever scroll to.
-        //
-        // Both branches land on scrollStart specifically - that tab's own start offset, already
-        // recorded in tabStripTabStartOffsets this same frame - rather than some other computed
-        // pixel position. The right-scroll branch used to target scrollEnd - stripWidth + spacing
-        // (lining the tab up flush against the strip's right edge instead), which isn't
-        // necessarily any tab's own boundary - the very next frame's top-of-function clamp snaps
-        // whatever raw value is stored down to the nearest *actual* boundary at or before it (see
-        // SnapScrollToTabBoundary), and if that landed before this tab had enough room to fully
-        // fit, it silently undid the reveal, leaving the tab just as invisible as before -
-        // reported as a specific, real conversation's tab (the whisper strip's very last one, so
-        // the reveal always had to scroll all the way right for it) never appearing at all despite
-        // definitely being in the list. Landing on an already-guaranteed boundary here instead
-        // means that next frame's snap is a no-op, not a silent revert.
         if (forceScrollTabStart is { } scrollStart && forceScrollTabEnd is { } scrollEnd
             && (scrollStart < tabStripScrollX || scrollEnd > tabStripScrollX + stripWidth))
         {
@@ -2618,10 +2423,9 @@ internal sealed class ChatWindow : Window
         }
 
         tabStripContentWidth = runningX;
+        unreadTabScrolledLeft = unreadOffScreenLeft;
+        unreadTabScrolledRight = unreadOffScreenRight;
 
-        // Same floor as maxScroll above (and for the same reason - the last tab's own boundary
-        // can sit beyond totalWidth - stripWidth on a narrow strip) - tabStripTabStartOffsets is
-        // this frame's fresh list by now, since the loop above already finished.
         var wheelMaxScroll = MathF.Max(MathF.Max(0f, tabStripContentWidth - stripWidth), tabStripTabStartOffsets.Count > 0 ? tabStripTabStartOffsets[^1] : 0f);
 
         if (config.TabStripWheelScrollEnabled && ImGui.IsWindowHovered())
@@ -2629,9 +2433,6 @@ internal sealed class ChatWindow : Window
             var wheel = ImGui.GetIO().MouseWheel;
             if (wheel != 0f)
             {
-                // Accumulates into the raw target, not the (snapped) display position directly -
-                // see tabStripScrollRawTarget's remarks for why adjusting the snapped value itself
-                // made the wheel appear to do nothing whenever a tab was wider than one tick.
                 tabStripScrollRawTarget = Math.Clamp(tabStripScrollRawTarget - wheel * TabStripWheelStepPx, 0f, wheelMaxScroll);
                 tabStripScrollX = SnapScrollToTabBoundary(tabStripScrollRawTarget);
             }
@@ -2641,11 +2442,16 @@ internal sealed class ChatWindow : Window
         ImGui.EndChild();
 
         ImGui.SameLine();
-        ImGui.BeginDisabled(tabStripScrollX >= maxScroll);
-        if (DrawToolbarIconButton(FontAwesomeIcon.ChevronRight))
+        ImGui.BeginDisabled(tabStripScrollX >= wheelMaxScroll);
+        if (DrawToolbarIconButton(FontAwesomeIcon.ChevronRight, unreadTabScrolledRight ? SearchHighlightColor : null))
         {
-            tabStripScrollX = MathF.Min(maxScroll, NextTabBoundaryAfter(tabStripScrollX));
+            tabStripScrollX = MathF.Min(wheelMaxScroll, NextTabBoundaryAfter(tabStripScrollX));
             tabStripScrollRawTarget = tabStripScrollX;
+        }
+
+        if (unreadTabScrolledRight && ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("ChatLog.UnreadTabScrolledOffScreen"));
         }
 
         ImGui.EndDisabled();
@@ -2656,12 +2462,6 @@ internal sealed class ChatWindow : Window
         {
             state.RecentWhisperTargets.Remove(closedTarget);
             whisperUnreadCounts.Remove(closedTarget);
-
-            // If this conversation gets a fresh tab later (new message either way), it should
-            // only show what's said from this point on - not the history that's still sitting
-            // in the shared buffer.
-            var entries = plugin.ChatLog.Entries;
-            whisperCloseCutoff[closedTarget] = entries.Count > 0 ? entries[^1].Sequence : 0;
 
             if (activeWhisperTabTarget == closedTarget)
             {
@@ -2680,15 +2480,6 @@ internal sealed class ChatWindow : Window
         }
     }
 
-    /// <summary>
-    /// Paints a plain filled rectangle at the cursor's current screen position, sized to exactly
-    /// match the tab about to be drawn there - a no-op for null (no color resolved for this tab,
-    /// see DrawLogTabBar's callers). Has to run *before* the Selectable it's a background for, not
-    /// after - Selectable already draws its own (otherwise fully transparent) hover/selected fill
-    /// plus the label text on top of whatever's already on the draw list, so drawing this first is
-    /// what lets that native highlight and text still show up over a custom color instead of
-    /// being covered by it.
-    /// </summary>
     internal static void DrawTabBackgroundFill(Vector4? color, Vector2 size)
     {
         if (color is not { } fill)
@@ -2700,12 +2491,6 @@ internal sealed class ChatWindow : Window
         ImGui.GetWindowDrawList().AddRectFilled(min, min + size, ImGui.GetColorU32(fill), ImGui.GetStyle().FrameRounding);
     }
 
-    /// <summary>
-    /// Opens a plain-typed web URL (see ColoredTextRenderer.LinkTarget/TryGetUrl) in the user's
-    /// default browser - the same UseShellExecute launch already used elsewhere in this file for
-    /// opening the logs folder, just handed a URL instead of a file path. Shared by both windows'
-    /// link-click handlers rather than duplicated.
-    /// </summary>
     internal static void OpenUrl(string url, Plugin plugin)
     {
         try
@@ -2718,13 +2503,6 @@ internal sealed class ChatWindow : Window
         }
     }
 
-    /// <summary>
-    /// Switches to a fixed tab, saving the current send-channel selection into whichever fixed
-    /// tab is being left (skipped if a whisper conversation was being viewed instead - its
-    /// "Whisper" channel isn't something to save back into the fixed tab underneath it, since
-    /// that fixed tab's own selection was already saved at the point the whisper tab was
-    /// entered) and restoring the destination tab's own remembered selection.
-    /// </summary>
     internal void SwitchToFixedTab(Configuration config, CharacterState state, ChatTab newTab)
     {
         if (string.IsNullOrEmpty(activeWhisperTabTarget))
@@ -2735,10 +2513,6 @@ internal sealed class ChatWindow : Window
         activeTabId = newTab.Id;
         activeWhisperTabTarget = string.Empty;
 
-        // Without this, leaving the Novice Network tab for a fixed one changed activeTabId but
-        // left noviceNetworkTabActive true - DrawChatLogEntries/TrackUnreadForNewEntry check that
-        // flag *before* looking at activeTabId at all, so the log kept showing Novice Network
-        // content no matter which fixed tab now looked selected, reading as "stuck" on that tab.
         noviceNetworkTabActive = false;
 
         LoadChannelSelection(newTab, state);
@@ -2766,25 +2540,6 @@ internal sealed class ChatWindow : Window
         state.LastWhisperTarget = tab.LastWhisperTarget;
     }
 
-    /// <summary>
-    /// Switches the view to a whisper conversation - the one place that does so (a tab click, a
-    /// context-menu "Whisper" action, the channel picker's Whisper option, ...) all route
-    /// through this, since whichever fixed tab is being left behind needs its current send
-    /// channel saved *before* state.LastChannel gets forced to Whisper immediately below, not
-    /// afterwards where it'd already be overwritten.
-    ///
-    /// Also guarantees a tab actually exists for the target and resolves to whichever key it's
-    /// really stored under (see Plugin.RememberWhisperTarget's own remarks), and scrolls it into
-    /// view - every caller needs both of those, and used to each have to remember to do it
-    /// themselves; a couple of them (the channel picker's Whisper option re-entering
-    /// state.LastWhisperTarget directly, and this window's own startup restore of whatever
-    /// whisper view was active last session) simply never did, so re-opening a conversation whose
-    /// tab wasn't already in the list showed its history correctly (message filtering only ever
-    /// needed activeWhisperTabTarget, never the tab list itself) but never actually produced a
-    /// tab for it - reported as "I can open the conversation and read it, but the tab doesn't
-    /// appear at all." Centralizing both here means a future new caller gets them for free
-    /// instead of being one more place this exact bug can quietly reappear.
-    /// </summary>
     internal void EnterWhisperView(Configuration config, CharacterState state, string target)
     {
         if (string.IsNullOrEmpty(activeWhisperTabTarget))
@@ -2799,19 +2554,13 @@ internal sealed class ChatWindow : Window
         activeWhisperTabTarget = resolvedTarget;
         pendingTabForceSelect = resolvedTarget;
 
-        // See SwitchToFixedTab's matching remark - same reason this has to be cleared here too.
+        PreloadWhisperHistoryForFirstView(resolvedTarget);
+
         noviceNetworkTabActive = false;
 
         ViewChanged?.Invoke();
     }
 
-    /// <summary>
-    /// Switches the view to the auto-managed Novice Network tab - a pure display filter like a
-    /// fixed tab, not a send target, so unlike EnterWhisperView this deliberately never touches
-    /// state.LastChannel/activeTabId: leaving them alone is what lets the fallback in
-    /// DrawLogTabBar (on disconnect) return to exactly whatever fixed tab was active before,
-    /// with no separate "remembered channel" bookkeeping needed for this tab at all.
-    /// </summary>
     internal void EnterNoviceNetworkView()
     {
         activeWhisperTabTarget = string.Empty;
@@ -2819,11 +2568,6 @@ internal sealed class ChatWindow : Window
         ViewChanged?.Invoke();
     }
 
-    /// <summary>
-    /// Right-click quick-edit popup for a custom tab: rename inline instead of having to open
-    /// Settings > Tabs, plus a lock-position toggle so it's exempt from the tab bar's native
-    /// drag-to-reorder (see ImGuiTabItemFlags.NoReorder above).
-    /// </summary>
     private void DrawFixedTabQuickEdit(ChatTab tab)
     {
         if (!ImGui.BeginPopupContextItem("##tabQuickEdit" + tab.Id))
@@ -2858,8 +2602,6 @@ internal sealed class ChatWindow : Window
             ImGui.SetTooltip(Loc.T("Tabs.MutedTooltip"));
         }
 
-        // Falls back to Configuration.TabStripBackgroundColor (if enabled) when null - see
-        // DrawTabBackgroundFill's callers.
         var tabBg = tab.BackgroundColor ?? plugin.Configuration.TabStripBackgroundColor;
         ImGui.SetNextItemWidth(160);
         if (ImGui.ColorEdit4(Loc.T("Tabs.BackgroundColorLabel") + "##tabBg" + tab.Id, ref tabBg))
@@ -2883,13 +2625,6 @@ internal sealed class ChatWindow : Window
         ImGui.EndPopup();
     }
 
-    /// <summary>
-    /// Right-click quick-edit popup for a whisper tab - no rename (its name is the actual
-    /// whisper target, renaming it would desync the tab label from who messages actually go to),
-    /// just the same lock-position toggle the fixed tabs get, plus a "Close" entry (see also
-    /// middle-click, in DrawLogTabBar). Returns true the one frame Close is actually clicked, so
-    /// the caller (which owns closedTarget) can act on it.
-    /// </summary>
     private bool DrawWhisperTabQuickEdit(CharacterState state, string targetName)
     {
         if (!ImGui.BeginPopupContextItem("##whisperTabQuickEdit" + targetName))
@@ -2962,8 +2697,6 @@ internal sealed class ChatWindow : Window
             ImGui.SetTooltip(Loc.T("Settings.ColorsResetRow"));
         }
 
-        // Falls back to Configuration.TabStripBackgroundColor (if enabled) when this partner has
-        // no override of their own - see DrawTabBackgroundFill's callers.
         var tabBg = config.WhisperTabBackgroundColours.TryGetValue(targetName, out var customBg) ? customBg : config.TabStripBackgroundColor;
         ImGui.SetNextItemWidth(160);
         if (ImGui.ColorEdit4(Loc.T("Tabs.BackgroundColorLabel") + "##whisperTabBg" + targetName, ref tabBg))
@@ -2988,12 +2721,6 @@ internal sealed class ChatWindow : Window
         return closeRequested;
     }
 
-    /// <summary>
-    /// A small unread-count badge drawn over a tab's top-right corner - must be called right
-    /// after the tab item it belongs to (relies on GetItemRectMin/Max for that item). Doesn't
-    /// touch the tab's own label, so unlike appending "(N)" to the label text, it can't affect
-    /// the tab's measured width or shift its position in a Reorderable tab bar.
-    /// </summary>
     internal static void DrawUnreadBadge(int count)
     {
         if (count <= 0)
@@ -3008,12 +2735,6 @@ internal sealed class ChatWindow : Window
         var max = ImGui.GetItemRectMax();
         var min = ImGui.GetItemRectMin();
 
-        // The vertical center used to sit at min.Y + radius*0.6, putting the circle's top edge
-        // 0.4*radius ABOVE the tab's own top boundary (min.Y) - since there's usually no margin
-        // above the tab bar for it to spill into, that portion got clipped by the surrounding
-        // window/child region instead of actually being visible. Keeping center.Y >= min.Y +
-        // radius keeps the whole circle within the tab's own bounds instead of overflowing above
-        // it, fixing the reported "cut off on top" for larger counts (bigger radius = worse clip).
         var center = new Vector2(max.X - radius * 0.6f, min.Y + radius);
 
         var drawList = ImGui.GetWindowDrawList();
@@ -3029,6 +2750,116 @@ internal sealed class ChatWindow : Window
         }
 
         return config.ChatTabs.Find(t => t.Id == activeTabId) ?? config.ChatTabs[0];
+    }
+
+    private void RefreshWhisperHistoryForTarget(string target)
+    {
+        whisperHistoryShownThisSession.Remove(target);
+        PreloadWhisperHistoryForFirstView(target);
+    }
+
+    private void PreloadWhisperHistoryForFirstView(string target)
+    {
+        if (!whisperHistoryShownThisSession.Add(target))
+        {
+            return;
+        }
+
+        var fileEntries = plugin.ChatLog.LoadWhisperHistory(target);
+        if (fileEntries.Count == 0)
+        {
+            return;
+        }
+
+        var alreadyLive = new HashSet<(XivChatType, string, string?, string, DateTime)>();
+        foreach (var live in plugin.ChatLog.Snapshot())
+        {
+            alreadyLive.Add((live.ChatType, live.Sender, live.SenderWorld, live.Text, TruncateToSeconds(live.Timestamp)));
+        }
+
+        var deduped = new List<ChatLogEntry>();
+        foreach (var fileEntry in fileEntries)
+        {
+            if (!alreadyLive.Contains((fileEntry.ChatType, fileEntry.Sender, fileEntry.SenderWorld, fileEntry.Text, TruncateToSeconds(fileEntry.Timestamp))))
+            {
+                fileEntry.Sequence = nextPreloadSequence--;
+                deduped.Add(fileEntry);
+            }
+        }
+
+        if (deduped.Count > 0)
+        {
+            whisperPreloadedHistory[target] = deduped;
+        }
+    }
+
+    private static DateTime TruncateToSeconds(DateTime value) =>
+        new(value.Year, value.Month, value.Day, value.Hour, value.Minute, value.Second, value.Kind);
+
+    /// <summary>
+    /// Merges two sequences that are each already sorted ascending by Timestamp into one properly
+    /// ordered sequence - the classic merge step of a merge sort, not a fresh sort of the combined
+    /// set, since both inputs are already individually ordered. See the whisperPreload/entries call
+    /// site's own remarks for why a plain "draw all of A, then all of B" isn't safe here.
+    /// </summary>
+    private static IEnumerable<ChatLogEntry> MergeByTimestamp(IReadOnlyList<ChatLogEntry> a, IReadOnlyList<ChatLogEntry> b)
+    {
+        var i = 0;
+        var j = 0;
+        while (i < a.Count && j < b.Count)
+        {
+            yield return a[i].Timestamp <= b[j].Timestamp ? a[i++] : b[j++];
+        }
+
+        while (i < a.Count)
+        {
+            yield return a[i++];
+        }
+
+        while (j < b.Count)
+        {
+            yield return b[j++];
+        }
+    }
+
+    private void OpenWhisperTabWithHistory(string target)
+    {
+        plugin.OpenWhisperTab(target);
+        RefreshWhisperHistoryForTarget(target);
+    }
+
+    internal void RenameWhisperTargetInMemory(string oldTarget, string newTarget)
+    {
+        if (whisperUnreadCounts.Remove(oldTarget, out var unread))
+        {
+            whisperUnreadCounts[newTarget] = unread;
+        }
+
+        if (whisperCloseCutoff.Remove(oldTarget, out var cutoff))
+        {
+            whisperCloseCutoff[newTarget] = cutoff;
+        }
+
+        if (whisperHistoryShownThisSession.Remove(oldTarget))
+        {
+            whisperHistoryShownThisSession.Add(newTarget);
+        }
+
+        if (whisperPreloadedHistory.Remove(oldTarget, out var preloaded))
+        {
+            whisperPreloadedHistory[newTarget] = preloaded;
+        }
+
+        if (string.Equals(activeWhisperTabTarget, oldTarget, StringComparison.OrdinalIgnoreCase))
+        {
+            activeWhisperTabTarget = newTarget;
+        }
+
+        if (loadedHistoryEntries != null && string.Equals(loadedHistoryLabel, oldTarget, StringComparison.OrdinalIgnoreCase))
+        {
+            loadedHistoryEntries = null;
+            loadedHistoryLabel = null;
+        }
     }
 
     internal bool MatchesWhisperTarget(ChatLogEntry entry, string target)
@@ -3047,9 +2878,6 @@ internal sealed class ChatWindow : Window
             return false;
         }
 
-        // A closed-then-reopened conversation should only show what's been said since it was
-        // closed, not the entire history still sitting in the shared buffer - see
-        // whisperCloseCutoff.
         if (whisperCloseCutoff.TryGetValue(target, out var cutoff) && entry.Sequence <= cutoff)
         {
             return false;
@@ -3058,10 +2886,6 @@ internal sealed class ChatWindow : Window
         return true;
     }
 
-    /// <summary>
-    /// The channel-picker button's own label - shows the specific linkshell/cross-world
-    /// linkshell name next to its number when one is known, instead of just "Linkshell [3]".
-    /// </summary>
     private static string CurrentChannelLabel(CharacterState state) => state.LastChannel switch
     {
         ChatChannel.Say => Loc.T("Channel.Say"),
@@ -3086,9 +2910,6 @@ internal sealed class ChatWindow : Window
         return match.Name != null ? $"{baseName} [{number}]: {match.Name}" : $"{baseName} [{number}]";
     }
 
-    // Whisper targets are stored as "Forename Surname@World" - shorten to just the forename
-    // for compact UI spots (tab labels, the channel-picker label) while every internal lookup
-    // (dictionaries, tab quick-edit, RecentWhisperTargets) keeps using the full name as its key.
     internal static string FirstName(string targetName)
     {
         if (string.IsNullOrEmpty(targetName))

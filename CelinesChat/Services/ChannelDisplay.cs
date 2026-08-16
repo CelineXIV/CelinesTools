@@ -3,18 +3,6 @@ using Dalamud.Game.Text;
 
 namespace CelinesChat.Services;
 
-/// <summary>
-/// The message categories a user can show/hide/color per tab. Several individual
-/// <see cref="XivChatType"/> values (e.g. all 8 linkshells, tell-incoming/outgoing) collapse into
-/// one category here, since they share one color and one tab-membership checkbox rather than
-/// needing 20+ individually configurable entries.
-///
-/// Battle/system/announcement message types are as fine-grained as Dalamud's XivChatType exposes,
-/// which is coarser than the native game's own "Log Window Settings" (that panel additionally
-/// splits battle/error messages by source/target actor relationship - e.g. "damage I dealt" vs
-/// "damage dealt to me" - which isn't a distinct XivChatType value Dalamud surfaces, so this
-/// plugin can't offer that same subdivision).
-/// </summary>
 public enum ChatCategory
 {
     Say,
@@ -70,26 +58,9 @@ public enum ChatCategory
     GainDebuff,
     LoseDebuff,
 
-    /// <summary>
-    /// Ambient NPC-vs-NPC combat narration (e.g. "The Wood Wailer sentry defeats the ground
-    /// squirrel.") - despite XivChatType's own name for the raw value this arrives as
-    /// ("SystemError"), it turns out the actual game client uses that same raw type for this
-    /// rather than genuine errors (see CategoryOf's remarks) - split into its own category so it
-    /// no longer shows up mixed in with actual user-facing errors like a failed "/tell". Appended
-    /// at the end rather than declared next to SystemError above deliberately: HashSet&lt;ChatCategory&gt;
-    /// serializes as bare ordinal integers (no string enum converter is configured), so inserting a
-    /// new member anywhere except the end would silently renumber every category declared after it
-    /// - every existing user's saved tab filters would start matching the wrong categories the
-    /// moment they updated, with no error or warning of any kind.
-    /// </summary>
     AmbientBattle,
 }
 
-/// <summary>
-/// Purely a settings-UI grouping (collapsible sections in TabsPage/ColorsPage, matching Chat2's
-/// own settings tree) - has no bearing on filtering/matching logic, which only ever cares about
-/// individual <see cref="ChatCategory"/> values.
-/// </summary>
 public enum ChatCategoryGroup
 {
     Standard,
@@ -99,9 +70,6 @@ public enum ChatCategoryGroup
 
 internal static class ChannelDisplay
 {
-    /// <summary>
-    /// Display order for the collapsible group headers in TabsPage/ColorsPage.
-    /// </summary>
     public static readonly ChatCategoryGroup[] AllGroups =
     {
         ChatCategoryGroup.Standard,
@@ -109,14 +77,6 @@ internal static class ChannelDisplay
         ChatCategoryGroup.Battle,
     };
 
-    /// <summary>
-    /// Every selectable category - used to populate settings pages. NOT used to decide what a
-    /// pre-existing "Alle" tab should auto-include after an update (see
-    /// <see cref="LegacyDefaultCategories"/>) - Battle/Announcement categories are opt-in only,
-    /// since several of them (Damage, Miss, Action, ...) are extremely high-volume and silently
-    /// enabling them for existing users would flood their default tab with combat spam they never
-    /// asked for.
-    /// </summary>
     public static readonly ChatCategory[] AllCategories =
     {
         ChatCategory.Say,
@@ -171,11 +131,6 @@ internal static class ChannelDisplay
         ChatCategory.AmbientBattle,
     };
 
-    /// <summary>
-    /// The original category set from before Announcements/Battle categories existed - frozen on
-    /// purpose (see <see cref="AllCategories"/>'s remarks). Only ever used by Plugin's
-    /// default-tab migration to decide what a pre-existing "Alle" tab should have added to it.
-    /// </summary>
     public static readonly ChatCategory[] LegacyDefaultCategories =
     {
         ChatCategory.Say,
@@ -191,24 +146,6 @@ internal static class ChannelDisplay
         ChatCategory.NoviceNetwork,
     };
 
-    /// <summary>
-    /// A second, later addition to the default tab's out-of-the-box set - migrated in the same
-    /// additive way as <see cref="LegacyDefaultCategories"/> (see Plugin's ctor) but kept as its
-    /// own list rather than extending the frozen one above, so each migration step stays separately
-    /// auditable. Despite the name (kept for that migration-step reasoning, not because every
-    /// entry is strictly an "Announcements"-group category - Debug is Standard-group), these were
-    /// all being silently excluded from the default tab entirely: Urgent is how most plugins post
-    /// messages into chat, SystemError covers native errors including a failed "/tell" ("player
-    /// not found", etc.), SystemMessage/Echo are core game feedback, and Debug is what plain
-    /// Dalamud IChatGui.Print() calls actually default to (Dalamud's own DalamudConfiguration.
-    /// GeneralChatType defaults to XivChatType.Debug, confirmed by decompile) - meaning most
-    /// small utility plugins (that don't call the rarer PrintError(), which does use Urgent) show
-    /// up as Debug, not Urgent, despite the misleading name. Chat2 includes all of these in every
-    /// one of its own default tab presets, not just its general one. The remaining
-    /// Announcements-group categories (loot, crafting, glamour, ...) stay opt-in via the Tabs
-    /// settings page instead, since they're closer to "nice to have" than "silently missing
-    /// something important".
-    /// </summary>
     public static readonly ChatCategory[] CoreAnnouncementDefaultCategories =
     {
         ChatCategory.Urgent,
@@ -239,14 +176,6 @@ internal static class ChannelDisplay
         _ => group.ToString(),
     };
 
-    // XivChatType's numeric values are NOT contiguous across these two families - CrossLinkShell1
-    // is 37 but CrossLinkShell2 is 101, so a ">= CrossLinkShell1 and <= CrossLinkShell8" range
-    // check (which this code used to do) actually captures every value in between too: Damage,
-    // Loot, Crafting, Gathering, system/error messages, Sprint/minigame notices, and more all
-    // landed in that 37-107 range and got misclassified as cross-world linkshell chat. Matching
-    // each named value explicitly instead of by numeric range avoids that entirely - see also
-    // LinkshellIndex/CrossWorldLinkshellIndex below, used for showing which specific
-    // linkshell/CWLS a message came from.
     public static int? LinkshellIndex(XivChatType type) => type switch
     {
         XivChatType.Ls1 => 1,
@@ -277,12 +206,6 @@ internal static class ChannelDisplay
 
     public static bool IsCrossWorldLinkshell(XivChatType type) => CrossWorldLinkshellIndex(type) != null;
 
-    /// <summary>
-    /// Null for any XivChatType this plugin doesn't recognise at all (GM-only channels, raw
-    /// numeric variants Dalamud doesn't otherwise resolve, ...) - <see cref="ChatLogService"/>'s
-    /// IsKnownChannel is just "CategoryOf(type) != null", so this is the single place that decides
-    /// what the plugin buffers/displays at all.
-    /// </summary>
     public static ChatCategory? CategoryOf(XivChatType type)
     {
         if (IsLinkshell(type))
@@ -298,11 +221,6 @@ internal static class ChannelDisplay
         return type switch
         {
             XivChatType.Say => ChatCategory.Say,
-            // CrossParty is what a message from a cross-world duty finder party member actually
-            // arrives as (Party is only same-world) - found missing the same way ErrorMessage was
-            // above, by diffing every value in Dalamud's real XivChatType enum against this
-            // switch. Chat2's own SortOrder lists Party and CrossParty side by side in the same
-            // group for the same reason: from the player's perspective it's just "party chat".
             XivChatType.Party or XivChatType.CrossParty => ChatCategory.Party,
             XivChatType.TellIncoming => ChatCategory.Whisper,
             XivChatType.TellOutgoing => ChatCategory.Whisper,
@@ -318,19 +236,6 @@ internal static class ChannelDisplay
             XivChatType.Urgent => ChatCategory.Urgent,
             XivChatType.Debug => ChatCategory.Debug,
             XivChatType.SystemMessage => ChatCategory.SystemMessage,
-            // Dalamud's XivChatType has two distinct "error" values - SystemError (raw 58) and
-            // ErrorMessage (raw 60). ErrorMessage is what the retail client actually sends for
-            // user-facing errors like "Player not found" after /tell-ing someone offline or
-            // misspelled - Chat2's own ChatType enum only defines this one at all (named "Error"
-            // there), confirming it's the one that matters for real errors. SystemError, despite
-            // its name, turns out to carry something else entirely: confirmed via a live report of
-            // ambient NPC-vs-NPC combat narration ("The Wood Wailer sentry defeats the ground
-            // squirrel.") showing up right alongside genuine failed-/tell errors - both were being
-            // filed under the same ChatCategory.SystemError before this split, which read as
-            // background combat spam polluting what's supposed to be an error log. Mapping it to
-            // its own AmbientBattle category instead keeps the two apart without any fragile
-            // content/text matching (which would also need to work across every game client
-            // language, not just this plugin's own UI language).
             XivChatType.SystemError => ChatCategory.AmbientBattle,
             XivChatType.ErrorMessage => ChatCategory.SystemError,
             XivChatType.GatheringSystemMessage => ChatCategory.GatheringSystemMessage,
@@ -423,10 +328,6 @@ internal static class ChannelDisplay
         _ => category.ToString(),
     };
 
-    /// <summary>
-    /// Shows which specific linkshell/CWLS a message came from (e.g. "[LS3]", "[CW2]") instead
-    /// of a generic "[LS]"/"[CWLS]" that made every linkshell indistinguishable from every other.
-    /// </summary>
     public static string Tag(XivChatType type)
     {
         if (LinkshellIndex(type) is { } lsIndex)
@@ -443,12 +344,6 @@ internal static class ChannelDisplay
         {
             XivChatType.Say => "[S]",
             XivChatType.Party or XivChatType.CrossParty => "[P]",
-            // Arrow direction mirrors the [T>] outgoing tag below rather than a bare "[T]" - also
-            // still distinct enough that a reloaded log file can tell direction apart, same reason
-            // outgoing needed its own tag: the sender slot on an outgoing line always holds the
-            // conversation partner's name (needed for whisper-tab matching), not "you", so
-            // direction is the only way to know who to actually display as the author (see
-            // DrawLogEntry).
             XivChatType.TellIncoming => "[T<]",
             XivChatType.TellOutgoing => "[T>]",
             XivChatType.Yell => "[Y]",
@@ -500,16 +395,6 @@ internal static class ChannelDisplay
         };
     }
 
-    /// <summary>
-    /// What actually gets drawn in front of a message in the live log - <see cref="Tag"/> itself
-    /// for almost everything, but blank for the small cluster of "technical" categories (Debug,
-    /// System*, Echo) whose abbreviations ("[SysErr]", "[Dbg]") read as cryptic noise rather than
-    /// useful information: these messages already say what they are in their own text, and are
-    /// already color-coded, so the bracket added nothing. Kept as a separate function rather than
-    /// changing <see cref="Tag"/> itself, since that one also writes the on-disk log file format -
-    /// LoadHistoryFile's parser requires a non-empty "[...]" token right after the timestamp, so
-    /// blanking it there would silently break history reload for every future line of these types.
-    /// </summary>
     public static string DisplayTag(XivChatType type) => type switch
     {
         XivChatType.Debug
@@ -528,7 +413,6 @@ internal static class ChannelDisplay
         {
             case "[S]": return XivChatType.Say;
             case "[P]": return XivChatType.Party;
-            // "[T]" is the pre-"[T<]" tag - old log files on disk may still have it.
             case "[T]": return XivChatType.TellIncoming;
             case "[T<]": return XivChatType.TellIncoming;
             case "[T>]": return XivChatType.TellOutgoing;
@@ -538,9 +422,6 @@ internal static class ChannelDisplay
             case "[A]": return XivChatType.Alliance;
             case "[PT]": return XivChatType.PvPTeam;
             case "[NN]": return XivChatType.NoviceNetwork;
-            // Legacy tags from before per-number linkshell tags existed - old log files on disk
-            // may still have these, so keep parsing them (as LS1/CW1, since the specific number
-            // wasn't recorded back then).
             case "[LS]": return XivChatType.Ls1;
             case "[CWLS]": return XivChatType.CrossLinkShell1;
         }
@@ -577,9 +458,6 @@ internal static class ChannelDisplay
             };
         }
 
-        // Every other tag above (System/Announcement/Battle categories) is never written to a log
-        // file in the first place - see ChatLogService.IsFileLoggingEnabled, which only has
-        // Configuration flags for the original category set - so there's nothing to parse back.
         return XivChatType.Say;
     }
 
@@ -642,15 +520,9 @@ internal static class ChannelDisplay
         _ => new Vector4(0.8f, 0.8f, 0.8f, 1f),
     };
 
-    // Each whisper conversation partner can have their own color override, keyed the same way
-    // whisper tabs/targets already are elsewhere ("Name" or "Name@World") - falls back to the
-    // shared Whisper category color if not customized, same pattern as linkshells below.
     public static Vector4 WhisperColor(string target, Configuration config) =>
         config.WhisperColours.TryGetValue(target, out var color) ? color : Color(ChatCategory.Whisper, config);
 
-    // Each linkshell/cross-world linkshell number can have its own color override, since a
-    // character can be in several at once and one shared "Linkshell" color makes them
-    // indistinguishable - falls back to that shared category color if not customized.
     public static Vector4 LinkshellColor(int number, Configuration config) =>
         config.LinkshellColours.TryGetValue(number, out var color) ? color : Color(ChatCategory.Linkshell, config);
 
@@ -677,14 +549,6 @@ internal static class ChannelDisplay
         return config.ChatColours.TryGetValue(category, out var color) ? color : DefaultColor(category);
     }
 
-    /// <summary>
-    /// Extra search terms for the Tabs settings page's category search - a category's own display
-    /// name isn't always the word someone would actually type. The motivating case: a small
-    /// utility plugin's notification (e.g. a login/doorbell alert) shows up under "Debug" (see its
-    /// own tooltip for why), which nobody would think to search for by that name - searching
-    /// "plugin" finds it via this list instead. Empty for every category whose own name already
-    /// covers the obvious search terms.
-    /// </summary>
     private static string[] SearchKeywords(ChatCategory category) => category switch
     {
         ChatCategory.Debug => new[] { "plugin", "addon" },

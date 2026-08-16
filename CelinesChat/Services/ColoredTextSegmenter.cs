@@ -7,16 +7,8 @@ using CelinesChat.Services.Web;
 
 namespace CelinesChat.Services;
 
-/// <summary>
-/// Turns a message into the same OOC/emote/mention/link-colored segments ColoredTextRenderer
-/// draws in ImGui, but as plain data instead of draw calls - reuses ColoredTextRenderer's own
-/// tokenizer (BuildRuns/Tokenize) and color-precedence rule (ResolveColor) instead of duplicating
-/// any of that parsing in JavaScript. The browser only ever needs to render one &lt;span&gt; per
-/// segment with an inline color.
-/// </summary>
 internal static class ColoredTextSegmenter
 {
-    /// <summary>For a live entry (Payloads != null) - preserves clickable links.</summary>
     public static List<WebTextSegmentDto> BuildSegments(
         IReadOnlyList<Payload> payloads,
         string mentionTerm,
@@ -29,7 +21,6 @@ internal static class ColoredTextSegmenter
         return Merge(ColoredTextRenderer.BuildRuns(payloads, mentionTerm), defaultColor, emoteColor, oocColor, mentionColor, linkColor, payloads);
     }
 
-    /// <summary>For a history entry reloaded from a log file (Payloads == null, plain text only, never any links).</summary>
     public static List<WebTextSegmentDto> BuildSegments(
         string text,
         string mentionTerm,
@@ -41,10 +32,6 @@ internal static class ColoredTextSegmenter
         var state = new ColoredTextRenderer.TokenizeState();
         return Merge(Widen(ColoredTextRenderer.Tokenize(text, mentionTerm, state)), defaultColor, emoteColor, oocColor, mentionColor, default, null);
 
-        // Mirrors ColoredTextRenderer.Draw's own local "Enumerate" helper - plain tokenized words
-        // have no native-foreground-color concept, and (unlike the desktop window) this history
-        // path doesn't linkify plain-text URLs either, since a history segment has no click
-        // dispatch wired up on the web client side yet.
         static IEnumerable<(string Word, ColoredTextRenderer.TextSegmentKind Kind, ColoredTextRenderer.LinkTarget? Link, Vector4? Foreground)> Widen(
             IEnumerable<(string Word, ColoredTextRenderer.TextSegmentKind Kind)> words)
         {
@@ -55,11 +42,6 @@ internal static class ColoredTextSegmenter
         }
     }
 
-    /// <summary>
-    /// Resolves each word's color, then merges consecutive same-color/same-link words into one
-    /// segment - the same run-buffering idea DrawSequence uses to cut down its own ImGui call
-    /// count, just emitting data instead of draw calls.
-    /// </summary>
     private static List<WebTextSegmentDto> Merge(
         IEnumerable<(string Word, ColoredTextRenderer.TextSegmentKind Kind, ColoredTextRenderer.LinkTarget? Link, Vector4? Foreground)> words,
         Vector4 defaultColor,
@@ -85,11 +67,6 @@ internal static class ColoredTextSegmenter
             {
                 Text = string.Join(' ', runWords),
                 ColorCss = ToCssColor(runColor),
-                // A plain-typed web URL (LinkTarget.Url) has no backing Payload at all, so it has
-                // no index into entry.Payloads to give the web client - FindPayloadIndex naturally
-                // returns null for it, same as any other unlinked run. The web client doesn't
-                // linkify those yet (see BuildSegments' history-path remarks); only real map/item/
-                // Dalamud link payloads are clickable there for now.
                 LinkIndex = FindPayloadIndex(payloads, runLink?.Payload),
             });
             runWords = null;
@@ -116,9 +93,6 @@ internal static class ColoredTextSegmenter
         return segments;
     }
 
-    // Reference equality on purpose - we're looking for the exact same Payload instance the
-    // message's own entry.Payloads holds, not a value-equal one, so /api/links/click can index
-    // straight back into that same list later.
     private static int? FindPayloadIndex(IReadOnlyList<Payload>? payloads, Payload? link)
     {
         if (payloads == null || link == null)

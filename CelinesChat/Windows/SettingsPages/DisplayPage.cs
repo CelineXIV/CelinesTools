@@ -42,5 +42,12 @@ internal sealed class DisplayPage
             config.ChatLogBackgroundOpacity = logBgOpacity;
             plugin.SaveConfiguration();
         }
+
+        var showSenderStatusIcons = config.ShowSenderStatusIcons;
+        if (ImGui.Checkbox(Loc.T("Settings.ShowSenderStatusIcons"), ref showSenderStatusIcons))
+        {
+            config.ShowSenderStatusIcons = showSenderStatusIcons;
+            plugin.SaveConfiguration();
+        }
     }
 }

@@ -49,8 +49,6 @@ internal sealed class WebClientPage
 
         if (plugin.WebServer.IsRunning && port != config.WebClientPort)
         {
-            // Not auto-restarted on every keystroke while editing the field - only takes effect
-            // the next time the server actually (re)starts (toggling the checkbox off/on again).
         }
 
         ImGui.PushStyleColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);

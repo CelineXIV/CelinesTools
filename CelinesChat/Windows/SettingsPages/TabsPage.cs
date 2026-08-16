@@ -42,17 +42,8 @@ internal sealed class TabsPage
         ChatTab? toRemove = null;
         var searching = !string.IsNullOrWhiteSpace(categorySearch);
 
-        // Every tab offers the exact same universe of categories (AllCategories), so whether a
-        // search term matches anything at all doesn't vary per tab - computed once, not per tab.
         var anyCategoryMatches = searching && HasAnyMatchingCategory(categorySearch);
 
-        // Each tab collapses into its own tree node (mirroring Chat2's own Tabs settings) instead
-        // of every tab's full checkbox grid being permanently expanded and stacked one after
-        // another - with several tabs and ~50 selectable categories each, that used to mean
-        // scrolling past a wall of checkboxes to find anything, which was a big part of this page
-        // being hard to get an overview of. While searching, every tab force-opens (so long as the
-        // term matches something at all) - otherwise a search would just find something behind a
-        // collapsed node the user would then have to go open manually anyway.
         for (var i = 0; i < config.ChatTabs.Count; i++)
         {
             var tab = config.ChatTabs[i];
@@ -68,12 +59,6 @@ internal sealed class TabsPage
                 ImGuiTreeNodeFlags.SpanAvailWidth | ImGuiTreeNodeFlags.FramePadding,
                 TabHeaderLabel(tab));
 
-            // SpanAvailWidth makes the tree node's own clickable area cover the whole row,
-            // including where the reorder/delete buttons render via SameLine right after it - by
-            // default Dear ImGui lets an earlier widget's hit area silently swallow clicks meant
-            // for something drawn on top of it later in the same spot (same class of overlap issue
-            // noted elsewhere in this file, re: the whisper tabs' close button), so without this
-            // the buttons looked clickable but every click just toggled the tree node instead.
             ImGui.SetItemAllowOverlap();
 
             DrawTabToolbar(config, tab, i, out var removed);
@@ -120,12 +105,6 @@ internal sealed class TabsPage
         return $"{tab.Name} ({count} {Loc.T("Tabs.MessageCountSuffix")})";
     }
 
-    /// <summary>
-    /// The row of icon buttons to the right of a tab's header: reorder up/down, then delete -
-    /// same order and icons as Chat2's own Tabs page. Placed on the same line as the TreeNode via
-    /// SameLine, so the header stays clickable to expand/collapse while these stay reachable
-    /// without opening the tab first.
-    /// </summary>
     private void DrawTabToolbar(Configuration config, ChatTab tab, int index, out bool removed)
     {
         removed = false;
@@ -186,13 +165,6 @@ internal sealed class TabsPage
 
         var searching = !string.IsNullOrWhiteSpace(search);
 
-        // Grouped into collapsible sections (Standard/Announcements/Battle) rather than one long
-        // flat grid - with ~50 selectable categories now, an unstructured grid would be
-        // unreadable. Linkshell/CrossWorldLinkshell get pulled out of the Standard group and
-        // handled separately - each has its own set of specific numbers (see
-        // DrawLinkshellSection), which needs its own indented block rather than fitting into a
-        // 3-per-row grid cell (and aren't searchable the same way, so they're skipped entirely
-        // while a search is active).
         foreach (var group in ChannelDisplay.AllGroups)
         {
             var gridCategories = new List<ChatCategory>();
@@ -213,9 +185,6 @@ internal sealed class TabsPage
 
             ImGui.PushID("group" + group);
 
-            // Same idea as Chat2's check/cross icon pair next to each group header - selecting or
-            // clearing ~15+ Announcements checkboxes one at a time was the single biggest reason
-            // this page felt tedious rather than just unclear.
             if (ImGuiComponents.IconButton(FontAwesomeIcon.Check))
             {
                 foreach (var category in gridCategories)
@@ -301,13 +270,6 @@ internal sealed class TabsPage
         }
     }
 
-    /// <summary>
-    /// A short explanation for the handful of category names that aren't self-explanatory from
-    /// their label alone (unlike e.g. "Party" or "Yell") - directly targets the "translation is
-    /// hard to understand" feedback without having to rename the categories themselves, which
-    /// still need to match the vanilla client's own terminology elsewhere (file-log settings,
-    /// etc). Null for every category whose name already says what it is.
-    /// </summary>
     private static string? CategoryTooltip(ChatCategory category) => category switch
     {
         ChatCategory.Notice => Loc.T("Channel.NoticeTooltip"),
@@ -318,16 +280,6 @@ internal sealed class TabsPage
         _ => null,
     };
 
-    /// <summary>
-    /// The Linkshell/CrossWorldLinkshell category checkbox, plus - once it's checked - one
-    /// indented sub-checkbox per numbered slot (1-8, not just ones currently joined - configuring
-    /// a color/visibility in advance for a linkshell you're not in right now is legitimate),
-    /// letting a tab show e.g. just CW-Linkshell 1 and 3 instead of all of them. An empty
-    /// "included" set is treated as "no restriction yet" (every sub-checkbox shows checked) - see
-    /// ChatTab.IncludedLinkshellNumbers - so unchecking one has to materialize the full set
-    /// first, or the very next frame's "empty means show all" fallback would make it look like
-    /// nothing was ever unchecked.
-    /// </summary>
     private void DrawLinkshellSection(ChatTab tab, ChatCategory category, List<(int Number, string Name)> slots, HashSet<int> included, string prefix)
     {
         var categoryIncluded = tab.IncludedChannels.Contains(category);

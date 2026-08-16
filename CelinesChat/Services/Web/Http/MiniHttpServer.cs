@@ -6,23 +6,6 @@ using System.Text;
 
 namespace CelinesChat.Services.Web.Http;
 
-/// <summary>
-/// A small, purpose-built HTTP/1.1 server written directly against TcpListener/NetworkStream,
-/// replacing the third-party WatsonWebserver.Lite this project used to depend on. That library's
-/// embedded TCP layer (CavemanTcp) never implements keep-alive at all - it force-closes every
-/// connection after exactly one request/response, regardless of the client's Connection header -
-/// and a browser's normal HTTP/1.1 connection-reuse pool trips over that: it reuses a socket the
-/// server already closed, and the OS sends a hard RST instead of a clean response. This was
-/// confirmed directly (decompiling WatsonWebserver.Lite's ClientConnected, and reproducing the
-/// exact "connection forcibly closed by remote host" by manually pipelining two requests onto one
-/// raw socket) while chasing a live "Could not reach the server." / NS_ERROR_NET_RESET bug report.
-/// The fix that actually matters here is simple to state and small in scope for what this plugin
-/// needs (~10 fixed routes, no HTTP/2, no TLS): support real keep-alive, so a client's normal
-/// connection-reuse behavior is met with a server that's actually prepared for it. Everything else
-/// below only exists to keep WebRoutes.cs (the actual route handlers - auth, SSE framing, colored
-/// message segments) working against the same small API shape it already used, so that carefully-
-/// tuned logic didn't need to be touched at all.
-/// </summary>
 internal enum HttpMethod
 {
     GET,
@@ -74,7 +57,6 @@ internal sealed class HttpRequest
 
     public SourceInfo Source { get; }
 
-    /// <summary>Null if the body is empty - mirrors the previous WatsonWebserver.Core.DataAsString contract that call sites already check with string.IsNullOrEmpty.</summary>
     public string? DataAsString => Body.Length == 0 ? null : Encoding.UTF8.GetString(Body);
 
     public string? RetrieveHeaderValue(string key) => headers.TryGetValue(key, out var value) ? value : null;
@@ -95,7 +77,6 @@ internal sealed class HttpResponse
 
     public HeaderCollection Headers { get; } = new();
 
-    /// <summary>When true, the Content-Type defaults to text/event-stream and the connection is always closed after the stream ends (see MiniHttpServer's per-connection loop) - never reused for keep-alive.</summary>
     public bool ServerSentEvents { get; set; }
 
     public bool ResponseSent { get; private set; }
@@ -113,11 +94,6 @@ internal sealed class HttpResponse
         ResponseSent = true;
     }
 
-    /// <summary>
-    /// Writes one SSE/chunked-transfer frame. Returns false (instead of throwing) the moment the
-    /// underlying write fails, so callers (see WebRoutes.HandleEvents) can treat "the client went
-    /// away" as a normal end-of-stream condition rather than an exceptional one.
-    /// </summary>
     public async Task<bool> SendChunk(byte[] chunk, bool isFinal, CancellationToken token)
     {
         try
@@ -146,8 +122,6 @@ internal sealed class HttpResponse
         }
         catch (Exception)
         {
-            // The socket is already gone either way - mark the response "sent" so the caller's own
-            // cleanup path doesn't also try to write a final chunk into a dead connection.
             ResponseSent = true;
             return false;
         }
@@ -198,7 +172,6 @@ internal sealed class HttpResponse
         _ => "Unknown",
     };
 
-    /// <summary>Set by MiniHttpServer's per-connection loop right before dispatch, so response-writing code never has to know about connection-reuse policy.</summary>
     internal void SetConnectionHeader(bool keepAlive) => Headers.Add("Connection", keepAlive ? "keep-alive" : "close");
 }
 
@@ -215,7 +188,6 @@ internal sealed class HttpContext
 
     public HttpResponse Response { get; }
 
-    /// <summary>Cancelled when the server itself is shutting down - the only consumer today is the long-lived SSE loop in WebRoutes.HandleEvents.</summary>
     public CancellationToken Token { get; }
 }
 
@@ -274,18 +246,11 @@ internal sealed class WebServerRoutes
 
     public StaticRouteGroup PostAuthentication { get; } = new();
 
-    /// <summary>Runs after PreAuthentication routes fail to match and before PostAuthentication routes are checked - sending a response here (setting ResponseSent) short-circuits the rest of the pipeline, mirroring WatsonWebserver's own AuthenticateRequest contract that WebRoutes.CheckAuth already relies on.</summary>
     public Func<HttpContext, Task>? AuthenticateRequest { get; set; }
 
     public Func<HttpContext, Task> Default { get; set; } = null!;
 }
 
-/// <summary>
-/// TcpListener-based HTTP/1.1 server. Binds 0.0.0.0 (all interfaces, matching this feature's "reach
-/// it from a phone on the LAN" requirement) - a plain socket bind, so unlike HttpListener this needs
-/// no admin rights or URL-ACL reservation. No TLS/HTTP2 support by design (see the web-client plan's
-/// documented future work); this only needs to correctly serve a handful of fixed JSON/SSE routes.
-/// </summary>
 internal sealed class MiniHttpServer : IDisposable
 {
     private const int MaxHeaderBytes = 65_536;
@@ -328,7 +293,6 @@ internal sealed class MiniHttpServer : IDisposable
         }
         catch (Exception)
         {
-            // Already stopped/disposed - nothing more to do.
         }
     }
 
@@ -351,7 +315,6 @@ internal sealed class MiniHttpServer : IDisposable
             }
             catch (Exception)
             {
-                // Listener stopped/disposed, or the token was cancelled - either way, shutting down.
                 return;
             }
 
@@ -387,9 +350,6 @@ internal sealed class MiniHttpServer : IDisposable
                 }
                 catch (Exception)
                 {
-                    // Client closed the (possibly idle, pooled) connection, sent a malformed
-                    // request, or the idle keep-alive timeout fired - all of these just mean "this
-                    // connection is done," not something worth surfacing as a server error.
                     return;
                 }
 
@@ -414,15 +374,12 @@ internal sealed class MiniHttpServer : IDisposable
                         }
                         catch (Exception)
                         {
-                            // Connection is already gone - nothing more to do.
                         }
                     }
                 }
 
                 if (!response.ResponseSent)
                 {
-                    // A route matched but never actually sent anything (a bug in that handler) -
-                    // this is the same "did not send a response" safety net Watson itself had.
                     try
                     {
                         response.StatusCode = 500;
@@ -503,7 +460,6 @@ internal sealed class MiniHttpServer : IDisposable
             {
                 if (buffer.Count == 0)
                 {
-                    // A clean, idle keep-alive connection closing on its own - not an error.
                     throw new EndOfStreamException();
                 }
 

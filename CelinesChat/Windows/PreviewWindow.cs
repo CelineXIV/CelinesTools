@@ -6,9 +6,6 @@ namespace CelinesChat.Windows;
 
 internal sealed class PreviewWindow : Window
 {
-    // Matches ChatWindow/SecondaryChatWindow's own link color - a plain URL in the outgoing draft
-    // gets linkified here too (see ColoredTextRenderer.TryGetUrl), same as it would once actually
-    // sent and shown in the log.
     private static readonly Vector4 LinkColor = new(0.4f, 0.7f, 1f, 1f);
 
     private readonly Plugin plugin;
@@ -33,8 +30,9 @@ internal sealed class PreviewWindow : Window
 
     public override void Draw()
     {
-        // Same font as the compose box/log, exactly sized (no runtime scale) - see
-        // ChatWindow.Draw's comment for why the sizing lives in the font itself now.
+        // See ChatWindow.Draw's matching remarks - drawing proceeds either way. This window has no
+        // cached heights to worry about (it redraws its preview text fresh every frame), so there's
+        // nothing further to guard here beyond just letting it draw with whatever font is active.
         using var chatFontScope = plugin.PushChatFont();
 
         var config = plugin.Configuration;

@@ -3,12 +3,6 @@ using FFXIVClientStructs.FFXIV.Client.UI.Info;
 
 namespace CelinesChat.Services;
 
-/// <summary>
-/// Reads which linkshells/cross-world linkshells the current character actually belongs to,
-/// with their real names, straight from the game's own info proxies - the same data source the
-/// native chat-channel picker itself uses. Never throws: a native lookup failing just means the
-/// channel picker shows nothing for that section instead of taking the plugin down with it.
-/// </summary>
 internal static class NativeChannels
 {
     public static unsafe List<(int Number, string Name)> GetExistingLinkshells()
@@ -39,7 +33,6 @@ internal static class NativeChannels
         }
         catch
         {
-            // Best-effort only - see class summary.
         }
 
         return result;
@@ -68,19 +61,11 @@ internal static class NativeChannels
         }
         catch
         {
-            // Best-effort only - see class summary.
         }
 
         return result;
     }
 
-    /// <summary>
-    /// All 8 numbered slots, with a real name filled in wherever <paramref name="existing" /> has
-    /// one - unlike the send-channel picker (which only lists ones you can actually send to
-    /// right now), settings like per-linkshell colors and per-tab visibility are legitimately
-    /// useful to configure in advance even for a linkshell you're not currently in, so those
-    /// pages show every slot regardless.
-    /// </summary>
     public static List<(int Number, string Name)> AllSlots(List<(int Number, string Name)> existing)
     {
         var namesByNumber = new Dictionary<int, string>();

@@ -4,18 +4,8 @@ using CelinesChat.Services.Web.Http;
 
 namespace CelinesChat.Services.Web;
 
-/// <summary>
-/// Owns the embedded HTTP server's start/stop lifecycle - the actual route handlers live in
-/// WebRoutes, this class is just "is it running, start it, stop it, tell me why it failed."
-/// Entirely inert (no listener, no thread, no timer) unless/until Start() is actually called -
-/// Configuration.WebClientEnabled gates whether Plugin ever calls that at all.
-/// </summary>
 internal sealed class WebServerService : IDisposable
 {
-    // How often a heartbeat SSE comment goes out to every connected client, independent of real
-    // traffic - keeps NAT/mobile idle-socket timers from silently killing a connection that has
-    // nothing to say for a while, and gives the browser's own watchdog (see app.js) something to
-    // reset its "did we hear anything recently" clock against.
     private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(15);
 
     private readonly Plugin plugin;
@@ -40,11 +30,6 @@ internal sealed class WebServerService : IDisposable
 
     public int ConnectedClientCount => hub.ConnectedCount;
 
-    /// <summary>
-    /// Every currently-reachable "open this in a browser" URL for the settings page to show -
-    /// the machine's own hostname (works from other devices on the same LAN, which is the whole
-    /// point) plus localhost (handy for testing from the same PC without needing a phone).
-    /// </summary>
     public IReadOnlyList<string> GetDisplayUrls(int port)
     {
         var urls = new List<string> { $"http://localhost:{port}/" };
@@ -54,8 +39,6 @@ internal sealed class WebServerService : IDisposable
         }
         catch (Exception)
         {
-            // Hostname resolution failing is a "your network stack is unusual" problem, not
-            // something worth surfacing as a plugin error - localhost above still works either way.
         }
 
         return urls;
@@ -80,10 +63,6 @@ internal sealed class WebServerService : IDisposable
 
             host = newHost;
             LastError = null;
-            // A proper named event (not a bare SSE comment) deliberately - a comment keeps the
-            // TCP connection alive but is invisible to the browser's EventSource API entirely, so
-            // app.js's own "have I heard anything recently" watchdog (see its remarks) would have
-            // nothing to observe. This one frame does both jobs at once.
             heartbeatTimer = new Timer(_ => hub.Broadcast("event: heartbeat\ndata: {}\n\n"), null, HeartbeatInterval, HeartbeatInterval);
             return true;
         }

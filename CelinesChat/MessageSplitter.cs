@@ -58,10 +58,6 @@ internal static class MessageSplitter
             return result;
         }
 
-        // Reserve 2 characters of headroom on every chunk: a chunk in the middle of a long
-        // "*emote*" span can need a synthetic "*" appended (to close it for its left boundary)
-        // AND a synthetic "*" prepended (to reopen it for its right boundary) at the same time.
-        // This guarantees FixEmoteBoundary's close/reopen fallback always fits within maxLength.
         var effectiveMax = Math.Max(1, maxLength - 2);
 
         var words = paragraph.Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -114,15 +110,6 @@ internal static class MessageSplitter
         return result;
     }
 
-    /// <summary>
-    /// If chunk <paramref name="i"/> ends in the middle of an open "*emote*" span, tries to keep the
-    /// emote intact by moving its trailing words to the next chunk. If that would make either chunk
-    /// too long, it instead closes the emote at the end of this chunk and reopens it at the start of
-    /// the next one with a synthetic "*", since otherwise the continuation would render as plain
-    /// (white) text instead of the emote colour once the messages are sent as separate chat lines.
-    /// Thanks to the headroom reserved in <see cref="SplitParagraph"/>, the close/reopen fallback is
-    /// always able to fit within <paramref name="maxLength"/>.
-    /// </summary>
     private static void FixEmoteBoundary(List<string> chunks, int i, int maxLength)
     {
         if (!EndsInsideEmote(chunks[i]))

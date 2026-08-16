@@ -3,18 +3,6 @@ using Dalamud.Plugin.Services;
 
 namespace CelinesChat.Services;
 
-/// <summary>
-/// Reads "common/font/gfdata.gfd" - the game's own small binary index mapping a numeric icon ID
-/// (matching <see cref="Dalamud.Game.Text.SeStringHandling.BitmapFontIcon"/>) to its pixel
-/// rectangle within the "common/font/fonticon_ps5.tex" shared icon atlas texture. This is how the
-/// game itself draws status icons (Mentor crown, Sprout/New Adventurer, Returner, Role-Playing,
-/// ...) inline with text - there's no higher-level Dalamud API for it.
-///
-/// Ported from Chat2's Util/IconUtil.cs (GfdFileView/GfdHeader/GfdEntry), which itself credits a
-/// then-unmerged Dalamud fork PR (Kizer/Soreepeong's feature/log-wordwrap branch,
-/// Dalamud/Interface/Spannables/public/GfdFileView.cs) - the version of Dalamud this plugin
-/// references doesn't have that merged in yet, so there's no built-in equivalent to call instead.
-/// </summary>
 internal static class GfdIconAtlas
 {
     [StructLayout(LayoutKind.Sequential)]
@@ -42,10 +30,6 @@ internal static class GfdIconAtlas
 
     private static byte[]? gfdFileBytes;
 
-    /// <summary>
-    /// Looks up an icon's rectangle within the shared icon atlas texture. False (with a
-    /// default/empty entry) if the icon ID is 0, unknown, or the .gfd file couldn't be loaded.
-    /// </summary>
     public static unsafe bool TryGetEntry(IDataManager dataManager, uint iconId, out GfdEntry entry)
     {
         entry = default;
@@ -75,9 +59,6 @@ internal static class GfdIconAtlas
 
     private static bool TryFind(ReadOnlySpan<GfdEntry> entries, uint iconId, out GfdEntry entry, bool followRedirect = true)
     {
-        // Most .gfd files list entries in strict ID order starting at 1, so a direct index lookup
-        // works and avoids a binary search - but fall back to one if that assumption ever doesn't
-        // hold (e.g. a future game update reorders or sparsifies entries).
         if (iconId <= entries.Length && entries[(int)(iconId - 1)].Id == iconId)
         {
             entry = entries[(int)(iconId - 1)];

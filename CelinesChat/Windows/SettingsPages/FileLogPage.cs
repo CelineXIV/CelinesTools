@@ -29,11 +29,14 @@ internal sealed class FileLogPage
             plugin.SaveConfiguration();
         }
 
-        var fileLogTell = config.FileLogTell;
-        if (ImGui.Checkbox(Loc.T("Channel.Whisper") + "##fileLogTell", ref fileLogTell))
+        ImGui.BeginDisabled(true);
+        var whisperAlwaysLogged = true;
+        ImGui.Checkbox(Loc.T("Channel.Whisper") + "##fileLogTellAlwaysOn", ref whisperAlwaysLogged);
+        ImGui.EndDisabled();
+
+        if (ImGui.IsItemHovered())
         {
-            config.FileLogTell = fileLogTell;
-            plugin.SaveConfiguration();
+            ImGui.SetTooltip(Loc.T("Settings.FileLogTellAlwaysOnHint"));
         }
 
         var fileLogYell = config.FileLogYell;

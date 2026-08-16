@@ -107,10 +107,6 @@ internal sealed class ColorsPage
                     continue;
                 }
 
-                // Linkshell/CrossWorldLinkshell get expanded into one row per actually-existing
-                // number below instead of a single shared row here - a character can be in
-                // several at once, and one shared color makes them indistinguishable from each
-                // other.
                 if (category is ChatCategory.Linkshell or ChatCategory.CrossWorldLinkshell)
                 {
                     continue;

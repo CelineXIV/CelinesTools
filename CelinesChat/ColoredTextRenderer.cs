@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.Text.SeStringHandling;
@@ -9,14 +10,6 @@ namespace CelinesChat;
 
 internal static class ColoredTextRenderer
 {
-    /// <summary>
-    /// What a rendered word links to, if anything - either a real SeString payload (map/item/
-    /// Dalamud link, already part of the message's own data) or a plain URL typed straight into
-    /// the message text (e.g. "https://example.com" pasted by whoever sent it, with no special
-    /// payload backing it at all). Kept as its own tiny type rather than overloading Payload
-    /// itself - none of Dalamud's actual Payload subtypes have a slot for "just an arbitrary URL
-    /// string," and every one of them carries protocol-specific fields that don't apply here.
-    /// </summary>
     internal sealed class LinkTarget
     {
         public Payload? Payload { get; }
@@ -28,21 +21,8 @@ internal static class ColoredTextRenderer
         public LinkTarget(string url) => Url = url;
     }
 
-    /// <summary>
-    /// Trailing sentence punctuation a URL commonly ends up glued to ("check this out:
-    /// https://example.com." or "(https://example.com)") gets trimmed off before validating and
-    /// linkifying - otherwise the period/parenthesis would either break the link or just render
-    /// as part of the clickable text, neither of which is what the sender meant.
-    /// </summary>
     private static readonly char[] UrlTrailingPunctuation = { '.', ',', ')', ']', '!', '?', ':', ';' };
 
-    /// <summary>
-    /// True (with the fully-qualified form in <paramref name="url"/>) for anything that looks
-    /// like a web link a browser could open - "http://"/"https://" as-is, or a bare "www."
-    /// address with an assumed "https://" in front (the most common way people actually type a
-    /// link in chat, without a scheme). Validated via Uri.TryCreate rather than ad-hoc string
-    /// checks so genuinely malformed text never gets linkified.
-    /// </summary>
     private static bool TryGetUrl(string word, out string url)
     {
         var candidate = word.TrimEnd(UrlTrailingPunctuation);
@@ -79,35 +59,50 @@ internal static class ColoredTextRenderer
         Vector4? highlightColor = null,
         Action<LinkTarget>? onLinkClicked = null)
     {
-        var state = new TokenizeState();
         DrawSequence(
-            Enumerate(Tokenize(text, mentionTerm, state)),
+            BuildPlainRuns(text, mentionTerm),
             defaultColor, emoteColor, oocColor, mentionColor, linkColor,
             availableWidth, initialLineWidthUsed, highlightTerm, highlightColor, onLinkClicked);
+    }
 
-        static IEnumerable<(string Word, TextSegmentKind Kind, LinkTarget? Link, Vector4? Foreground)> Enumerate(IEnumerable<(string Word, TextSegmentKind Kind)> words)
+    internal static IEnumerable<(string Word, TextSegmentKind Kind, LinkTarget? Link, Vector4? Foreground)> BuildPlainRuns(string text, string mentionTerm)
+    {
+        var state = new TokenizeState();
+        foreach (var (word, kind) in Tokenize(text, mentionTerm, state))
         {
-            foreach (var (word, kind) in words)
-            {
-                var link = TryGetUrl(word, out var url) ? new LinkTarget(url) : null;
-                yield return (word, kind, link, null);
-            }
+            var link = TryGetUrl(word, out var url) ? new LinkTarget(url) : null;
+            yield return (word, kind, link, null);
         }
     }
 
-    /// <summary>
-    /// Same as <see cref="Draw"/>, but walks a message's actual SeString payloads instead of a
-    /// flattened string - lets map links, item links, and Dalamud links (from other plugins, e.g.
-    /// Lifestream) render as part of the normal wrapped text flow instead of a separate widget
-    /// bolted on afterward, and makes them clickable via <paramref name="onLinkClicked"/>.
-    ///
-    /// A link payload (MapLink/Item/DalamudLink) itself carries no visible text - the game encodes
-    /// the clickable label as a plain TextPayload immediately after it, terminated by
-    /// <see cref="RawPayload.LinkTerminator"/>. This is the same structure Chat2's own
-    /// ChunkUtil.ToChunks walks (verified against their real source) - it's what lets the exact
-    /// same text that's already part of the message double as the click target, rather than this
-    /// needing to synthesize and display a second, separate copy of it.
-    /// </summary>
+    /// Same as Draw/DrawRich, but computes the (word, kind, link, foreground) breakdown once per
+    /// entry and reuses it on every later call instead of re-tokenizing entry.Text/entry.Payloads
+    /// from scratch every frame - see ChatLogEntry.CachedRuns' own remarks for why this matters.
+    public static void DrawForEntry(
+        Services.ChatLogEntry entry,
+        Vector4 defaultColor,
+        Vector4 emoteColor,
+        Vector4 oocColor,
+        Vector4 mentionColor,
+        Vector4 linkColor,
+        float availableWidth,
+        string mentionTerm,
+        float initialLineWidthUsed,
+        string highlightTerm,
+        Vector4? highlightColor,
+        Action<LinkTarget> onLinkClicked,
+        Action<LinkTarget>? onLinkHovered = null)
+    {
+        entry.CachedRuns ??= entry.Payloads is { } payloads
+            ? BuildRuns(payloads, mentionTerm).ToList()
+            : BuildPlainRuns(entry.Text, mentionTerm).ToList();
+
+        DrawSequence(
+            entry.CachedRuns,
+            defaultColor, emoteColor, oocColor, mentionColor, linkColor,
+            availableWidth, initialLineWidthUsed, highlightTerm, highlightColor, onLinkClicked, onLinkHovered);
+    }
+
     public static void DrawRich(
         IReadOnlyList<Payload> payloads,
         Vector4 defaultColor,
@@ -129,17 +124,6 @@ internal static class ColoredTextRenderer
             availableWidth, initialLineWidthUsed, highlightTerm, highlightColor, onLinkClicked, onLinkHovered);
     }
 
-    /// <summary>
-    /// Walks a message's payloads, tracking which link (if any) and which native foreground color
-    /// (if any) currently apply, and tokenizing each run of text under that state - mirrors
-    /// Chat2's own ChunkUtil.ToChunks push/pop handling of UIForegroundPayload (verified against
-    /// their real source). This is what makes e.g. an item link's rarity color (which the game
-    /// itself already wraps the item's name in via UIForegroundPayload/UIColor) show up correctly
-    /// instead of every link rendering in one flat link color regardless of what it actually is.
-    /// </summary>
-    // internal (not private) so Services/ColoredTextSegmenter can reuse this exact same
-    // payload-walking/tokenization logic to build data for the web client, instead of
-    // reimplementing OOC/emote/mention/link parsing a second time in JavaScript.
     internal static IEnumerable<(string Word, TextSegmentKind Kind, LinkTarget? Link, Vector4? Foreground)> BuildRuns(IReadOnlyList<Payload> payloads, string mentionTerm)
     {
         var state = new TokenizeState();
@@ -172,10 +156,6 @@ internal static class ColoredTextRenderer
                     var currentLinkTarget = currentLink != null ? new LinkTarget(currentLink) : null;
                     foreach (var (word, kind) in Tokenize(textProvider.Text, mentionTerm, state))
                     {
-                        // A plain-typed URL sitting inside a run that's *already* linked to
-                        // something else (a map/item/Dalamud link's own label text) keeps that
-                        // existing link rather than being reinterpreted as a web link - only
-                        // otherwise-plain text gets checked for a URL at all.
                         var link = currentLinkTarget ?? (TryGetUrl(word, out var url) ? new LinkTarget(url) : null);
                         yield return (word, kind, link, currentForeground);
                     }
@@ -185,8 +165,6 @@ internal static class ColoredTextRenderer
         }
     }
 
-    // UIColor.Dark/Light (surfaced as UIForegroundPayload.RGBA) is packed as RRGGBBAA - verified
-    // against Chat2's own Util/ColourUtil.cs, which does the exact same byte layout.
     private static Vector4 RgbaToVector4(uint rgba)
     {
         var r = (byte)((rgba & 0xFF000000) >> 24);
@@ -196,14 +174,6 @@ internal static class ColoredTextRenderer
         return new Vector4(r / 255f, g / 255f, b / 255f, a / 255f);
     }
 
-    /// <summary>
-    /// The color-precedence rule for one tokenized word: a native foreground color (e.g. an item
-    /// link's rarity color, which the game already wraps the item name in) wins over the generic
-    /// link color, which wins over the word's OOC/emote/mention/plain kind - a link is still
-    /// clickable regardless of which color it's actually drawn in. Extracted out of DrawSequence
-    /// (its only caller until now) so Services/ColoredTextSegmenter can resolve the exact same
-    /// color for the web client's JSON without re-deriving this precedence rule a second time.
-    /// </summary>
     internal static Vector4 ResolveColor(Vector4? foreground, LinkTarget? link, TextSegmentKind kind, Vector4 defaultColor, Vector4 emoteColor, Vector4 oocColor, Vector4 mentionColor, Vector4 linkColor)
     {
         return foreground ?? (link != null
@@ -231,25 +201,10 @@ internal static class ColoredTextRenderer
         Action<LinkTarget>? onLinkClicked,
         Action<LinkTarget>? onLinkHovered = null)
     {
-        // See the remarks on Draw's initialLineWidthUsed parameter in git history/callers - this
-        // is measured once per frame by the caller, at the left edge of the log area before any
-        // entry is drawn, not re-derived here from the current cursor position. The margin below
-        // is sized off the theme's actual scrollbar width since content region math can still land
-        // text right at that edge - a too-small margin clips the last character or two of a line.
         var wrapWidth = availableWidth - ImGui.GetStyle().ScrollbarSize - 6f;
         var lineWidthUsed = initialLineWidthUsed;
         var startOfLine = initialLineWidthUsed <= 0f;
 
-        // Consecutive words that end up the same color/link get buffered and drawn as a single
-        // ImGui call once a line/formatting break actually forces a flush, instead of one call
-        // (plus CalcTextSize, SameLine, item-rect queries, ...) per individual word. SameLine(0,0)
-        // between separately drawn same-colored words was already pixel-identical to one
-        // continuous string, so this changes nothing on screen for the common case (most messages
-        // are a single color throughout) - it just cuts the per-frame ImGui call count roughly
-        // from one-per-word to one-per-formatting-run, which matters once the full scrollback (up
-        // to 500 entries) gets fully re-walked and re-drawn every single frame regardless of
-        // scroll position - this was the biggest concrete difference found comparing against
-        // Chat2's own per-line (not per-word) text drawing.
         List<string>? runWords = null;
         var runWidth = 0f;
         Vector4 runColor = default;
@@ -288,21 +243,18 @@ internal static class ColoredTextRenderer
 
             if (size.X > wrapWidth)
             {
-                // A single "word" wider than the whole line (a long URL, a wall of text with no
-                // spaces at all, ...) can never fit no matter which line it starts on, so (same as
-                // before this method buffered runs) it always starts its own fresh line rather
-                // than continuing whatever came before it - flush whatever's already buffered
-                // (finishing the previous line) and force a wrap first. Hard-wraps just this one
-                // word internally instead of rendering it as one unbroken line running off the
-                // edge of the window; left alone otherwise, enabling wrap-pos unconditionally
-                // previously shaved a character or two off ordinary short words too, since Dear
-                // ImGui measures wrapped vs. unwrapped text slightly differently.
                 FlushRun();
+
+                if (!startOfLine)
+                {
+                    ImGui.NewLine();
+                }
+
                 startOfLine = true;
                 lineWidthUsed = 0f;
 
                 ImGui.PushTextWrapPos(ImGui.GetCursorScreenPos().X + wrapWidth);
-                ImGui.TextColored(color, word + " ");
+                DrawUnit(word + " ", word, color, link, onLinkClicked, onLinkHovered);
                 ImGui.PopTextWrapPos();
                 lineWidthUsed = size.X;
                 startOfLine = false;
@@ -314,8 +266,6 @@ internal static class ColoredTextRenderer
 
             if (!fitsCurrentLine)
             {
-                // The next word doesn't fit on the current line even with whatever's already
-                // buffered - flush the buffer (finishing this line), then start a fresh line.
                 FlushRun();
                 startOfLine = true;
                 lineWidthUsed = 0f;
@@ -344,12 +294,6 @@ internal static class ColoredTextRenderer
         }
     }
 
-    /// <summary>
-    /// Draws one already-fitted piece of text (a single word, or several consecutive same-format
-    /// words merged by DrawSequence's run buffering) plus its link hover/click/underline
-    /// handling. Callers own line-wrap decisions and call ImGui.SameLine beforehand as needed -
-    /// this only draws.
-    /// </summary>
     private static void DrawUnit(string display, string bareText, Vector4 color, LinkTarget? link, Action<LinkTarget>? onLinkClicked, Action<LinkTarget>? onLinkHovered)
     {
         ImGui.TextColored(color, display);
@@ -362,10 +306,6 @@ internal static class ColoredTextRenderer
         ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
         onLinkHovered?.Invoke(link);
 
-        // A cursor-shape change alone is easy to miss (the mouse might not even be looking at the
-        // cursor). An underline directly under the hovered text is the same affordance a normal
-        // web hyperlink gives on hover. Stops at the text itself, not the trailing space baked
-        // into "display"'s measured width.
         var rectMin = ImGui.GetItemRectMin();
         var rectMax = ImGui.GetItemRectMax();
         var underlineEndX = rectMin.X + ImGui.CalcTextSize(bareText).X;
@@ -380,16 +320,10 @@ internal static class ColoredTextRenderer
         }
     }
 
-    // internal (not private) - Services/ColoredTextSegmenter needs to construct one of these to
-    // call Tokenize, same reason as Tokenize/BuildRuns above.
     internal sealed class TokenizeState
     {
         public bool InEmote;
 
-        // A depth (not just a bool) so "(((nested))" and similar don't prematurely drop out of
-        // OOC after only one of several closes - and, just as importantly, so a *stray* ')' with
-        // nothing open (a ":)" or "8)" smiley, a typo) can never push it negative and doesn't
-        // count as a close at all. See Tokenize's per-character scan below.
         public int OocDepth;
     }
 
@@ -401,17 +335,8 @@ internal static class ColoredTextRenderer
         Mention,
     }
 
-    // internal (not private) - see BuildRuns' remarks above, same reason.
     internal static IEnumerable<(string Word, TextSegmentKind Kind)> Tokenize(string text, string mentionTerm, TokenizeState state)
     {
-        // '\r'/'\n' matter here specifically because of NewLinePayload (Dalamud's
-        // PayloadType.NewLine): its .Text is a literal Environment.NewLine, and it implements
-        // ITextProvider like any other text, so it flows through the exact same tokenizer as
-        // everything else. Without treating it as a word separator, that literal newline character
-        // rides along inside whatever "word" it ends up attached to and forces a hard, seemingly
-        // random line break wherever the game happened to place one (observed right between a map
-        // link's place name and region name) - splitting on it here instead just treats it as
-        // another wrap point, letting the normal wrap logic decide where lines actually break.
         var words = text.Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
 
         foreach (var word in words)
@@ -423,16 +348,6 @@ internal static class ColoredTextRenderer
                 state.InEmote = !state.InEmote;
             }
 
-            // Single "(aside)" and double "((aside))" parens both go grey the same way - depth
-            // simply reaches 1 (or 2) instead of caring which. Scanned character-by-character
-            // (not just an aggregate open/close count) specifically so a lone, never-opened ')'
-            // - a ":)" or "8)" smiley, a stray typo - can't decrement below zero and doesn't
-            // touch OOC at all, the way a naive "does this word contain ')'" check would have.
-            //
-            // A "(2/7)" split-message counter (see MessageSplitter) is a single self-contained
-            // paren pair by construction, so it would otherwise go grey by this same rule - it's
-            // our own bookkeeping, not something the sender wrote, so it's excluded outright
-            // rather than colored as if it were part of the message.
             var startedInOoc = state.OocDepth > 0;
             var touchedOoc = startedInOoc;
             if (!IsMessagePartCounter(word))
@@ -461,13 +376,6 @@ internal static class ColoredTextRenderer
         }
     }
 
-    /// <summary>
-    /// True for exactly "(&lt;digits&gt;/&lt;digits&gt;)" - the split-message counter
-    /// MessageSplitter.BuildMessages appends (" (2/7)" etc.), and nothing else. Deliberately
-    /// strict (no other characters allowed inside) so it can't accidentally swallow something a
-    /// person actually wrote that happens to contain a slash between two numbers as part of a
-    /// longer word.
-    /// </summary>
     private static bool IsMessagePartCounter(string word)
     {
         if (word.Length < 5 || word[0] != '(' || word[^1] != ')')

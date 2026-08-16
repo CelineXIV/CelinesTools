@@ -5,22 +5,6 @@ using Dalamud.Plugin;
 
 namespace CelinesChat.Services;
 
-/// <summary>
-/// Builds (and rebuilds, if the choice/size changes) a custom font for the chat window, using only
-/// fonts Dalamud ships with itself - see <see cref="ChatFontChoice"/>'s remarks for why an
-/// arbitrary system-font browser (like Chat2's) isn't offered here. Uses the plugin's own
-/// <see cref="IDalamudPluginInterface.UiBuilder"/>.FontAtlas (auto-created per plugin, already set
-/// to rebuild asynchronously) rather than creating a separate atlas - there's no reason for this
-/// plugin to manage its own.
-///
-/// <see cref="ChatFontChoice.Default"/> used to mean "no custom handle at all, fall back to
-/// whatever ImGui's current font is" and rely on ImGui.SetWindowFontScale for resizing. That
-/// scale is a post-hoc stretch of already-rasterized glyph bitmaps, not a real re-render at a new
-/// size, and turned out to cause visible shimmer/instability while typing even at fairly mild
-/// factors - confirmed by the user still seeing it with Default selected. So Default now also
-/// gets a real, exactly-sized font handle (falls into the switch below same as any other choice,
-/// landing on NotoSansCjkRegular) and there is no more scale-based resize path anywhere.
-/// </summary>
 internal sealed class ChatFontManager : IDisposable
 {
     private readonly IDalamudPluginInterface pluginInterface;
@@ -33,11 +17,6 @@ internal sealed class ChatFontManager : IDisposable
         this.pluginInterface = pluginInterface;
     }
 
-    /// <summary>
-    /// Rebuilds the font handle if the requested choice/size actually changed since last time -
-    /// cheap to call every frame (see ChatWindow.Draw), since the common case (nothing changed)
-    /// does no work at all.
-    /// </summary>
     public void EnsureFont(ChatFontChoice choice, float sizePx)
     {
         if (fontHandle != null && choice == currentChoice && Math.Abs(sizePx - currentSizePx) < 0.1f)
@@ -61,11 +40,12 @@ internal sealed class ChatFontManager : IDisposable
             tk => tk.AddDalamudAssetFont(asset, new SafeFontConfig { SizePx = sizePx })));
     }
 
-    /// <summary>
-    /// Pushes the custom font, if one is configured and ready - null (nothing to pop) otherwise,
-    /// which naturally leaves ImGui's current font in place. <see cref="IFontHandle.Push"/> itself
-    /// already handles "not built yet" gracefully by keeping the current font, per its own docs.
-    /// </summary>
+    // IFontHandle.Push() silently does nothing if the handle isn't Available yet (Dalamud's own
+    // docs: "pushes ... if available", leaving whatever font was already active in effect) -
+    // callers need to know explicitly when that happened, rather than unknowingly drawing a whole
+    // frame with the wrong font's metrics.
+    public bool IsAvailable => fontHandle?.Available ?? false;
+
     public IDisposable? Push() => fontHandle?.Push();
 
     public void Dispose()

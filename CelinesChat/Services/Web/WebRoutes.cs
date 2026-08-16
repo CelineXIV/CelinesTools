@@ -13,26 +13,12 @@ using HttpMethod = CelinesChat.Services.Web.Http.HttpMethod;
 
 namespace CelinesChat.Services.Web;
 
-/// <summary>
-/// The actual HTTP route handlers - registered against a MiniHttpServer by WebServerService, which
-/// owns the server's start/stop lifecycle. Every handler that reads/writes Configuration or calls
-/// into ChatWindow/game APIs marshals onto the framework thread first (see Plugin.Framework) -
-/// this class's own methods otherwise run on arbitrary MiniHttpServer connection threads.
-/// </summary>
 internal sealed class WebRoutes : IDisposable
 {
     private const string CookieName = "CelinesChat-token";
 
-    // Matches ChatWindow's own hardcoded LinkColor field (kept private there, this is a small
-    // enough constant that duplicating it here beats exposing a whole UI-only field just for it -
-    // if that ever changes, update this too).
     private static readonly Vector4 LinkColor = new(0.4f, 0.7f, 1f, 1f);
 
-    // Newtonsoft.Json's default output preserves C# PascalCase property names as-is (e.g.
-    // "ChannelColorCss"), but app.js reads every field in idiomatic camelCase ("channelColorCss")
-    // - confirmed as a real, live mismatch by curl-testing the running server directly. Every
-    // outgoing JSON payload below goes through this so the two sides actually agree, without
-    // having to rename every C# DTO property to break normal .NET convention instead.
     private static readonly JsonSerializerSettings JsonSettings = new()
     {
         ContractResolver = new CamelCasePropertyNamesContractResolver(),
@@ -49,9 +35,6 @@ internal sealed class WebRoutes : IDisposable
         this.plugin = plugin;
         this.hub = hub;
 
-        // Read once at construction (i.e. once per server start) rather than per-request - a
-        // plugin reload/rebuild already picks up new file contents naturally, and re-reading
-        // three small files on every single page load would be pure waste.
         indexHtml = File.ReadAllText(Path.Combine(webRootDir, "index.html"));
         appJs = File.ReadAllText(Path.Combine(webRootDir, "app.js"));
         stylesCss = File.ReadAllText(Path.Combine(webRootDir, "styles.css"));
@@ -62,7 +45,6 @@ internal sealed class WebRoutes : IDisposable
         host.Routes.PreAuthentication.Static.Add(HttpMethod.POST, "/api/auth", HandleAuth, OnException);
         host.Routes.PreAuthentication.Static.Add(HttpMethod.GET, "/api/session", HandleSession, OnException);
 
-        // Everything below only runs once CheckAuth lets it through - see its own remarks.
         host.Routes.AuthenticateRequest = CheckAuth;
 
         host.Routes.PostAuthentication.Static.Add(HttpMethod.POST, "/api/logout", HandleLogout, OnException);
@@ -73,9 +55,6 @@ internal sealed class WebRoutes : IDisposable
         host.Routes.PostAuthentication.Static.Add(HttpMethod.POST, "/api/channel", HandleChannel, OnException);
         host.Routes.PostAuthentication.Static.Add(HttpMethod.POST, "/api/links/click", HandleLinkClick, OnException);
 
-        // Live push for new messages matching whatever the shared view currently is, and for
-        // view changes themselves (a desktop tab click has to reach connected browsers exactly
-        // the same way a web-initiated one does - see ChatWindow.ViewChanged's remarks).
         plugin.ChatLog.EntryAdded += OnEntryAdded;
         plugin.ChatWindowInstance.ViewChanged += OnViewChanged;
     }
@@ -98,9 +77,6 @@ internal sealed class WebRoutes : IDisposable
     {
         ctx.Response.StatusCode = 200;
         ctx.Response.ContentType = contentType;
-        // Never cached - an updated plugin version shipping a new page would otherwise risk a
-        // browser (especially a phone's, which tend to cache far more aggressively) silently
-        // keeping stale HTML/JS/CSS around indefinitely.
         ctx.Response.Headers.Add("Cache-Control", "no-store");
         await ctx.Response.Send(body);
     }
@@ -134,10 +110,6 @@ internal sealed class WebRoutes : IDisposable
             plugin.SaveConfiguration();
         });
 
-        // HttpOnly (JS never needs to read it) + SameSite=Strict (single-origin LAN tool, no
-        // cross-site requests are ever legitimate here, so this alone is sufficient CSRF
-        // protection without needing separate CSRF tokens) - no Secure flag, since this is
-        // deliberately plain HTTP (LAN-only by design, see WebClientPage's warning text).
         ctx.Response.Headers.Add("Set-Cookie", $"{CookieName}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000");
         await SendJson(ctx, 200, new { ok = true });
     }
@@ -163,13 +135,6 @@ internal sealed class WebRoutes : IDisposable
         await SendJson(ctx, 200, new { ok = true });
     }
 
-    /// <summary>
-    /// MiniHttpServer's global pre-route gate (see WebServerService) - sends a 401 and returns without
-    /// calling through to the actual route whenever the session cookie is missing/invalid,
-    /// mirroring Chat2's own confirmed-working AuthenticateRequest pattern (they redirect an HTML
-    /// page instead of returning JSON, since their post-auth routes are pages; every one of ours
-    /// is a JSON API, so a plain 401 is the right shape here instead).
-    /// </summary>
     private async Task CheckAuth(HttpContext ctx)
     {
         if (IsAuthenticated(ctx))
@@ -220,12 +185,8 @@ internal sealed class WebRoutes : IDisposable
             return;
         }
 
-        // Fire-and-forget onto the framework thread, same as the desktop compose box's own send
-        // path - the HTTP response doesn't wait for the actual game-thread send to complete.
         _ = plugin.Framework.RunOnFrameworkThread(() =>
         {
-            // Mirrors ChatWindow.TrySend: a message starting with "/" is a raw game command
-            // (typed verbatim, not wrapped in a channel prefix or run through the splitter).
             if (text.StartsWith('/'))
             {
                 plugin.SendRawCommand(text);
@@ -349,9 +310,6 @@ internal sealed class WebRoutes : IDisposable
     private async Task HandleEvents(HttpContext ctx)
     {
         ctx.Response.StatusCode = 200;
-        // Frames are built by hand (see BuildFrame) rather than through some higher-level "send an
-        // SSE event" helper, specifically so an "id:" field can be included on every frame - the
-        // browser's EventSource needs that for Last-Event-ID resumption to work at all.
         ctx.Response.ServerSentEvents = true;
 
         var client = hub.Register();
@@ -391,34 +349,21 @@ internal sealed class WebRoutes : IDisposable
         }
         catch (OperationCanceledException)
         {
-            // Client disconnected (or the plugin/server is shutting down) - not an error.
         }
         finally
         {
             hub.Unregister(client.Id);
 
-            // MiniHttpServer's per-connection loop sends its own 500 fallback if a route returns
-            // without ever marking the response sent - and SendChunk only sets that flag when
-            // isFinal is true, which none of the streaming sends above ever pass (they can't -
-            // there's no "final" message until the connection is actually ending). This closes
-            // the chunked response out properly right as the handler is about to return, however
-            // it got here (client disconnect, a failed send, server shutdown), so that fallback
-            // never fires on top of an already-streaming connection. ctx.Token is already
-            // cancelled in the disconnect case, so CancellationToken.None is used here deliberately
-            // - if the socket's still there, this gives it one last real chance to send instead of
-            // failing immediately on an already-cancelled token.
             try
             {
                 await ctx.Response.SendChunk(Array.Empty<byte>(), true, CancellationToken.None);
             }
             catch (Exception)
             {
-                // The connection is already gone in most disconnect cases - nothing more to do.
             }
         }
     }
 
-    /// <summary>Called on the framework thread (ChatLogService.EntryAdded always fires there) - safe to read Configuration/ChatWindow state directly.</summary>
     private void OnEntryAdded(ChatLogEntry entry)
     {
         if (!MatchesCurrentView(entry))
@@ -430,20 +375,10 @@ internal sealed class WebRoutes : IDisposable
         hub.Broadcast(BuildFrame("message", entry.Sequence, dto));
     }
 
-    /// <summary>
-    /// ChatWindow.ViewChanged fires synchronously from wherever SelectChannel/SwitchToFixedTab/
-    /// EnterWhisperView was called - for a web-initiated switch that's already the framework
-    /// thread (see the Handle* methods above); for a desktop tab click it's ChatWindow's own
-    /// Draw(), also the framework thread. Either way, safe to read state directly here.
-    /// </summary>
     private void OnViewChanged()
     {
         hub.Broadcast(BuildFrame("view", null, BuildViewDto()));
 
-        // The "message" event only ever pushes newly-arriving entries filtered to whatever the
-        // view happened to be at that moment (see OnEntryAdded) - switching tabs/channels/whisper
-        // targets needs the *history* for the newly-selected view too, or the message list would
-        // just keep showing whatever the previous view had until new traffic happens to arrive.
         var config = plugin.Configuration;
         var mentionTerm = plugin.MentionFirstName;
         var history = FilterToCurrentView(Tail(plugin.ChatLog.Snapshot(), 200))
@@ -575,9 +510,6 @@ internal sealed class WebRoutes : IDisposable
         ctx.Response.StatusCode = 500;
         ctx.Response.ContentType = "application/json; charset=utf-8";
         await ctx.Response.Send(JsonConvert.SerializeObject(new WebErrorResponse("Internal server error."), JsonSettings));
-        // Swallow ex here deliberately - Plugin.Log isn't reachable statically, and
-        // WebServerService's own Events.ExceptionEncountered hook (registered separately) already
-        // logs every server-side exception through Dalamud's logger.
         _ = ex;
     }
 }

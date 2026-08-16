@@ -14,6 +14,7 @@ internal enum SettingsPage
     Display,
     Fonts,
     FileLog,
+    WhisperContacts,
     WebClient,
     Info,
 }
@@ -27,6 +28,7 @@ internal sealed class SettingsWindow : Window
     private readonly DisplayPage displayPage;
     private readonly FontsPage fontsPage;
     private readonly FileLogPage fileLogPage;
+    private readonly WhisperContactsPage whisperContactsPage;
     private readonly WebClientPage webClientPage;
     private readonly InfoPage infoPage;
     private SettingsPage currentPage = SettingsPage.General;
@@ -37,12 +39,19 @@ internal sealed class SettingsWindow : Window
         Size = new Vector2(560, 500);
         SizeCondition = ImGuiCond.FirstUseEver;
 
+        SizeConstraints = new WindowSizeConstraints
+        {
+            MinimumSize = new Vector2(520, 340),
+            MaximumSize = new Vector2(float.MaxValue, float.MaxValue),
+        };
+
         generalPage = new GeneralPage(plugin);
         colorsPage = new ColorsPage(plugin);
         tabsPage = new TabsPage(plugin);
         displayPage = new DisplayPage(plugin);
         fontsPage = new FontsPage(plugin);
         fileLogPage = new FileLogPage(plugin);
+        whisperContactsPage = new WhisperContactsPage(plugin);
         webClientPage = new WebClientPage(plugin);
         infoPage = new InfoPage(plugin);
     }
@@ -69,6 +78,7 @@ internal sealed class SettingsWindow : Window
         DrawNavEntry(Loc.T("Nav.Display"), FontAwesomeIcon.Desktop, SettingsPage.Display);
         DrawNavEntry(Loc.T("Nav.Fonts"), FontAwesomeIcon.Font, SettingsPage.Fonts);
         DrawNavEntry(Loc.T("Nav.FileLog"), FontAwesomeIcon.Save, SettingsPage.FileLog);
+        DrawNavEntry(Loc.T("Nav.WhisperContacts"), FontAwesomeIcon.UserEdit, SettingsPage.WhisperContacts);
         DrawNavEntry(Loc.T("Nav.WebClient"), FontAwesomeIcon.Wifi, SettingsPage.WebClient);
         ImGui.Separator();
         DrawNavEntry(Loc.T("Nav.Info"), FontAwesomeIcon.InfoCircle, SettingsPage.Info);
@@ -97,6 +107,9 @@ internal sealed class SettingsWindow : Window
             case SettingsPage.FileLog:
                 fileLogPage.Draw();
                 break;
+            case SettingsPage.WhisperContacts:
+                whisperContactsPage.Draw();
+                break;
             case SettingsPage.WebClient:
                 webClientPage.Draw();
                 break;
@@ -124,10 +137,6 @@ internal sealed class SettingsWindow : Window
         var drawList = ImGui.GetWindowDrawList();
         var textColor = ImGui.GetColorU32(ImGuiCol.Text);
 
-        // A colored bar on the selected entry's left edge, using the same accent color the
-        // compose area's Send button uses - a small touch that makes that color choice feel like
-        // it applies to the plugin's whole identity instead of just one button, and reads as a
-        // much more current sidebar-nav pattern than relying on ImGui's flat selection fill alone.
         if (isSelected)
         {
             var accent = plugin.Configuration.SendAccentColor;

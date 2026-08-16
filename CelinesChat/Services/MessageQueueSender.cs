@@ -63,8 +63,6 @@ internal sealed class MessageQueueSender : IDisposable
         }
         catch (Exception ex)
         {
-            // Best-effort UTF8 decode purely for the log message - won't render an embedded
-            // payload's raw bytes as anything meaningful, but that's fine for diagnostics.
             log.Error(ex, Loc.T("Log.SendError", Encoding.UTF8.GetString(command)));
         }
 

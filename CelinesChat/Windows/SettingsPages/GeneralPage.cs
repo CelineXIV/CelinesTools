@@ -122,6 +122,29 @@ internal sealed class GeneralPage
             plugin.SaveConfiguration();
         }
 
+        var hideNativeChat = config.HideNativeChat;
+        if (ImGui.Checkbox(Loc.T("Settings.HideNativeChat"), ref hideNativeChat))
+        {
+            config.HideNativeChat = hideNativeChat;
+            plugin.SaveConfiguration();
+        }
+
+        var preloadHistory = config.PreloadRecentHistoryOnStartup;
+        if (ImGui.Checkbox(Loc.T("Settings.PreloadRecentHistoryOnStartup"), ref preloadHistory))
+        {
+            config.PreloadRecentHistoryOnStartup = preloadHistory;
+            plugin.SaveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Settings.PreloadRecentHistoryOnStartupTooltip"));
+        }
+
+        ImGui.PushStyleColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);
+        ImGui.TextWrapped(Loc.T("Settings.PreloadRecentHistoryOnStartupHint"));
+        ImGui.PopStyleColor();
+
         ImGui.Separator();
         ImGui.TextUnformatted(Loc.T("Settings.TabsHeader"));
 
@@ -146,8 +169,18 @@ internal sealed class GeneralPage
             plugin.SaveConfiguration();
         }
 
-        // Applies to every tab that doesn't have its own override - a fixed tab via its
-        // right-click quick-edit popup, a whisper tab via the same popup's color picker.
+        var scrollToBottomOnTabSwitch = config.ScrollToBottomOnTabSwitch;
+        if (ImGui.Checkbox(Loc.T("Settings.ScrollToBottomOnTabSwitch"), ref scrollToBottomOnTabSwitch))
+        {
+            config.ScrollToBottomOnTabSwitch = scrollToBottomOnTabSwitch;
+            plugin.SaveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Settings.ScrollToBottomOnTabSwitchTooltip"));
+        }
+
         ImGui.BeginDisabled(!tabBgEnabled);
         ImGui.Indent();
         var tabBgColor = config.TabStripBackgroundColor;
@@ -171,8 +204,6 @@ internal sealed class GeneralPage
             plugin.SaveConfiguration();
         }
 
-        // Only meaningful for the glass packs - Classic keeps using ImGui's own theme colors
-        // untouched, same as it always did.
         var isGlassPack = config.ToolbarIconPack != ToolbarIconPack.Classic;
         ImGui.BeginDisabled(!isGlassPack);
         ImGui.Indent();
@@ -204,9 +235,6 @@ internal sealed class GeneralPage
         ImGui.Unindent();
         ImGui.EndDisabled();
 
-        // A couple of real toolbar buttons rendered right here in whichever pack/colors are
-        // currently selected - a combo label and color swatches alone don't convey what the
-        // result actually looks like.
         ImGui.TextDisabled(Loc.T("Settings.ToolbarIconPackPreview"));
         ImGui.SameLine();
 
@@ -236,11 +264,6 @@ internal sealed class GeneralPage
         Loc.T("Settings.ToolbarIconPack.FrostedGlass"),
     };
 
-    /// <summary>
-    /// A 1-16 picker for one of the game's own built-in sound effect slots (the same ones
-    /// &lt;se.1&gt;-&lt;se.16&gt; macros use) plus a button to preview it immediately - there's no
-    /// canonical "the tell sound", so letting people pick-and-preview beats guessing one for them.
-    /// </summary>
     private void DrawSoundEffectPicker(string id, int currentValue, Action<int> setValue, bool disabled)
     {
         ImGui.BeginDisabled(disabled);
