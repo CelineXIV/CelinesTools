@@ -189,6 +189,20 @@ internal static class Loc
         ["GroupPoseCountdown.ColumnCommand"] = ("Command (e.g. /emote wave)", "Kommando (z.B. /emote wave)"),
         ["GroupPoseCountdown.CommandInputHint"] = ("/emote wave", "/emote wave"),
         ["GroupPoseCountdown.TriggerAdd"] = ("Add", "Hinzufuegen"),
+        ["Nav.FpsPing"] = ("FPS / Ping", "FPS / Ping"),
+        ["Overview.FeatureFpsPing"] = ("FPS / Ping: small draggable overlay showing current framerate and/or server ping", "FPS / Ping: kleines verschiebbares Overlay mit aktueller Bildrate und/oder Server-Ping"),
+        ["FpsPing.Description"] = ("Shows a small, draggable overlay with your current framerate and/or ping to the server. There's no ping value exposed by the game itself outside the character-select screen, so this measures its own by timing a connection to the same server your game is already connected to.", "Zeigt ein kleines, verschiebbares Overlay mit deiner aktuellen Bildrate und/oder deinem Ping zum Server an. Das Spiel liefert außerhalb der Charakterauswahl keinen eigenen Ping-Wert, daher wird hier selbst gemessen, indem die Verbindungszeit zum ohnehin schon verbundenen Spiel-Server gestoppt wird."),
+        ["FpsPing.EnableCheckbox"] = ("Enable FPS/ping overlay", "FPS-/Ping-Overlay aktivieren"),
+        ["FpsPing.ShowFps"] = ("Show FPS", "FPS anzeigen"),
+        ["FpsPing.ShowPing"] = ("Show ping", "Ping anzeigen"),
+        ["FpsPing.PingHint"] = ("Ping updates every ~2 seconds. Drag the overlay by its background to move it.", "Der Ping aktualisiert sich alle ~2 Sekunden. Das Overlay lässt sich am Hintergrund verschieben."),
+        ["FpsPing.PositionLocked"] = ("Lock position (prevents accidental dragging)", "Position sperren (verhindert versehentliches Verschieben)"),
+        ["FpsPing.ScaleSlider"] = ("Size", "Größe"),
+        ["FpsPing.BackgroundOpacity"] = ("Background opacity", "Hintergrund-Deckkraft"),
+        ["FpsPing.ColorCodeFps"] = ("Color-code FPS (green/yellow/red)", "FPS farblich markieren (grün/gelb/rot)"),
+        ["FpsPing.GreenThreshold"] = ("Green at or above", "Grün ab"),
+        ["FpsPing.RedThreshold"] = ("Red at or below", "Rot ab"),
+        ["FpsPing.ColorCodeHint"] = ("Between the two thresholds shows yellow.", "Zwischen den beiden Schwellenwerten wird gelb angezeigt."),
     };
 
     public static void SetLanguage(string uiLanguage)

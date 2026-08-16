@@ -39,6 +39,8 @@ public sealed class Plugin : IDalamudPlugin
     private readonly SlidecastCursorOverlayWindow slidecastCursorOverlayWindow;
     private readonly TradeAutoAcceptService tradeAutoAcceptService;
     private readonly GroupPoseCountdownService groupPoseCountdownService;
+    private readonly FpsPingService fpsPingService;
+    private readonly FpsPingOverlayWindow fpsPingOverlayWindow;
 
     private const int LoginInitialDelayMs = 3000;
 
@@ -127,6 +129,12 @@ public sealed class Plugin : IDalamudPlugin
         groupPoseCountdownService = new GroupPoseCountdownService(chatGui, log, Configuration);
         groupPoseCountdownService.SetEnabled(Configuration.GroupPoseCountdownEnabled);
 
+        fpsPingService = new FpsPingService(framework, log);
+        fpsPingService.SetEnabled(Configuration.FpsPingEnabled);
+        fpsPingOverlayWindow = new FpsPingOverlayWindow(this, fpsPingService);
+        windowSystem.AddWindow(fpsPingOverlayWindow);
+        fpsPingOverlayWindow.IsOpen = true;
+
         openCommandInfo = new CommandInfo(OnOpenCommand) { HelpMessage = Loc.T("Command.Help.Open") };
         runCommandInfo = new CommandInfo(OnRunCommand) { HelpMessage = Loc.T("Command.Help.Run") };
         glamourerPreviewCommandInfo = new CommandInfo(OnGlamourerPreviewCommand) { HelpMessage = Loc.T("Command.Help.GlamourerPreview") };
@@ -182,6 +190,13 @@ public sealed class Plugin : IDalamudPlugin
         Configuration.GroupPoseCountdownEnabled = enabled;
         SaveConfiguration();
         groupPoseCountdownService.SetEnabled(enabled);
+    }
+
+    public void SetFpsPingEnabled(bool enabled)
+    {
+        Configuration.FpsPingEnabled = enabled;
+        SaveConfiguration();
+        fpsPingService.SetEnabled(enabled);
     }
 
     public void SaveConfiguration() => pluginInterface.SavePluginConfig(Configuration);
@@ -259,5 +274,6 @@ public sealed class Plugin : IDalamudPlugin
         paissaClient.Dispose();
         tradeAutoAcceptService.Dispose();
         groupPoseCountdownService.Dispose();
+        fpsPingService.Dispose();
     }
 }

@@ -71,4 +71,29 @@ public class Configuration : IPluginConfiguration
     public bool GroupPoseCountdownEnabled { get; set; }
 
     public List<GroupPoseCountdownTrigger> GroupPoseCountdownTriggers { get; set; } = new();
+
+    /// <summary>Off by default - shows a small draggable overlay with current FPS and/or ping.</summary>
+    public bool FpsPingEnabled { get; set; }
+
+    public bool FpsPingShowFps { get; set; } = true;
+
+    public bool FpsPingShowPing { get; set; } = true;
+
+    /// <summary>Off by default - once locked, the overlay can no longer be dragged/resized (prevents accidentally bumping it out of place).</summary>
+    public bool FpsPingPositionLocked { get; set; }
+
+    /// <summary>Overall size multiplier for the overlay's text/padding.</summary>
+    public float FpsPingScale { get; set; } = 1f;
+
+    /// <summary>0 = fully transparent (no background box, just floating text), 1 = fully opaque.</summary>
+    public float FpsPingBackgroundOpacity { get; set; } = 0.85f;
+
+    /// <summary>Off by default - tints the FPS value green/yellow/red based on the thresholds below.</summary>
+    public bool FpsPingColorCodeFps { get; set; }
+
+    /// <summary>FPS at or above this shows green.</summary>
+    public float FpsPingGreenThreshold { get; set; } = 60f;
+
+    /// <summary>FPS at or below this shows red; anything between this and the green threshold shows yellow.</summary>
+    public float FpsPingRedThreshold { get; set; } = 30f;
 }

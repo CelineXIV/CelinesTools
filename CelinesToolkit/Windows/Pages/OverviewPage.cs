@@ -21,5 +21,6 @@ internal sealed class OverviewPage
         ImGui.BulletText(Loc.T("Overview.FeatureSlidecast"));
         ImGui.BulletText(Loc.T("Overview.FeatureAutoAcceptTrade"));
         ImGui.BulletText(Loc.T("Overview.FeatureGroupPoseCountdown"));
+        ImGui.BulletText(Loc.T("Overview.FeatureFpsPing"));
     }
 }

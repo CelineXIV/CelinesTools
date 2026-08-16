@@ -21,6 +21,7 @@ internal enum ToolkitPage
     Slidecast,
     AutoAcceptTrade,
     GroupPoseCountdown,
+    FpsPing,
 }
 
 internal sealed class MainWindow : Window
@@ -37,6 +38,7 @@ internal sealed class MainWindow : Window
     private readonly SlidecastPage slidecastPage;
     private readonly AutoAcceptTradePage autoAcceptTradePage;
     private readonly GroupPoseCountdownPage groupPoseCountdownPage;
+    private readonly FpsPingPage fpsPingPage;
     private readonly IClientState clientState;
     private ToolkitPage currentPage = ToolkitPage.Overview;
     private bool draggingNavSplitter;
@@ -59,6 +61,7 @@ internal sealed class MainWindow : Window
         slidecastPage = new SlidecastPage(plugin);
         autoAcceptTradePage = new AutoAcceptTradePage(plugin);
         groupPoseCountdownPage = new GroupPoseCountdownPage(plugin);
+        fpsPingPage = new FpsPingPage(plugin);
     }
 
     // Preserves this window's prior hidden-during-GPose behavior now that the plugin as a whole
@@ -84,6 +87,7 @@ internal sealed class MainWindow : Window
         DrawNavEntry(Loc.T("Nav.Slidecast"), FontAwesomeIcon.Running, ToolkitPage.Slidecast);
         DrawNavEntry(Loc.T("Nav.AutoAcceptTrade"), FontAwesomeIcon.Handshake, ToolkitPage.AutoAcceptTrade);
         DrawNavEntry(Loc.T("Nav.GroupPoseCountdown"), FontAwesomeIcon.Users, ToolkitPage.GroupPoseCountdown);
+        DrawNavEntry(Loc.T("Nav.FpsPing"), FontAwesomeIcon.TachometerAlt, ToolkitPage.FpsPing);
         ImGui.EndChild();
 
         ImGui.SameLine(0, 2);
@@ -141,6 +145,9 @@ internal sealed class MainWindow : Window
                 break;
             case ToolkitPage.GroupPoseCountdown:
                 groupPoseCountdownPage.Draw();
+                break;
+            case ToolkitPage.FpsPing:
+                fpsPingPage.Draw();
                 break;
         }
         ImGui.EndChild();
