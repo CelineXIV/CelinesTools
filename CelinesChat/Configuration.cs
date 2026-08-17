@@ -23,6 +23,20 @@ public enum ToolbarIconPack
     FrostedGlass,
 }
 
+/// <summary>
+/// Where the message-preview appears - matches Chat2's own Preview position setting. "Window" is a
+/// separate, freely movable/resizable floating window (CelinesChat's long-standing default);
+/// "Inside" embeds the same preview directly in the compose area of the main chat window itself.
+/// Only "Inside" guarantees clicking a character in the preview lets you keep typing immediately
+/// afterward - a separate window briefly steals ImGui's keyboard focus on click, and getting it back
+/// to the compose box takes one more Enter press or click, a limitation "Window" mode still has.
+/// </summary>
+public enum PreviewPosition
+{
+    Window,
+    Inside,
+}
+
 public enum ChatChannel
 {
     Say,
@@ -43,6 +57,13 @@ public class Snippet
     public string Name { get; set; } = string.Empty;
 
     public string Text { get; set; } = string.Empty;
+}
+
+public class ChannelSoundSetting
+{
+    public bool Enabled { get; set; }
+
+    public int SoundEffect { get; set; } = 1;
 }
 
 public class CharacterState
@@ -163,7 +184,22 @@ public class Configuration : IPluginConfiguration
 
     public int MentionSoundEffect { get; set; } = 6;
 
+    /// <summary>
+    /// Per-channel sound notifications beyond the two dedicated Whisper/Mention settings above (kept
+    /// separate rather than folded into this dictionary, so nothing changes for users who already
+    /// have those configured). Keyed by ChatCategory rather than XivChatType so all of a linkshell's
+    /// numbered variants (or any other multi-XivChatType category) share one setting. Off (no entry)
+    /// for every channel by default - a user specifically asked for "Say" to get a sound, but that's
+    /// a preference most people would not want turned on for them by default.
+    /// </summary>
+    public Dictionary<ChatCategory, ChannelSoundSetting> ChannelSounds { get; set; } = new();
+
+    /// <summary>Superseded by the separate ChatWindowLockPosition/ChatWindowLockSize below - kept only so Plugin's constructor can migrate an existing "fully locked" user into both of those the first time they load post-split, instead of silently unlocking the window on them.</summary>
     public bool ChatWindowLocked { get; set; }
+
+    public bool ChatWindowLockPosition { get; set; }
+
+    public bool ChatWindowLockSize { get; set; }
 
     public bool ShowChatDuringCutscenes { get; set; }
 
@@ -195,8 +231,16 @@ public class Configuration : IPluginConfiguration
 
     public float ChatLogBackgroundOpacity { get; set; } = 0.496f;
 
-    /// <summary>Off (fully transparent) by default - background fill behind the tab strip row and the footer/compose-preview row, independent of TabStripBackgroundColor (which only tints individual tab buttons, not the strip itself) and of the main window opacity.</summary>
+    /// <summary>Superseded by the separate TabStripBackgroundOpacity/FooterBackgroundOpacity below - kept only so Plugin's constructor can migrate whatever value existing users already had into both of those the first time they load post-split, instead of silently resetting it to off.</summary>
     public float ChromeBackgroundOpacity { get; set; }
+
+    /// <summary>Off (fully transparent) by default - background fill behind the tab strip row, independent of TabStripBackgroundColor (which only tints individual tab buttons, not the strip itself) and of the main window opacity.</summary>
+    public float TabStripBackgroundOpacity { get; set; } = -1f;
+
+    /// <summary>Off (fully transparent) by default - background fill behind the footer/compose-preview row (channel picker, message count, validation message), independent of the main window opacity.</summary>
+    public float FooterBackgroundOpacity { get; set; } = -1f;
+
+    public PreviewPosition PreviewPosition { get; set; } = PreviewPosition.Window;
 
     public Vector4 SendAccentColor { get; set; } = new(0.16f, 0.45f, 0.24f, 1f);
 

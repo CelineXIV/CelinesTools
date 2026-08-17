@@ -3,6 +3,7 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Components;
 using FFXIVClientStructs.FFXIV.Client.UI;
+using CelinesChat.Services;
 using CelinesChat.Windows;
 
 namespace CelinesChat.Windows.SettingsPages;
@@ -98,6 +99,31 @@ internal sealed class GeneralPage
         }
 
         DrawSoundEffectPicker("##mentionSfx", config.MentionSoundEffect, value => config.MentionSoundEffect = value, !mentionSoundEnabled);
+
+        ImGui.Spacing();
+        ImGui.TextUnformatted(Loc.T("Settings.ChannelSoundsHeader"));
+        ImGui.PushStyleColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);
+        ImGui.TextWrapped(Loc.T("Settings.ChannelSoundsHint"));
+        ImGui.PopStyleColor();
+
+        foreach (var category in ChannelSoundCategories)
+        {
+            config.ChannelSounds.TryGetValue(category, out var channelSound);
+            var enabled = channelSound?.Enabled ?? false;
+
+            if (ImGui.Checkbox($"{Loc.T($"Channel.{category}")}##channelSoundEnabled{category}", ref enabled))
+            {
+                channelSound = GetOrCreateChannelSound(config, category);
+                channelSound.Enabled = enabled;
+                plugin.SaveConfiguration();
+            }
+
+            DrawSoundEffectPicker(
+                $"##channelSfx{category}",
+                channelSound?.SoundEffect ?? 1,
+                value => GetOrCreateChannelSound(config, category).SoundEffect = value,
+                !enabled);
+        }
 
         ImGui.EndDisabled();
 
@@ -304,5 +330,33 @@ internal sealed class GeneralPage
         ImGui.Unindent();
 
         ImGui.EndDisabled();
+    }
+
+    // Whisper has its own dedicated setting above; Mention is cross-cutting rather than tied to one
+    // channel. Deliberately excludes the high-volume system/combat-log categories in ChatCategory -
+    // this list is only the channels people actually talk in.
+    private static readonly ChatCategory[] ChannelSoundCategories =
+    {
+        ChatCategory.Say,
+        ChatCategory.Party,
+        ChatCategory.Yell,
+        ChatCategory.Shout,
+        ChatCategory.FreeCompany,
+        ChatCategory.Alliance,
+        ChatCategory.Linkshell,
+        ChatCategory.CrossWorldLinkshell,
+        ChatCategory.PvpTeam,
+        ChatCategory.NoviceNetwork,
+    };
+
+    private static ChannelSoundSetting GetOrCreateChannelSound(Configuration config, ChatCategory category)
+    {
+        if (!config.ChannelSounds.TryGetValue(category, out var setting))
+        {
+            setting = new ChannelSoundSetting();
+            config.ChannelSounds[category] = setting;
+        }
+
+        return setting;
     }
 }

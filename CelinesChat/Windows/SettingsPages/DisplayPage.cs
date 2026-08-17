@@ -44,10 +44,18 @@ internal sealed class DisplayPage
         }
 
         ImGui.SetNextItemWidth(150);
-        var chromeBgOpacity = config.ChromeBackgroundOpacity;
-        if (ImGui.SliderFloat(Loc.T("Settings.ChromeBackgroundOpacity"), ref chromeBgOpacity, 0.0f, 1.0f))
+        var tabStripBgOpacity = config.TabStripBackgroundOpacity;
+        if (ImGui.SliderFloat(Loc.T("Settings.TabStripBackgroundOpacity"), ref tabStripBgOpacity, 0.0f, 1.0f))
         {
-            config.ChromeBackgroundOpacity = chromeBgOpacity;
+            config.TabStripBackgroundOpacity = tabStripBgOpacity;
+            plugin.SaveConfiguration();
+        }
+
+        ImGui.SetNextItemWidth(150);
+        var footerBgOpacity = config.FooterBackgroundOpacity;
+        if (ImGui.SliderFloat(Loc.T("Settings.FooterBackgroundOpacity"), ref footerBgOpacity, 0.0f, 1.0f))
+        {
+            config.FooterBackgroundOpacity = footerBgOpacity;
             plugin.SaveConfiguration();
         }
 
@@ -57,5 +65,24 @@ internal sealed class DisplayPage
             config.ShowSenderStatusIcons = showSenderStatusIcons;
             plugin.SaveConfiguration();
         }
+
+        ImGui.Spacing();
+        ImGui.SetNextItemWidth(220);
+        var previewPositionIndex = (int)config.PreviewPosition;
+        if (ImGui.Combo(Loc.T("Settings.PreviewPosition"), ref previewPositionIndex, PreviewPositionLabels, PreviewPositionLabels.Length))
+        {
+            config.PreviewPosition = (PreviewPosition)previewPositionIndex;
+            plugin.SaveConfiguration();
+        }
+
+        ImGui.PushStyleColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);
+        ImGui.TextWrapped(Loc.T("Settings.PreviewPositionHint"));
+        ImGui.PopStyleColor();
     }
+
+    private static readonly string[] PreviewPositionLabels =
+    {
+        Loc.T("Settings.PreviewPosition.Window"),
+        Loc.T("Settings.PreviewPosition.Inside"),
+    };
 }

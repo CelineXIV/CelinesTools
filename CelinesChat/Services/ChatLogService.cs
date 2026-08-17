@@ -243,7 +243,26 @@ internal sealed class ChatLogService : IDisposable
         if (configuration.MentionSoundEnabled && IsSelfMentioned(entry))
         {
             UIGlobals.PlayChatSoundEffect((uint)Math.Clamp(configuration.MentionSoundEffect, 1, 16));
+            return;
         }
+
+        if (!IsOwnMessage(entry)
+            && ChannelDisplay.CategoryOf(entry.ChatType) is { } category
+            && configuration.ChannelSounds.TryGetValue(category, out var channelSound)
+            && channelSound.Enabled)
+        {
+            UIGlobals.PlayChatSoundEffect((uint)Math.Clamp(channelSound.SoundEffect, 1, 16));
+        }
+    }
+
+    /// Say/Party/Yell/etc. don't have a separate "outgoing" XivChatType the way Tell does, so
+    /// per-channel sounds would otherwise also fire for a message the player just typed themselves -
+    /// not what "notify me when someone messages in this channel" is meant to mean.
+    private bool IsOwnMessage(ChatLogEntry entry)
+    {
+        return playerState.IsLoaded
+            && !string.IsNullOrEmpty(playerState.CharacterName)
+            && string.Equals(entry.Sender, playerState.CharacterName, StringComparison.OrdinalIgnoreCase);
     }
 
     private bool IsSelfMentioned(ChatLogEntry entry)

@@ -45,15 +45,18 @@ internal sealed class ChatWindow : Window
     private int cursorPos;
 
     private int? pendingCursorCharIndex;
+    private int? stashedCursorCharIndex;
     private string cachedInput = string.Empty;
     private int cachedMaxLength = -1;
     private List<string> cachedChunks = new();
+    private List<MappedChunk> cachedMappedChunks = new();
 
     private int historyBrowseIndex = -1;
     private string historyBrowseOriginalDraft = string.Empty;
     private bool splitterDragging;
 
     private float measuredFooterHeight = 60f;
+    private float measuredEmbeddedPreviewHeight;
     private bool pendingSendFromEnter;
     private bool pendingFocusInput;
     private bool composeBoxActive;
@@ -185,9 +188,18 @@ internal sealed class ChatWindow : Window
         var opacity = IsFocused ? plugin.Configuration.WindowOpacity : plugin.Configuration.UnfocusedWindowOpacity;
         ImGui.SetNextWindowBgAlpha(opacity);
 
-        Flags = plugin.Configuration.ChatWindowLocked
-            ? baseFlags | ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoResize
-            : baseFlags;
+        var flags = baseFlags;
+        if (plugin.Configuration.ChatWindowLockPosition)
+        {
+            flags |= ImGuiWindowFlags.NoMove;
+        }
+
+        if (plugin.Configuration.ChatWindowLockSize)
+        {
+            flags |= ImGuiWindowFlags.NoResize;
+        }
+
+        Flags = flags;
     }
 
     public override void Draw()
@@ -196,7 +208,11 @@ internal sealed class ChatWindow : Window
         if (justActivatedThisFrame)
         {
             pendingFocusInput = true;
-            ImGui.SetWindowFocus();
+
+            if (plugin.ConsumePendingPreviewCursorTarget() is { } previewCursorTarget)
+            {
+                stashedCursorCharIndex = previewCursorTarget;
+            }
         }
 
         // Null specifically means the font isn't ready yet this frame (see Plugin.PushChatFont's
@@ -267,16 +283,14 @@ internal sealed class ChatWindow : Window
             fixedTabUnreadCounts.Remove(activeTabId);
         }
 
-        if (state.LastChannel == ChatChannel.Whisper)
+        // The "Whispering with X" indicator itself moved down to the footer (near the compose box) -
+        // it used to sit here, above the tab bar, pushing every tab down a row whenever a whisper tab
+        // was active and getting in the way of quickly clicking between tabs. DrawWhisperTarget stays
+        // here though - it's the interactive target textbox needed when Whisper is the active channel
+        // but no dedicated tab is selected yet, not just a status indicator.
+        if (state.LastChannel == ChatChannel.Whisper && string.IsNullOrEmpty(activeWhisperTabTarget))
         {
-            if (string.IsNullOrEmpty(activeWhisperTabTarget))
-            {
-                DrawWhisperTarget(state);
-            }
-            else
-            {
-                DrawActiveWhisperIndicator(config, activeWhisperTabTarget);
-            }
+            DrawWhisperTarget(state);
         }
 
         DrawLogTabBar(config, state);
@@ -286,14 +300,22 @@ internal sealed class ChatWindow : Window
             DrawLogToolbar(config, state);
         }
 
-        var chunks = GetChunks(inputText, config.MaxMessageLength);
+        var mappedChunks = GetMappedChunks(inputText, config.MaxMessageLength);
+        var chunks = cachedChunks;
         plugin.CurrentPreviewChunks = chunks;
+        plugin.CurrentPreviewMappedChunks = mappedChunks;
 
         var minInputBoxHeight = ImGui.GetFrameHeight();
 
-        var minComposeAreaHeight = minInputBoxHeight + measuredFooterHeight;
+        // Same one-frame-lagged self-measurement trick measuredFooterHeight already relies on (see
+        // its own remarks) - the embedded preview's real height isn't known until after it's drawn,
+        // so this reserves whatever it measured out to last frame, keeping the chat log's own height
+        // correctly shrunk to make room for it instead of the preview silently overlapping the log or
+        // getting clipped off the bottom of the window.
+        var previewReserve = config.PreviewPosition == PreviewPosition.Inside ? measuredEmbeddedPreviewHeight : 0f;
+        var minComposeAreaHeight = minInputBoxHeight + measuredFooterHeight + previewReserve;
         var composeAreaHeight = Math.Clamp(config.ComposeAreaHeight, minComposeAreaHeight, MaxComposeAreaHeight);
-        var inputBoxHeight = Math.Max(minInputBoxHeight, composeAreaHeight - measuredFooterHeight);
+        var inputBoxHeight = Math.Max(minInputBoxHeight, composeAreaHeight - measuredFooterHeight - previewReserve);
 
         ImGui.PushStyleColor(ImGuiCol.ChildBg, new Vector4(0f, 0f, 0f, config.ChatLogBackgroundOpacity));
 
@@ -306,6 +328,26 @@ internal sealed class ChatWindow : Window
         ImGui.PopStyleColor();
 
         DrawSplitter(config, minComposeAreaHeight);
+
+        if (config.PreviewPosition == PreviewPosition.Inside && plugin.IsPreviewVisible)
+        {
+            // Positioned here (above the compose box, between it and the chat log) to match Chat2's
+            // own "Inside" preview placement. Just as important structurally: a click here sets
+            // pendingFocusInput on THIS SAME Draw() call, before the pendingFocusInput check right
+            // below - matching WrapSelection's own timing exactly (it also runs earlier in the frame,
+            // via the toolbar, than the compose box). Doing the same thing one frame later (this used
+            // to be drawn in the footer, after the compose box) left SetKeyboardFocusHere() unable to
+            // actually activate the box for real keyboard input, even though the window itself stayed
+            // correctly focused throughout - SetKeyboardFocusHere() apparently needs to be requested
+            // within the very same frame as the click that warrants it, not just "soon after".
+            var previewTop = ImGui.GetCursorScreenPos().Y;
+            DrawEmbeddedPreview(config, mappedChunks);
+            measuredEmbeddedPreviewHeight = MathF.Ceiling(Math.Max(0f, ImGui.GetCursorScreenPos().Y - previewTop));
+        }
+        else
+        {
+            measuredEmbeddedPreviewHeight = 0f;
+        }
 
         if (composeBoxActive && ImGui.IsKeyPressed(ImGuiKey.Escape))
         {
@@ -342,6 +384,12 @@ internal sealed class ChatWindow : Window
         composeBoxActive = ImGui.IsItemActive();
         plugin.IsChatInputActive = composeBoxActive;
 
+        if (composeBoxActive && stashedCursorCharIndex is { } stashedIndex)
+        {
+            stashedCursorCharIndex = null;
+            pendingCursorCharIndex = stashedIndex;
+        }
+
         if (pendingAutoTranslatePopup)
         {
             pendingAutoTranslatePopup = false;
@@ -366,22 +414,28 @@ internal sealed class ChatWindow : Window
 
         HandleSendHotkey(state, config);
 
-        // Same ChromeBackgroundOpacity as DrawLogTabBar's own row fill, but this row's true height
-        // isn't known until after DrawPreviewToggle/the validation message are drawn (it varies by
-        // whether a validation message is showing right now). Rather than wrap it in a new BeginChild
-        // sized off a hand-rolled row-count guess (real risk of drifting from the actual measured
-        // content by a pixel, which is exactly the category of bug this session spent a long time
-        // chasing out of this window), this reuses measuredFooterHeight - already a one-frame-lagged
-        // cache of this exact row's real height, feeding composeAreaHeight below - so the background
-        // rect drawn now (before this frame's content) matches what got measured last frame, same
-        // trick this field already relies on elsewhere.
+        // Same FooterBackgroundOpacity as DrawLogTabBar's own row fill (its own TabStripBackgroundOpacity
+        // slider, independently adjustable), but this row's true height isn't known until after
+        // DrawPreviewToggle/the validation message are drawn (it varies by whether a validation
+        // message is showing right now). Rather than wrap it in a new BeginChild sized off a
+        // hand-rolled row-count guess (real risk of drifting from the actual measured content by a
+        // pixel, which is exactly the category of bug this session spent a long time chasing out of
+        // this window), this reuses measuredFooterHeight - already a one-frame-lagged cache of this
+        // exact row's real height, feeding composeAreaHeight below - so the background rect drawn now
+        // (before this frame's content) matches what got measured last frame, same trick this field
+        // already relies on elsewhere.
         var footerBgOrigin = ImGui.GetCursorScreenPos();
         ImGui.GetWindowDrawList().AddRectFilled(
             footerBgOrigin,
             footerBgOrigin + new Vector2(ImGui.GetContentRegionAvail().X, measuredFooterHeight),
-            ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, config.ChromeBackgroundOpacity)));
+            ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, config.FooterBackgroundOpacity)));
 
         DrawPreviewToggle(config, state, chunks);
+
+        if (state.LastChannel == ChatChannel.Whisper && !string.IsNullOrEmpty(activeWhisperTabTarget))
+        {
+            DrawActiveWhisperIndicator(config, activeWhisperTabTarget);
+        }
 
         // Used to always reserve a full text line here even with nothing to show, purely so the
         // layout wouldn't shift on the rare frame a validation message appears - but that meant
@@ -643,16 +697,34 @@ internal sealed class ChatWindow : Window
         }
 
         ImGui.SameLine();
-        var locked = plugin.Configuration.ChatWindowLocked;
-        if (DrawToolbarIconButton(locked ? FontAwesomeIcon.Lock : FontAwesomeIcon.LockOpen))
+        var lockPosition = plugin.Configuration.ChatWindowLockPosition;
+        var lockSize = plugin.Configuration.ChatWindowLockSize;
+        var anyLocked = lockPosition || lockSize;
+        if (DrawToolbarIconButton(anyLocked ? FontAwesomeIcon.Lock : FontAwesomeIcon.LockOpen))
         {
-            plugin.Configuration.ChatWindowLocked = !locked;
-            plugin.SaveConfiguration();
+            ImGui.OpenPopup("##windowLockMenu");
         }
 
         if (ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip(locked ? Loc.T("Compose.WindowUnlock") : Loc.T("Compose.WindowLock"));
+            ImGui.SetTooltip(Loc.T("Compose.WindowLock"));
+        }
+
+        if (ImGui.BeginPopup("##windowLockMenu"))
+        {
+            if (ImGui.Checkbox(Loc.T("Compose.WindowLockPosition"), ref lockPosition))
+            {
+                plugin.Configuration.ChatWindowLockPosition = lockPosition;
+                plugin.SaveConfiguration();
+            }
+
+            if (ImGui.Checkbox(Loc.T("Compose.WindowLockSize"), ref lockSize))
+            {
+                plugin.Configuration.ChatWindowLockSize = lockSize;
+                plugin.SaveConfiguration();
+            }
+
+            ImGui.EndPopup();
         }
 
         ImGui.SameLine();
@@ -1616,7 +1688,17 @@ internal sealed class ChatWindow : Window
 
             if (TryParseTellTarget(text, out var tellTarget))
             {
-                plugin.OpenWhisperTab(tellTarget);
+                // OpenWhisperTab only takes effect next frame (it just queues PendingWhisperTarget;
+                // EnterWhisperView actually flips activeWhisperTabTarget at the top of the next Draw
+                // call). SyncDraft's next-frame cleanup always saves whatever's in inputText under
+                // currentDraftKey before switching keys - if that's left pointing at the tab being
+                // left, this "/tell ..." text (meant for the new whisper tab) got saved into the OLD
+                // tab's draft instead and resurfaced there later whenever that tab was reselected.
+                // Resolving the target the same way OpenWhisperTab does and retargeting
+                // currentDraftKey to match right away keeps that write landing in the right slot.
+                var resolvedTarget = plugin.RememberWhisperTarget(state, tellTarget);
+                plugin.OpenWhisperTab(resolvedTarget);
+                currentDraftKey = resolvedTarget;
             }
         }
         else if (!inputText.Contains(text, StringComparison.Ordinal))
@@ -1685,14 +1767,21 @@ internal sealed class ChatWindow : Window
 
     private List<string> GetChunks(string text, int maxLength)
     {
+        GetMappedChunks(text, maxLength);
+        return cachedChunks;
+    }
+
+    private List<MappedChunk> GetMappedChunks(string text, int maxLength)
+    {
         if (text != cachedInput || maxLength != cachedMaxLength)
         {
             cachedInput = text;
             cachedMaxLength = maxLength;
-            cachedChunks = MessageSplitter.BuildMessages(text, maxLength);
+            cachedMappedChunks = MessageSplitter.BuildMappedMessages(text, maxLength);
+            cachedChunks = cachedMappedChunks.Select(c => c.Text).ToList();
         }
 
-        return cachedChunks;
+        return cachedMappedChunks;
     }
 
     private void TrySend(CharacterState state)
@@ -1763,6 +1852,37 @@ internal sealed class ChatWindow : Window
             if (ImGuiComponents.IconButton(FontAwesomeIcon.Ban, new Vector4(0.55f, 0.18f, 0.18f, 1f), new Vector4(0.55f, 0.18f, 0.18f, 1f), new Vector4(0.68f, 0.22f, 0.22f, 1f)))
             {
                 plugin.CancelSending();
+            }
+        }
+    }
+
+    /// The "Inside" PreviewPosition mode - same click-to-cursor preview PreviewWindow shows, just
+    /// embedded directly here in the compose area instead of a separate floating window. Because
+    /// this draws in the very same window as the compose box itself, a click can move the cursor via
+    /// a plain field write (stashedCursorCharIndex/pendingFocusInput) with no cross-window focus fight
+    /// to lose - unlike PreviewWindow, which has to go through Plugin.RequestComposeCursorActivation
+    /// and still needs one more Enter press or click before the compose box is actually typable.
+    private void DrawEmbeddedPreview(Configuration config, List<MappedChunk> chunks)
+    {
+        if (chunks.Count == 0)
+        {
+            return;
+        }
+
+        ImGui.Separator();
+
+        var availableWidth = ImGui.GetContentRegionAvail().X;
+        for (var i = 0; i < chunks.Count; i++)
+        {
+            PreviewRenderer.DrawMappedChunk(chunks[i], config, availableWidth, sourceIndex =>
+            {
+                pendingCursorCharIndex = sourceIndex;
+                pendingFocusInput = true;
+            }, i * 10000);
+            ImGui.TextDisabled(Loc.T("Compose.CharCount", chunks[i].Text.Length, config.MaxMessageLength));
+            if (i < chunks.Count - 1)
+            {
+                ImGui.Separator();
             }
         }
     }
@@ -2152,19 +2272,20 @@ internal sealed class ChatWindow : Window
 
     private void DrawLogTabBar(Configuration config, CharacterState state)
     {
-        // ChromeBackgroundOpacity - a plain opacity fill behind the *whole* tab bar row (collapse
+        // TabStripBackgroundOpacity - a plain opacity fill behind the *whole* tab bar row (collapse
         // arrow, scroll arrows, and the scrolling tab strip together), separate from
         // TabStripBackgroundColor (which only tints individual tab buttons' own selection/hover
-        // fill, not this row as a whole). arrowSize/GetFrameHeight() is deterministic from the
-        // current font/style alone, not dependent on anything drawn yet, so this can size and draw
-        // itself before any of the row's own content - no need for the previous-frame-lag trick
+        // fill, not this row as a whole) and independently adjustable from the footer's own
+        // FooterBackgroundOpacity. arrowSize/GetFrameHeight() is deterministic from the current
+        // font/style alone, not dependent on anything drawn yet, so this can size and draw itself
+        // before any of the row's own content - no need for the previous-frame-lag trick
         // DrawPreviewToggle's own equivalent needs below.
         var rowHeight = ImGui.GetFrameHeight();
         var rowOrigin = ImGui.GetCursorScreenPos();
         ImGui.GetWindowDrawList().AddRectFilled(
             rowOrigin,
             rowOrigin + new Vector2(ImGui.GetContentRegionAvail().X, rowHeight),
-            ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, config.ChromeBackgroundOpacity)));
+            ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, config.TabStripBackgroundOpacity)));
 
         var toolbarExpanded = config.ChatToolbarExpanded;
         if (DrawToolbarIconButton(toolbarExpanded ? FontAwesomeIcon.ChevronUp : FontAwesomeIcon.ChevronDown))

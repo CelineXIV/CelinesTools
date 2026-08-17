@@ -91,6 +91,8 @@ public sealed class Plugin : IDalamudPlugin
 
     internal List<string> CurrentPreviewChunks { get; set; } = new();
 
+    internal List<MappedChunk> CurrentPreviewMappedChunks { get; set; } = new();
+
     internal AutoTranslateService AutoTranslate { get; } = new();
 
     internal void EnsureAutoTranslateLoaded() => AutoTranslate.EnsureLoaded(dataManager, log);
@@ -157,6 +159,32 @@ public sealed class Plugin : IDalamudPlugin
         Loc.SetLanguage(this.pluginInterface.UiLanguage);
 
         Configuration = this.pluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
+
+        // TabStripBackgroundOpacity/FooterBackgroundOpacity split ChromeBackgroundOpacity into two
+        // independently adjustable sliders - -1 is a sentinel meaning "never migrated yet" (distinct
+        // from a user explicitly choosing 0/off for one of the new sliders), so this only ever copies
+        // the old combined value across once, the first time an existing config loads after the split.
+        if (Configuration.TabStripBackgroundOpacity < 0f)
+        {
+            Configuration.TabStripBackgroundOpacity = Configuration.ChromeBackgroundOpacity;
+        }
+
+        if (Configuration.FooterBackgroundOpacity < 0f)
+        {
+            Configuration.FooterBackgroundOpacity = Configuration.ChromeBackgroundOpacity;
+        }
+
+        // ChatWindowLockPosition/ChatWindowLockSize split the old single "lock everything" toggle
+        // into two independent ones - migrate a user who already had the old combined lock on into
+        // both new ones being on (preserving their existing fully-locked window), then clear the old
+        // field so this doesn't refire and re-force both back on if they later unlock just one.
+        if (Configuration.ChatWindowLocked)
+        {
+            Configuration.ChatWindowLockPosition = true;
+            Configuration.ChatWindowLockSize = true;
+            Configuration.ChatWindowLocked = false;
+        }
+
         if (Configuration.ChatTabs.Count == 0)
         {
             Configuration.ChatTabs.Add(ChatTab.CreateDefaultGeneralTab());
@@ -204,9 +232,15 @@ public sealed class Plugin : IDalamudPlugin
         chatWindow = new ChatWindow(this);
         settingsWindow = new SettingsWindow(this);
         previewWindow = new PreviewWindow(this);
-        windowSystem.AddWindow(chatWindow);
         windowSystem.AddWindow(settingsWindow);
         windowSystem.AddWindow(previewWindow);
+
+        // ChatWindow is registered (and therefore drawn) last on purpose - a click inside
+        // PreviewWindow briefly makes ImGui treat PreviewWindow as the frontmost window, and with
+        // ChatWindow drawn (and calling SetKeyboardFocusHere for the compose box) after that every
+        // single frame, it reliably reclaims keyboard focus instead of losing it back to PreviewWindow
+        // on the very next frame the way it did when ChatWindow was drawn first.
+        windowSystem.AddWindow(chatWindow);
 
         if (Configuration.SecondaryChatTabIds.Count > 0 || Configuration.SecondaryChatWhisperTargets.Count > 0)
         {
@@ -279,6 +313,12 @@ public sealed class Plugin : IDalamudPlugin
     private bool chatManuallyHidden;
 
     private long lastEnterActivationTick;
+
+    /// Single on/off switch for the message preview, regardless of which PreviewPosition mode is
+    /// active - backed by previewWindow.IsOpen either way. In "Window" mode that's already what
+    /// governs the floating window's own visibility; in "Inside" mode there's no separate window to
+    /// toggle, so ChatWindow.DrawEmbeddedPreview checks this same flag before drawing.
+    internal bool IsPreviewVisible => previewWindow.IsOpen;
 
     public void TogglePreviewWindow() => previewWindow.Toggle();
 
@@ -557,6 +597,30 @@ public sealed class Plugin : IDalamudPlugin
     }
 
     private bool pendingChatActivation;
+    private int? pendingPreviewCursorTarget;
+
+    /// Routes a preview-click cursor jump through the exact same activation trigger the physical
+    /// Enter key uses (pendingChatActivation, detected in OnFrameworkUpdate) instead of setting
+    /// ChatWindow's own fields directly from PreviewWindow's Draw - Enter reliably grabs true keyboard
+    /// input while the direct approach never did, and the one difference is that OnFrameworkUpdate
+    /// runs before ImGui draws any window for that frame, while a click handled inside
+    /// PreviewWindow.Draw only takes effect after PreviewWindow (the window the user just genuinely
+    /// clicked) has already run its own frame - going through the same pre-draw trigger point Enter
+    /// already uses avoids that ordering disadvantage entirely.
+    internal void RequestComposeCursorActivation(int sourceCharIndex)
+    {
+        pendingPreviewCursorTarget = sourceCharIndex;
+        pendingChatActivation = true;
+        chatManuallyHidden = false;
+        chatWindow.IsOpen = true;
+    }
+
+    internal int? ConsumePendingPreviewCursorTarget()
+    {
+        var target = pendingPreviewCursorTarget;
+        pendingPreviewCursorTarget = null;
+        return target;
+    }
 
     internal bool ConsumePendingChatActivation()
     {

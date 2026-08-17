@@ -241,6 +241,36 @@ internal static class ColoredTextRenderer
                 color = highlightColor ?? color;
             }
 
+            // Icon-glyph words need Dalamud's default font (the only one with these private-use-area
+            // glyphs - see IsIconGlyphWord's own remarks) and are never batched into a run with
+            // neighboring text, since a run is drawn as a single ImGui call under a single font.
+            if (kind == TextSegmentKind.IconGlyph)
+            {
+                FlushRun();
+
+                var fitsIcon = lineWidthUsed + size.X <= wrapWidth;
+                if (!fitsIcon)
+                {
+                    if (!startOfLine)
+                    {
+                        ImGui.NewLine();
+                    }
+
+                    startOfLine = true;
+                    lineWidthUsed = 0f;
+                }
+
+                if (!startOfLine)
+                {
+                    ImGui.SameLine(0, 0);
+                }
+
+                DrawIconGlyphUnit(word + " ", color);
+                lineWidthUsed += size.X;
+                startOfLine = false;
+                continue;
+            }
+
             if (size.X > wrapWidth)
             {
                 FlushRun();
@@ -320,6 +350,28 @@ internal static class ColoredTextRenderer
         }
     }
 
+    /// Draws one icon-glyph word using Dalamud's default font instead of whatever custom chat font
+    /// is currently pushed - see IsIconGlyphWord's own remarks for why that's necessary at all.
+    /// FontDefault is ImGui's io.FontDefault, which Dalamud sets to its own bundled default font
+    /// (the one already proven to have these glyphs, since that's what briefly showed correctly
+    /// during the one frame a font rebuild left the custom chat font not-yet-pushed).
+    private static void DrawIconGlyphUnit(string display, Vector4 color)
+    {
+        var defaultFont = ImGui.GetIO().FontDefault;
+        var pushedFont = !defaultFont.IsNull;
+        if (pushedFont)
+        {
+            ImGui.PushFont(defaultFont);
+        }
+
+        ImGui.TextColored(color, display);
+
+        if (pushedFont)
+        {
+            ImGui.PopFont();
+        }
+    }
+
     internal sealed class TokenizeState
     {
         public bool InEmote;
@@ -333,6 +385,42 @@ internal static class ColoredTextRenderer
         Emote,
         Ooc,
         Mention,
+        IconGlyph,
+    }
+
+    // The game encodes small decorative glyphs (cross-world/linkshell markers, map-flag icons, item
+    // level badges, ...) as private-use-area characters directly in chat text, in the range Dalamud's
+    // own SeIconChar enum uses (roughly U+E020-U+E0E9). Dalamud's default UI font has these glyphs -
+    // the custom chat fonts this plugin lets users pick (bundled CJK/Inconsolata assets) do not, so
+    // without special handling they fell back to that font's "missing glyph" placeholder (which
+    // renders as a plain "=" in those particular fonts) instead of the actual icon.
+    private const int IconGlyphRangeStart = 0xE020;
+    private const int IconGlyphRangeEnd = 0xE0FF;
+
+    private static bool IsIconGlyphChar(char c) => c >= IconGlyphRangeStart && c <= IconGlyphRangeEnd;
+
+    /// Splits one whitespace-delimited word into runs of consecutive icon-glyph characters vs.
+    /// everything else. The game glues these icon markers directly onto the text that follows them
+    /// (no space in between - e.g. a map-flag icon immediately followed by "Labyrinthos"), so they
+    /// often aren't their own whole word; a simple "is this entire word an icon" check missed those,
+    /// only catching icons that happened to be standalone words with real spaces around them.
+    private static IEnumerable<(string Text, bool IsIconGlyph)> SplitIconGlyphRuns(string word)
+    {
+        var start = 0;
+        var current = IsIconGlyphChar(word[0]);
+
+        for (var i = 1; i < word.Length; i++)
+        {
+            var isIcon = IsIconGlyphChar(word[i]);
+            if (isIcon != current)
+            {
+                yield return (word[start..i], current);
+                start = i;
+                current = isIcon;
+            }
+        }
+
+        yield return (word[start..], current);
     }
 
     internal static IEnumerable<(string Word, TextSegmentKind Kind)> Tokenize(string text, string mentionTerm, TokenizeState state)
@@ -341,39 +429,52 @@ internal static class ColoredTextRenderer
 
         foreach (var word in words)
         {
-            var startedInEmote = state.InEmote;
-
-            if (CountOccurrences(word, '*') % 2 == 1)
+            foreach (var (segment, isIconGlyph) in SplitIconGlyphRuns(word))
             {
-                state.InEmote = !state.InEmote;
-            }
-
-            var startedInOoc = state.OocDepth > 0;
-            var touchedOoc = startedInOoc;
-            if (!IsMessagePartCounter(word))
-            {
-                foreach (var ch in word)
+                if (isIconGlyph)
                 {
-                    if (ch == '(')
-                    {
-                        state.OocDepth++;
-                        touchedOoc = true;
-                    }
-                    else if (ch == ')' && state.OocDepth > 0)
-                    {
-                        state.OocDepth--;
-                        touchedOoc = true;
-                    }
+                    yield return (segment, TextSegmentKind.IconGlyph);
+                    continue;
+                }
+
+                yield return (segment, ClassifySegment(segment, mentionTerm, state));
+            }
+        }
+    }
+
+    private static TextSegmentKind ClassifySegment(string word, string mentionTerm, TokenizeState state)
+    {
+        var startedInEmote = state.InEmote;
+
+        if (CountOccurrences(word, '*') % 2 == 1)
+        {
+            state.InEmote = !state.InEmote;
+        }
+
+        var startedInOoc = state.OocDepth > 0;
+        var touchedOoc = startedInOoc;
+        if (!IsMessagePartCounter(word))
+        {
+            foreach (var ch in word)
+            {
+                if (ch == '(')
+                {
+                    state.OocDepth++;
+                    touchedOoc = true;
+                }
+                else if (ch == ')' && state.OocDepth > 0)
+                {
+                    state.OocDepth--;
+                    touchedOoc = true;
                 }
             }
-
-            var isOoc = touchedOoc;
-            var isEmote = !isOoc && (startedInEmote || word.Contains('*'));
-            var isMention = !string.IsNullOrEmpty(mentionTerm) && string.Equals(StripPunctuation(word), mentionTerm, StringComparison.OrdinalIgnoreCase);
-
-            var kind = isMention ? TextSegmentKind.Mention : (isOoc ? TextSegmentKind.Ooc : (isEmote ? TextSegmentKind.Emote : TextSegmentKind.Default));
-            yield return (word, kind);
         }
+
+        var isOoc = touchedOoc;
+        var isEmote = !isOoc && (startedInEmote || word.Contains('*'));
+        var isMention = !string.IsNullOrEmpty(mentionTerm) && string.Equals(StripPunctuation(word), mentionTerm, StringComparison.OrdinalIgnoreCase);
+
+        return isMention ? TextSegmentKind.Mention : (isOoc ? TextSegmentKind.Ooc : (isEmote ? TextSegmentKind.Emote : TextSegmentKind.Default));
     }
 
     private static bool IsMessagePartCounter(string word)

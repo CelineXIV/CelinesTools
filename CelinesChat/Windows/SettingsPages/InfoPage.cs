@@ -35,7 +35,8 @@ internal sealed class InfoPage
             config.WhisperSoundEffect = 3;
             config.MentionSoundEnabled = false;
             config.MentionSoundEffect = 6;
-            config.ChatWindowLocked = false;
+            config.ChatWindowLockPosition = false;
+            config.ChatWindowLockSize = false;
             config.WindowOpacity = 1f;
             config.UnfocusedWindowOpacity = 0.35f;
             config.ChatLogBackgroundOpacity = 0.15f;
