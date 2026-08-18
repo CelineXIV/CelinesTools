@@ -2,6 +2,7 @@ using System;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
+using Dalamud.Interface.Utility.Raii;
 
 namespace CelinesChat.Windows;
 
@@ -31,12 +32,13 @@ internal static class GlassIconButton
             DrawAero(drawList, min, max, size, backgroundColor, hovered, active);
         }
 
-        ImGui.PushFont(UiBuilder.IconFont);
-        var iconText = icon.ToIconString();
-        var iconSize = ImGui.CalcTextSize(iconText);
-        var iconPos = pos + (size - iconSize) * 0.5f + (active ? new Vector2(0f, 1f) : Vector2.Zero);
-        drawList.AddText(iconPos, ImGui.GetColorU32(iconColor), iconText);
-        ImGui.PopFont();
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            var iconText = icon.ToIconString();
+            var iconSize = ImGui.CalcTextSize(iconText);
+            var iconPos = pos + (size - iconSize) * 0.5f + (active ? new Vector2(0f, 1f) : Vector2.Zero);
+            drawList.AddText(iconPos, ImGui.GetColorU32(iconColor), iconText);
+        }
 
         return clicked;
     }

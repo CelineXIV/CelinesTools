@@ -3,6 +3,7 @@ using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Components;
+using Dalamud.Interface.Utility.Raii;
 using CelinesChat.Services;
 
 namespace CelinesChat.Windows.SettingsPages;
@@ -114,7 +115,7 @@ internal sealed class ColorsPage
 
                 var color = config.ChatColours.TryGetValue(category, out var stored) ? stored : ChannelDisplay.DefaultColor(category);
 
-                ImGui.PushID((int)category);
+                using var id = ImRaii.PushId((int)category);
 
                 if (ImGui.ColorEdit4(ChannelDisplay.CategoryName(category), ref color))
                 {
@@ -133,8 +134,6 @@ internal sealed class ColorsPage
                 {
                     ImGui.SetTooltip(Loc.T("Settings.ColorsResetRow"));
                 }
-
-                ImGui.PopID();
             }
 
             if (group == ChatCategoryGroup.Standard)
@@ -154,7 +153,7 @@ internal sealed class ColorsPage
     {
         foreach (var (number, name) in slots)
         {
-            ImGui.PushID(prefix + number);
+            using var id = ImRaii.PushId(prefix + number);
 
             var label = name.Length > 0 ? $"{prefix}{number}: {name}" : $"{prefix}{number}";
             var color = colours.TryGetValue(number, out var stored) ? stored : ChannelDisplay.Color(fallbackCategory, config);
@@ -175,8 +174,6 @@ internal sealed class ColorsPage
             {
                 ImGui.SetTooltip(Loc.T("Settings.ColorsResetRow"));
             }
-
-            ImGui.PopID();
         }
     }
 

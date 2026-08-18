@@ -454,9 +454,10 @@ internal sealed class WebRoutes : IDisposable
                 ? ChannelDisplay.WhisperColor(displayName, config)
                 : channelColor;
 
+        var allowRpFormatting = config.AllowsRpFormatting(entry.ChatType);
         var segments = entry.Payloads != null
-            ? ColoredTextSegmenter.BuildSegments(entry.Payloads, mentionTerm, channelColor, config.EmoteTextColor, config.OocTextColor, config.MentionColor, LinkColor)
-            : ColoredTextSegmenter.BuildSegments(entry.Text, mentionTerm, channelColor, config.EmoteTextColor, config.OocTextColor, config.MentionColor);
+            ? ColoredTextSegmenter.BuildSegments(entry.Payloads, mentionTerm, channelColor, config.EmoteTextColor, config.OocTextColor, config.MentionColor, LinkColor, allowRpFormatting)
+            : ColoredTextSegmenter.BuildSegments(entry.Text, mentionTerm, channelColor, config.EmoteTextColor, config.OocTextColor, config.MentionColor, allowRpFormatting);
 
         return new WebMessageDto
         {

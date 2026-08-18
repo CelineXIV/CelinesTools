@@ -1,4 +1,5 @@
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface.Utility.Raii;
 
 namespace CelinesChat.Windows.SettingsPages;
 
@@ -29,10 +30,11 @@ internal sealed class FileLogPage
             plugin.SaveConfiguration();
         }
 
-        ImGui.BeginDisabled(true);
-        var whisperAlwaysLogged = true;
-        ImGui.Checkbox(Loc.T("Channel.Whisper") + "##fileLogTellAlwaysOn", ref whisperAlwaysLogged);
-        ImGui.EndDisabled();
+        using (ImRaii.Disabled())
+        {
+            var whisperAlwaysLogged = true;
+            ImGui.Checkbox(Loc.T("Channel.Whisper") + "##fileLogTellAlwaysOn", ref whisperAlwaysLogged);
+        }
 
         if (ImGui.IsItemHovered())
         {

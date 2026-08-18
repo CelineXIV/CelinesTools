@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using Dalamud.Configuration;
+using Dalamud.Game.Text;
 using CelinesChat.Services;
 
 namespace CelinesChat;
@@ -194,6 +195,48 @@ public class Configuration : IPluginConfiguration
     /// </summary>
     public Dictionary<ChatCategory, ChannelSoundSetting> ChannelSounds { get; set; } = new();
 
+    /// <summary>
+    /// Channels where */emote/ and ((OOC)) text gets its own color instead of rendering as plain
+    /// default-colored text - defaults to the channels people actually roleplay in (say, party,
+    /// linkshells, whispers), not system/notice/combat-log categories a plugin or the game itself
+    /// posts into, where a coincidental "((" or "*" in unrelated text isn't RP formatting at all.
+    /// </summary>
+    public HashSet<ChatCategory> RpFormattingCategories { get; set; } = new()
+    {
+        ChatCategory.Say,
+        ChatCategory.Party,
+        ChatCategory.Whisper,
+        ChatCategory.Linkshell,
+        ChatCategory.CrossWorldLinkshell,
+    };
+
+    // Same "empty set means every slot" convention as ChatTab.IncludedLinkshellNumbers - a linkshell
+    // used for RP and one used for, say, a crafting-log-in/out FC alert are both just "Linkshell",
+    // and only the numbered slot tells them apart.
+    public HashSet<int> RpFormattingLinkshellNumbers { get; set; } = new();
+
+    public HashSet<int> RpFormattingCrossWorldLinkshellNumbers { get; set; } = new();
+
+    public bool AllowsRpFormatting(XivChatType type)
+    {
+        if (ChannelDisplay.CategoryOf(type) is not { } category || !RpFormattingCategories.Contains(category))
+        {
+            return false;
+        }
+
+        if (category == ChatCategory.Linkshell && RpFormattingLinkshellNumbers.Count > 0)
+        {
+            return ChannelDisplay.LinkshellIndex(type) is { } number && RpFormattingLinkshellNumbers.Contains(number);
+        }
+
+        if (category == ChatCategory.CrossWorldLinkshell && RpFormattingCrossWorldLinkshellNumbers.Count > 0)
+        {
+            return ChannelDisplay.CrossWorldLinkshellIndex(type) is { } number && RpFormattingCrossWorldLinkshellNumbers.Contains(number);
+        }
+
+        return true;
+    }
+
     /// <summary>Superseded by the separate ChatWindowLockPosition/ChatWindowLockSize below - kept only so Plugin's constructor can migrate an existing "fully locked" user into both of those the first time they load post-split, instead of silently unlocking the window on them.</summary>
     public bool ChatWindowLocked { get; set; }
 
@@ -231,14 +274,11 @@ public class Configuration : IPluginConfiguration
 
     public float ChatLogBackgroundOpacity { get; set; } = 0.496f;
 
-    /// <summary>Superseded by the separate TabStripBackgroundOpacity/FooterBackgroundOpacity below - kept only so Plugin's constructor can migrate whatever value existing users already had into both of those the first time they load post-split, instead of silently resetting it to off.</summary>
+    /// <summary>Superseded by the separate TabStripBackgroundOpacity below - kept only so Plugin's constructor can migrate whatever value existing users already had into it the first time they load post-split, instead of silently resetting it to off.</summary>
     public float ChromeBackgroundOpacity { get; set; }
 
     /// <summary>Off (fully transparent) by default - background fill behind the tab strip row, independent of TabStripBackgroundColor (which only tints individual tab buttons, not the strip itself) and of the main window opacity.</summary>
     public float TabStripBackgroundOpacity { get; set; } = -1f;
-
-    /// <summary>Off (fully transparent) by default - background fill behind the footer/compose-preview row (channel picker, message count, validation message), independent of the main window opacity.</summary>
-    public float FooterBackgroundOpacity { get; set; } = -1f;
 
     public PreviewPosition PreviewPosition { get; set; } = PreviewPosition.Window;
 

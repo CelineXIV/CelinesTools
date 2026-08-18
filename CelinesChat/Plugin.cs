@@ -160,18 +160,14 @@ public sealed class Plugin : IDalamudPlugin
 
         Configuration = this.pluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
 
-        // TabStripBackgroundOpacity/FooterBackgroundOpacity split ChromeBackgroundOpacity into two
-        // independently adjustable sliders - -1 is a sentinel meaning "never migrated yet" (distinct
-        // from a user explicitly choosing 0/off for one of the new sliders), so this only ever copies
-        // the old combined value across once, the first time an existing config loads after the split.
+        // TabStripBackgroundOpacity split off ChromeBackgroundOpacity as its own adjustable slider -
+        // -1 is a sentinel meaning "never migrated yet" (distinct from a user explicitly choosing
+        // 0/off), so this only ever copies the old combined value across once, the first time an
+        // existing config loads after the split. The footer itself no longer has its own opacity
+        // slider at all (always fully transparent), so there's nothing left to migrate for it.
         if (Configuration.TabStripBackgroundOpacity < 0f)
         {
             Configuration.TabStripBackgroundOpacity = Configuration.ChromeBackgroundOpacity;
-        }
-
-        if (Configuration.FooterBackgroundOpacity < 0f)
-        {
-            Configuration.FooterBackgroundOpacity = Configuration.ChromeBackgroundOpacity;
         }
 
         // ChatWindowLockPosition/ChatWindowLockSize split the old single "lock everything" toggle
@@ -222,7 +218,8 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         sender = new MessageQueueSender(framework, log);
-        ChatLog = new ChatLogService(chatGui, Configuration, this.pluginInterface, log, gameInteropProvider, playerState);
+        var whisperFailureDetector = new WhisperFailureDetector(dataManager);
+        ChatLog = new ChatLogService(chatGui, Configuration, this.pluginInterface, log, gameInteropProvider, playerState, whisperFailureDetector);
         chatActivationWatcher = new ChatActivationWatcher(gameInteropProvider, log);
         chatActivationWatcher.TextToInsert += text => PendingChatPrefillText = text;
         estateTeleportService = new EstateTeleportService(dataManager, log);
@@ -260,6 +257,16 @@ public sealed class Plugin : IDalamudPlugin
         this.commandManager.AddHandler(CommandName, openCommandInfo);
         this.commandManager.AddHandler(LogCommandName, openLogCommandInfo);
 
+        // Dalamud auto-hides plugin UI during cutscenes/GPose on its own, entirely separate from (and
+        // invisible to) ApplyGameStateVisibility's own ShowChatDuringCutscenes/IsGPosing handling
+        // below - without opting out here, the chat window still vanished during a cutscene even with
+        // that setting on, since Dalamud's own hide wins regardless of what chatWindow.IsOpen is set
+        // to. DisableGposeUiHide was already set for the same reason on the GPose side; missing its
+        // cutscene counterpart was the actual gap (confirmed by live testing: not caused by this
+        // plugin's own suppression logic, whose own diagnostic never once fired despite the window
+        // visibly disappearing - and other chat plugins like Chat2 stay visible through cutscenes by
+        // opting out of Dalamud's automatic hide the same way).
+        this.pluginInterface.UiBuilder.DisableCutsceneUiHide = true;
         this.pluginInterface.UiBuilder.DisableGposeUiHide = true;
 
         this.pluginInterface.UiBuilder.Draw += DrawUi;
@@ -1025,9 +1032,14 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        // OccupiedInEvent covers scripted sequences that aren't flagged as a "cutscene" by the two
+        // WatchingCutscene* flags at all - a duty's own entry sequence (e.g. walking into a dungeon)
+        // reportedly still hid the chat window with both ShowChatDuringCutscenes and
+        // ShowChatDuringLoadingScreens on, which only this flag being unaccounted-for explains.
         var inCutscene = condition[ConditionFlag.WatchingCutscene]
             || condition[ConditionFlag.WatchingCutscene78]
-            || condition[ConditionFlag.OccupiedInCutSceneEvent];
+            || condition[ConditionFlag.OccupiedInCutSceneEvent]
+            || condition[ConditionFlag.OccupiedInEvent];
         var inLoadingScreen = condition[ConditionFlag.BetweenAreas] || condition[ConditionFlag.BetweenAreas51];
 
         var suppressedByGameState = !clientState.IsLoggedIn
@@ -1085,6 +1097,17 @@ public sealed class Plugin : IDalamudPlugin
     {
         chatWindow.Toggle();
         chatManuallyHidden = !chatWindow.IsOpen;
+
+        if (!chatWindow.IsOpen)
+        {
+            // Same reset HideChatWindow() already does - ChatWindow.Draw() (the only other place that
+            // keeps IsChatInputActive in sync) never runs again while the window is closed. If the
+            // compose box happened to be focused right when /celineschat (or the OpenMainUi toggle)
+            // closed it, IsChatInputActive would otherwise stay stuck true forever, silently
+            // swallowing every later Enter press meant to reopen the window - OnFrameworkUpdate's own
+            // Enter handler bails out immediately whenever IsChatInputActive is true.
+            IsChatInputActive = false;
+        }
     }
 
     public void Dispose()

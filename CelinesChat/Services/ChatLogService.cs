@@ -15,12 +15,26 @@ namespace CelinesChat.Services;
 
 internal sealed class ChatLogService : IDisposable
 {
-    private const int MaxEntries = 3000;
+    // A live view's scroll position isn't anchored to a specific entry - it's a raw pixel offset into
+    // whatever's currently rendered. Every eviction here (RemoveOldestFromLargestCategory, below)
+    // shrinks that view's total content height by one entry's worth if the evicted entry happened to
+    // be in the same category the user's looking at, and ImGui's own automatic end-of-frame clamp
+    // then yanks their scroll position down to match the new, smaller max - during a busy fight
+    // (usually the very category most likely to be both the largest and the one being watched),
+    // evictions happen often enough for this to read as a continuous jitter rather than one clean
+    // jump ("scrolls up and jitters out of nowhere"). Raising the cap doesn't fix the underlying
+    // per-eviction clamp, but it cuts how often eviction happens at all by a wide enough margin that
+    // it stops being noticeable during ordinary play - a properly anchor-preserving fix (compensating
+    // the scroll position by exactly what was lost) was tried and reverted after it introduced a
+    // worse regression (silently breaking auto-scroll-to-bottom for live chat) that wasn't worth
+    // this bug's own severity to keep chasing further.
+    private const int MaxEntries = 10000;
 
     private readonly IChatGui chatGui;
     private readonly Configuration configuration;
     private readonly IPluginLog log;
     private readonly IPlayerState playerState;
+    private readonly WhisperFailureDetector whisperFailureDetector;
     private readonly List<ChatLogEntry> entries = new();
     private readonly Hook<RaptureLogModule.Delegates.AddMsgSourceEntry>? contentIdHook;
     private long nextSequence = 1;
@@ -33,12 +47,13 @@ internal sealed class ChatLogService : IDisposable
 
     public IReadOnlyList<ChatLogEntry> Entries => entries;
 
-    public unsafe ChatLogService(IChatGui chatGui, Configuration configuration, IDalamudPluginInterface pluginInterface, IPluginLog log, IGameInteropProvider gameInteropProvider, IPlayerState playerState)
+    public unsafe ChatLogService(IChatGui chatGui, Configuration configuration, IDalamudPluginInterface pluginInterface, IPluginLog log, IGameInteropProvider gameInteropProvider, IPlayerState playerState, WhisperFailureDetector whisperFailureDetector)
     {
         this.chatGui = chatGui;
         this.configuration = configuration;
         this.log = log;
         this.playerState = playerState;
+        this.whisperFailureDetector = whisperFailureDetector;
 
         LogsFolderPath = Path.Combine(pluginInterface.GetPluginConfigDirectory(), "Logs");
         try
@@ -168,6 +183,11 @@ internal sealed class ChatLogService : IDisposable
         if (message.LogKind == XivChatType.NoviceNetworkSystem)
         {
             NoviceNetworkService.ObserveSystemMessage(entry.Text);
+        }
+
+        if (message.LogKind == XivChatType.ErrorMessage)
+        {
+            entry.RelatedWhisperTarget = whisperFailureDetector.TryExtractTarget(entry.Text);
         }
 
         if (message.LogKind is XivChatType.TellIncoming or XivChatType.TellOutgoing)
@@ -304,6 +324,7 @@ internal sealed class ChatLogService : IDisposable
             {
                 lastDispatchedEntry.ContentId = contentId;
                 lastDispatchedEntry.AccountId = accountId;
+                lastDispatchedEntry.ContentIdKnown = true;
             }
         }
         catch (Exception ex)

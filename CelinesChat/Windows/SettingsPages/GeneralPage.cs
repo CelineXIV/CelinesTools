@@ -1,10 +1,6 @@
 using System;
 using Dalamud.Bindings.ImGui;
-using Dalamud.Interface;
-using Dalamud.Interface.Components;
-using FFXIVClientStructs.FFXIV.Client.UI;
-using CelinesChat.Services;
-using CelinesChat.Windows;
+using Dalamud.Interface.Utility.Raii;
 
 namespace CelinesChat.Windows.SettingsPages;
 
@@ -37,9 +33,10 @@ internal sealed class GeneralPage
             plugin.SaveConfiguration();
         }
 
-        ImGui.PushStyleColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);
-        ImGui.TextWrapped(Loc.T("Settings.WhisperDelayHint", Plugin.MinWhisperDelayMs));
-        ImGui.PopStyleColor();
+        using (ImRaii.PushColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]))
+        {
+            ImGui.TextWrapped(Loc.T("Settings.WhisperDelayHint", Plugin.MinWhisperDelayMs));
+        }
 
         ImGui.Separator();
         ImGui.TextUnformatted(Loc.T("Settings.HotkeysHeader"));
@@ -53,9 +50,8 @@ internal sealed class GeneralPage
 
         if (!sendOnEnter)
         {
-            ImGui.PushStyleColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);
+            using var color = ImRaii.PushColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);
             ImGui.TextWrapped(Loc.T("Settings.SendOnEnterOff"));
-            ImGui.PopStyleColor();
         }
 
         var keepFocus = config.KeepInputFocusAfterSend;
@@ -66,73 +62,12 @@ internal sealed class GeneralPage
         }
 
         ImGui.Separator();
-        ImGui.TextUnformatted(Loc.T("Settings.SoundsHeader"));
-
-        var playSounds = config.PlaySounds;
-        if (ImGui.Checkbox(Loc.T("Settings.PlaySounds"), ref playSounds))
-        {
-            config.PlaySounds = playSounds;
-            plugin.SaveConfiguration();
-        }
-
-        ImGui.BeginDisabled(!playSounds);
-
-        var whisperSoundEnabled = config.WhisperSoundEnabled;
-        if (ImGui.Checkbox(Loc.T("Settings.WhisperSound"), ref whisperSoundEnabled))
-        {
-            config.WhisperSoundEnabled = whisperSoundEnabled;
-            plugin.SaveConfiguration();
-        }
-
-        DrawSoundEffectPicker("##whisperSfx", config.WhisperSoundEffect, value => config.WhisperSoundEffect = value, !whisperSoundEnabled);
-
-        var mentionSoundEnabled = config.MentionSoundEnabled;
-        if (ImGui.Checkbox(Loc.T("Settings.MentionSound"), ref mentionSoundEnabled))
-        {
-            config.MentionSoundEnabled = mentionSoundEnabled;
-            plugin.SaveConfiguration();
-        }
-
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip(Loc.T("Settings.MentionSoundHint"));
-        }
-
-        DrawSoundEffectPicker("##mentionSfx", config.MentionSoundEffect, value => config.MentionSoundEffect = value, !mentionSoundEnabled);
-
-        ImGui.Spacing();
-        ImGui.TextUnformatted(Loc.T("Settings.ChannelSoundsHeader"));
-        ImGui.PushStyleColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);
-        ImGui.TextWrapped(Loc.T("Settings.ChannelSoundsHint"));
-        ImGui.PopStyleColor();
-
-        foreach (var category in ChannelSoundCategories)
-        {
-            config.ChannelSounds.TryGetValue(category, out var channelSound);
-            var enabled = channelSound?.Enabled ?? false;
-
-            if (ImGui.Checkbox($"{Loc.T($"Channel.{category}")}##channelSoundEnabled{category}", ref enabled))
-            {
-                channelSound = GetOrCreateChannelSound(config, category);
-                channelSound.Enabled = enabled;
-                plugin.SaveConfiguration();
-            }
-
-            DrawSoundEffectPicker(
-                $"##channelSfx{category}",
-                channelSound?.SoundEffect ?? 1,
-                value => GetOrCreateChannelSound(config, category).SoundEffect = value,
-                !enabled);
-        }
-
-        ImGui.EndDisabled();
-
-        ImGui.Separator();
         ImGui.TextUnformatted(Loc.T("Settings.VisibilityHeader"));
 
-        ImGui.PushStyleColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);
-        ImGui.TextWrapped(Loc.T("Settings.VisibilityHint"));
-        ImGui.PopStyleColor();
+        using (ImRaii.PushColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]))
+        {
+            ImGui.TextWrapped(Loc.T("Settings.VisibilityHint"));
+        }
 
         var showDuringCutscenes = config.ShowChatDuringCutscenes;
         if (ImGui.Checkbox(Loc.T("Settings.ShowDuringCutscenes"), ref showDuringCutscenes))
@@ -167,124 +102,13 @@ internal sealed class GeneralPage
             ImGui.SetTooltip(Loc.T("Settings.PreloadRecentHistoryOnStartupTooltip"));
         }
 
-        ImGui.PushStyleColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);
-        ImGui.TextWrapped(Loc.T("Settings.PreloadRecentHistoryOnStartupHint"));
-        ImGui.PopStyleColor();
+        using (ImRaii.PushColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]))
+        {
+            ImGui.TextWrapped(Loc.T("Settings.PreloadRecentHistoryOnStartupHint"));
+        }
 
         ImGui.Separator();
-        ImGui.TextUnformatted(Loc.T("Settings.TabsHeader"));
-
-        var tabWheelScroll = config.TabStripWheelScrollEnabled;
-        if (ImGui.Checkbox(Loc.T("Settings.TabStripWheelScroll"), ref tabWheelScroll))
-        {
-            config.TabStripWheelScrollEnabled = tabWheelScroll;
-            plugin.SaveConfiguration();
-        }
-
-        var tabBgEnabled = config.TabStripBackgroundColorEnabled;
-        if (ImGui.Checkbox(Loc.T("Settings.TabStripBackgroundEnabled"), ref tabBgEnabled))
-        {
-            config.TabStripBackgroundColorEnabled = tabBgEnabled;
-            plugin.SaveConfiguration();
-        }
-
-        var blinkWhisperTabs = config.BlinkUnreadWhisperTabs;
-        if (ImGui.Checkbox(Loc.T("Settings.BlinkUnreadWhisperTabs"), ref blinkWhisperTabs))
-        {
-            config.BlinkUnreadWhisperTabs = blinkWhisperTabs;
-            plugin.SaveConfiguration();
-        }
-
-        var scrollToBottomOnTabSwitch = config.ScrollToBottomOnTabSwitch;
-        if (ImGui.Checkbox(Loc.T("Settings.ScrollToBottomOnTabSwitch"), ref scrollToBottomOnTabSwitch))
-        {
-            config.ScrollToBottomOnTabSwitch = scrollToBottomOnTabSwitch;
-            plugin.SaveConfiguration();
-        }
-
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip(Loc.T("Settings.ScrollToBottomOnTabSwitchTooltip"));
-        }
-
-        ImGui.BeginDisabled(!tabBgEnabled);
-        ImGui.Indent();
-        var tabBgColor = config.TabStripBackgroundColor;
-        if (ImGui.ColorEdit4(Loc.T("Settings.TabStripBackgroundColor"), ref tabBgColor))
-        {
-            config.TabStripBackgroundColor = tabBgColor;
-            plugin.SaveConfiguration();
-        }
-
-        ImGui.Unindent();
-        ImGui.EndDisabled();
-
-        ImGui.Separator();
-        ImGui.TextUnformatted(Loc.T("Settings.ToolbarHeader"));
-
-        ImGui.SetNextItemWidth(180);
-        var iconPackIndex = (int)config.ToolbarIconPack;
-        if (ImGui.Combo(Loc.T("Settings.ToolbarIconPack"), ref iconPackIndex, ToolbarIconPackLabels, ToolbarIconPackLabels.Length))
-        {
-            config.ToolbarIconPack = (ToolbarIconPack)iconPackIndex;
-            plugin.SaveConfiguration();
-        }
-
-        var isGlassPack = config.ToolbarIconPack != ToolbarIconPack.Classic;
-        ImGui.BeginDisabled(!isGlassPack);
-        ImGui.Indent();
-
-        var iconBgColor = config.ToolbarIconBackgroundColor;
-        if (ImGui.ColorEdit4(Loc.T("Settings.ToolbarIconBackgroundColor"), ref iconBgColor))
-        {
-            config.ToolbarIconBackgroundColor = iconBgColor;
-            plugin.SaveConfiguration();
-        }
-
-        var useCustomIconColor = config.ToolbarUseCustomIconColor;
-        if (ImGui.Checkbox(Loc.T("Settings.ToolbarUseCustomIconColor"), ref useCustomIconColor))
-        {
-            config.ToolbarUseCustomIconColor = useCustomIconColor;
-            plugin.SaveConfiguration();
-        }
-
-        ImGui.BeginDisabled(!useCustomIconColor);
-        var iconColor = config.ToolbarIconColor;
-        if (ImGui.ColorEdit4(Loc.T("Settings.ToolbarIconColor"), ref iconColor))
-        {
-            config.ToolbarIconColor = iconColor;
-            plugin.SaveConfiguration();
-        }
-
-        ImGui.EndDisabled();
-
-        ImGui.Unindent();
-        ImGui.EndDisabled();
-
-        ImGui.TextDisabled(Loc.T("Settings.ToolbarIconPackPreview"));
-        ImGui.SameLine();
-
-        if (config.ToolbarIconPack == ToolbarIconPack.Classic)
-        {
-            ImGuiComponents.IconButton(FontAwesomeIcon.Cog);
-            ImGui.SameLine();
-            ImGuiComponents.IconButton(FontAwesomeIcon.Wifi);
-            ImGui.SameLine();
-            ImGuiComponents.IconButton(FontAwesomeIcon.Users);
-        }
-        else
-        {
-            var previewIconColor = useCustomIconColor ? iconColor : ImGui.GetStyle().Colors[(int)ImGuiCol.Text];
-            GlassIconButton.Draw(FontAwesomeIcon.Cog, config.ToolbarIconPack, iconBgColor, previewIconColor, "##preview1");
-            ImGui.SameLine();
-            GlassIconButton.Draw(FontAwesomeIcon.Wifi, config.ToolbarIconPack, iconBgColor, previewIconColor, "##preview2");
-            ImGui.SameLine();
-            GlassIconButton.Draw(FontAwesomeIcon.Users, config.ToolbarIconPack, iconBgColor, previewIconColor, "##preview3");
-        }
-
-        ImGui.Spacing();
-        ImGui.Separator();
-        ImGui.Spacing();
+        ImGui.TextUnformatted(Loc.T("Settings.MiscHeader"));
 
         var estateTeleportEnabled = config.EstateTeleportContextMenuEnabled;
         if (ImGui.Checkbox(Loc.T("Settings.EstateTeleportContextMenu"), ref estateTeleportEnabled))
@@ -293,70 +117,9 @@ internal sealed class GeneralPage
             plugin.SaveConfiguration();
         }
 
-        ImGui.PushStyleColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);
-        ImGui.TextWrapped(Loc.T("Settings.EstateTeleportContextMenuHint"));
-        ImGui.PopStyleColor();
-    }
-
-    private static readonly string[] ToolbarIconPackLabels =
-    {
-        Loc.T("Settings.ToolbarIconPack.Classic"),
-        Loc.T("Settings.ToolbarIconPack.AeroGlass"),
-        Loc.T("Settings.ToolbarIconPack.FrostedGlass"),
-    };
-
-    private void DrawSoundEffectPicker(string id, int currentValue, Action<int> setValue, bool disabled)
-    {
-        ImGui.BeginDisabled(disabled);
-
-        ImGui.Indent();
-        ImGui.SetNextItemWidth(120);
-        var value = currentValue;
-        if (ImGui.SliderInt(id, ref value, 1, 16, Loc.T("Settings.SoundEffectFormat")))
+        using (ImRaii.PushColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]))
         {
-            setValue(Math.Clamp(value, 1, 16));
-            plugin.SaveConfiguration();
+            ImGui.TextWrapped(Loc.T("Settings.EstateTeleportContextMenuHint"));
         }
-
-        ImGui.SameLine();
-        if (ImGui.Button(Loc.T("Settings.SoundEffectTest") + id))
-        {
-            unsafe
-            {
-                UIGlobals.PlayChatSoundEffect((uint)Math.Clamp(currentValue, 1, 16));
-            }
-        }
-
-        ImGui.Unindent();
-
-        ImGui.EndDisabled();
-    }
-
-    // Whisper has its own dedicated setting above; Mention is cross-cutting rather than tied to one
-    // channel. Deliberately excludes the high-volume system/combat-log categories in ChatCategory -
-    // this list is only the channels people actually talk in.
-    private static readonly ChatCategory[] ChannelSoundCategories =
-    {
-        ChatCategory.Say,
-        ChatCategory.Party,
-        ChatCategory.Yell,
-        ChatCategory.Shout,
-        ChatCategory.FreeCompany,
-        ChatCategory.Alliance,
-        ChatCategory.Linkshell,
-        ChatCategory.CrossWorldLinkshell,
-        ChatCategory.PvpTeam,
-        ChatCategory.NoviceNetwork,
-    };
-
-    private static ChannelSoundSetting GetOrCreateChannelSound(Configuration config, ChatCategory category)
-    {
-        if (!config.ChannelSounds.TryGetValue(category, out var setting))
-        {
-            setting = new ChannelSoundSetting();
-            config.ChannelSounds[category] = setting;
-        }
-
-        return setting;
     }
 }

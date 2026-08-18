@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface.Utility.Raii;
 
 namespace CelinesChat;
 
@@ -80,11 +81,13 @@ internal static class PreviewRenderer
         // actually activate the compose box for keyboard input in this project, even once every
         // cross-window/same-frame timing issue was ruled out - Selectable is the one thing that fixed
         // it, matching WrapSelection's own trigger (also a Selectable, in its rp-actions popup).
-        ImGui.PushStyleColor(ImGuiCol.Text, color);
-        ImGui.PushStyleColor(ImGuiCol.HeaderHovered, new Vector4(1f, 1f, 1f, 0.08f));
-        ImGui.PushStyleColor(ImGuiCol.HeaderActive, new Vector4(1f, 1f, 1f, 0.14f));
-        var clicked = ImGui.Selectable($"{display}##preview{uniqueId}", false, ImGuiSelectableFlags.None, size);
-        ImGui.PopStyleColor(3);
+        bool clicked;
+        using (ImRaii.PushColor(ImGuiCol.Text, color)
+                   .Push(ImGuiCol.HeaderHovered, new Vector4(1f, 1f, 1f, 0.08f))
+                   .Push(ImGuiCol.HeaderActive, new Vector4(1f, 1f, 1f, 0.14f)))
+        {
+            clicked = ImGui.Selectable($"{display}##preview{uniqueId}", false, ImGuiSelectableFlags.None, size);
+        }
 
         if (!ImGui.IsItemHovered() || bareWord.Length == 0)
         {

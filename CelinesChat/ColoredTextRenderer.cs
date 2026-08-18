@@ -5,6 +5,7 @@ using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.Text.SeStringHandling;
 using Dalamud.Game.Text.SeStringHandling.Payloads;
+using Dalamud.Interface.Utility.Raii;
 
 namespace CelinesChat;
 
@@ -65,10 +66,10 @@ internal static class ColoredTextRenderer
             availableWidth, initialLineWidthUsed, highlightTerm, highlightColor, onLinkClicked);
     }
 
-    internal static IEnumerable<(string Word, TextSegmentKind Kind, LinkTarget? Link, Vector4? Foreground)> BuildPlainRuns(string text, string mentionTerm)
+    internal static IEnumerable<(string Word, TextSegmentKind Kind, LinkTarget? Link, Vector4? Foreground)> BuildPlainRuns(string text, string mentionTerm, bool allowRpFormatting = true)
     {
         var state = new TokenizeState();
-        foreach (var (word, kind) in Tokenize(text, mentionTerm, state))
+        foreach (var (word, kind) in Tokenize(text, mentionTerm, state, allowRpFormatting))
         {
             var link = TryGetUrl(word, out var url) ? new LinkTarget(url) : null;
             yield return (word, kind, link, null);
@@ -91,11 +92,12 @@ internal static class ColoredTextRenderer
         string highlightTerm,
         Vector4? highlightColor,
         Action<LinkTarget> onLinkClicked,
-        Action<LinkTarget>? onLinkHovered = null)
+        Action<LinkTarget>? onLinkHovered = null,
+        bool allowRpFormatting = true)
     {
         entry.CachedRuns ??= entry.Payloads is { } payloads
-            ? BuildRuns(payloads, mentionTerm).ToList()
-            : BuildPlainRuns(entry.Text, mentionTerm).ToList();
+            ? BuildRuns(payloads, mentionTerm, allowRpFormatting).ToList()
+            : BuildPlainRuns(entry.Text, mentionTerm, allowRpFormatting).ToList();
 
         DrawSequence(
             entry.CachedRuns,
@@ -124,7 +126,7 @@ internal static class ColoredTextRenderer
             availableWidth, initialLineWidthUsed, highlightTerm, highlightColor, onLinkClicked, onLinkHovered);
     }
 
-    internal static IEnumerable<(string Word, TextSegmentKind Kind, LinkTarget? Link, Vector4? Foreground)> BuildRuns(IReadOnlyList<Payload> payloads, string mentionTerm)
+    internal static IEnumerable<(string Word, TextSegmentKind Kind, LinkTarget? Link, Vector4? Foreground)> BuildRuns(IReadOnlyList<Payload> payloads, string mentionTerm, bool allowRpFormatting = true)
     {
         var state = new TokenizeState();
         Payload? currentLink = null;
@@ -154,7 +156,7 @@ internal static class ColoredTextRenderer
                 case ITextProvider textProvider:
                     var currentForeground = foregroundStack.Count > 0 ? foregroundStack.Peek() : (Vector4?)null;
                     var currentLinkTarget = currentLink != null ? new LinkTarget(currentLink) : null;
-                    foreach (var (word, kind) in Tokenize(textProvider.Text, mentionTerm, state))
+                    foreach (var (word, kind) in Tokenize(textProvider.Text, mentionTerm, state, allowRpFormatting))
                     {
                         var link = currentLinkTarget ?? (TryGetUrl(word, out var url) ? new LinkTarget(url) : null);
                         yield return (word, kind, link, currentForeground);
@@ -358,17 +360,9 @@ internal static class ColoredTextRenderer
     private static void DrawIconGlyphUnit(string display, Vector4 color)
     {
         var defaultFont = ImGui.GetIO().FontDefault;
-        var pushedFont = !defaultFont.IsNull;
-        if (pushedFont)
+        using (ImRaii.PushFont(defaultFont, !defaultFont.IsNull))
         {
-            ImGui.PushFont(defaultFont);
-        }
-
-        ImGui.TextColored(color, display);
-
-        if (pushedFont)
-        {
-            ImGui.PopFont();
+            ImGui.TextColored(color, display);
         }
     }
 
@@ -423,7 +417,7 @@ internal static class ColoredTextRenderer
         yield return (word[start..], current);
     }
 
-    internal static IEnumerable<(string Word, TextSegmentKind Kind)> Tokenize(string text, string mentionTerm, TokenizeState state)
+    internal static IEnumerable<(string Word, TextSegmentKind Kind)> Tokenize(string text, string mentionTerm, TokenizeState state, bool allowRpFormatting = true)
     {
         var words = text.Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
 
@@ -437,13 +431,29 @@ internal static class ColoredTextRenderer
                     continue;
                 }
 
-                yield return (segment, ClassifySegment(segment, mentionTerm, state));
+                yield return (segment, ClassifySegment(segment, mentionTerm, state, allowRpFormatting));
             }
         }
     }
 
-    private static TextSegmentKind ClassifySegment(string word, string mentionTerm, TokenizeState state)
+    // allowRpFormatting off (a channel that isn't configured for RP, e.g. a plugin/bot notice posted
+    // into an ordinary channel) skips the */( )/ state machine entirely rather than just discarding
+    // its result - a stray "(" from unrelated text would otherwise still flip OocDepth and misclassify
+    // whatever happens to follow it, even though nothing here is ever actually colored as Ooc/Emote.
+    // Mentions stay recognized regardless - "your name got mentioned" isn't specific to roleplay.
+    private static TextSegmentKind ClassifySegment(string word, string mentionTerm, TokenizeState state, bool allowRpFormatting = true)
     {
+        var isMention = !string.IsNullOrEmpty(mentionTerm) && string.Equals(StripPunctuation(word), mentionTerm, StringComparison.OrdinalIgnoreCase);
+        if (isMention)
+        {
+            return TextSegmentKind.Mention;
+        }
+
+        if (!allowRpFormatting)
+        {
+            return TextSegmentKind.Default;
+        }
+
         var startedInEmote = state.InEmote;
 
         if (CountOccurrences(word, '*') % 2 == 1)
@@ -472,9 +482,8 @@ internal static class ColoredTextRenderer
 
         var isOoc = touchedOoc;
         var isEmote = !isOoc && (startedInEmote || word.Contains('*'));
-        var isMention = !string.IsNullOrEmpty(mentionTerm) && string.Equals(StripPunctuation(word), mentionTerm, StringComparison.OrdinalIgnoreCase);
 
-        return isMention ? TextSegmentKind.Mention : (isOoc ? TextSegmentKind.Ooc : (isEmote ? TextSegmentKind.Emote : TextSegmentKind.Default));
+        return isOoc ? TextSegmentKind.Ooc : (isEmote ? TextSegmentKind.Emote : TextSegmentKind.Default);
     }
 
     private static bool IsMessagePartCounter(string word)

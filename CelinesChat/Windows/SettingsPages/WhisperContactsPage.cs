@@ -1,5 +1,6 @@
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface.Utility.Raii;
 
 namespace CelinesChat.Windows.SettingsPages;
 
@@ -33,35 +34,36 @@ internal sealed class WhisperContactsPage
         }
 
         ImGui.SetNextItemWidth(240);
-        if (ImGui.BeginCombo("##whisperContactSelect", selectedTarget.Length > 0 ? selectedTarget : Loc.T("WhisperContacts.Pick")))
+        using (var combo = ImRaii.Combo("##whisperContactSelect", selectedTarget.Length > 0 ? selectedTarget : Loc.T("WhisperContacts.Pick")))
         {
-            foreach (var target in targets)
+            if (combo.Success)
             {
-                if (ImGui.Selectable(target, target == selectedTarget))
+                foreach (var target in targets)
                 {
-                    selectedTarget = target;
-                    statusMessage = null;
+                    if (ImGui.Selectable(target, target == selectedTarget))
+                    {
+                        selectedTarget = target;
+                        statusMessage = null;
+                    }
                 }
             }
-
-            ImGui.EndCombo();
         }
 
         ImGui.SetNextItemWidth(240);
         ImGui.InputTextWithHint("##whisperContactNewName", Loc.T("WhisperContacts.NewNameHint"), ref newNameInput, 64);
 
         var canApply = selectedTarget.Length > 0 && newNameInput.Trim().Length > 0;
-        ImGui.BeginDisabled(!canApply);
-        if (ImGui.Button(Loc.T("WhisperContacts.Apply")))
+        using (ImRaii.Disabled(!canApply))
         {
-            var newTarget = newNameInput.Trim();
-            plugin.RenameWhisperTarget(selectedTarget, newTarget);
-            statusMessage = Loc.T("WhisperContacts.Applied", selectedTarget, newTarget);
-            selectedTarget = string.Empty;
-            newNameInput = string.Empty;
+            if (ImGui.Button(Loc.T("WhisperContacts.Apply")))
+            {
+                var newTarget = newNameInput.Trim();
+                plugin.RenameWhisperTarget(selectedTarget, newTarget);
+                statusMessage = Loc.T("WhisperContacts.Applied", selectedTarget, newTarget);
+                selectedTarget = string.Empty;
+                newNameInput = string.Empty;
+            }
         }
-
-        ImGui.EndDisabled();
 
         if (statusMessage != null)
         {

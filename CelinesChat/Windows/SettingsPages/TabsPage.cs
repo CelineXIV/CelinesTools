@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Components;
+using Dalamud.Interface.Utility.Raii;
 using CelinesChat.Services;
 
 namespace CelinesChat.Windows.SettingsPages;
@@ -20,6 +21,10 @@ internal sealed class TabsPage
     {
         var config = plugin.Configuration;
 
+        DrawTabStripBehaviorSection(config);
+
+        ImGui.Separator();
+        ImGui.TextUnformatted(Loc.T("Tabs.ChannelsHeader"));
         ImGui.TextWrapped(Loc.T("Tabs.Description"));
         ImGui.Spacing();
 
@@ -47,7 +52,7 @@ internal sealed class TabsPage
         for (var i = 0; i < config.ChatTabs.Count; i++)
         {
             var tab = config.ChatTabs[i];
-            ImGui.PushID(tab.Id.ToString());
+            using var id = ImRaii.PushId(tab.Id.ToString());
 
             if (anyCategoryMatches)
             {
@@ -69,20 +74,70 @@ internal sealed class TabsPage
 
             if (open)
             {
-                ImGui.Indent();
-                DrawTabDetails(tab, searching ? categorySearch : string.Empty);
-                ImGui.Unindent();
+                using (ImRaii.PushIndent())
+                {
+                    DrawTabDetails(tab, searching ? categorySearch : string.Empty);
+                }
+
                 ImGui.TreePop();
             }
 
             ImGui.Spacing();
-            ImGui.PopID();
         }
 
         if (toRemove != null)
         {
             config.ChatTabs.Remove(toRemove);
             plugin.SaveConfiguration();
+        }
+    }
+
+    private void DrawTabStripBehaviorSection(Configuration config)
+    {
+        ImGui.TextUnformatted(Loc.T("Settings.TabsHeader"));
+
+        var tabWheelScroll = config.TabStripWheelScrollEnabled;
+        if (ImGui.Checkbox(Loc.T("Settings.TabStripWheelScroll"), ref tabWheelScroll))
+        {
+            config.TabStripWheelScrollEnabled = tabWheelScroll;
+            plugin.SaveConfiguration();
+        }
+
+        var tabBgEnabled = config.TabStripBackgroundColorEnabled;
+        if (ImGui.Checkbox(Loc.T("Settings.TabStripBackgroundEnabled"), ref tabBgEnabled))
+        {
+            config.TabStripBackgroundColorEnabled = tabBgEnabled;
+            plugin.SaveConfiguration();
+        }
+
+        var blinkWhisperTabs = config.BlinkUnreadWhisperTabs;
+        if (ImGui.Checkbox(Loc.T("Settings.BlinkUnreadWhisperTabs"), ref blinkWhisperTabs))
+        {
+            config.BlinkUnreadWhisperTabs = blinkWhisperTabs;
+            plugin.SaveConfiguration();
+        }
+
+        var scrollToBottomOnTabSwitch = config.ScrollToBottomOnTabSwitch;
+        if (ImGui.Checkbox(Loc.T("Settings.ScrollToBottomOnTabSwitch"), ref scrollToBottomOnTabSwitch))
+        {
+            config.ScrollToBottomOnTabSwitch = scrollToBottomOnTabSwitch;
+            plugin.SaveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Settings.ScrollToBottomOnTabSwitchTooltip"));
+        }
+
+        using (ImRaii.Disabled(!tabBgEnabled))
+        using (ImRaii.PushIndent())
+        {
+            var tabBgColor = config.TabStripBackgroundColor;
+            if (ImGui.ColorEdit4(Loc.T("Settings.TabStripBackgroundColor"), ref tabBgColor))
+            {
+                config.TabStripBackgroundColor = tabBgColor;
+                plugin.SaveConfiguration();
+            }
         }
     }
 
@@ -110,41 +165,44 @@ internal sealed class TabsPage
         removed = false;
 
         ImGui.SameLine();
-        ImGui.BeginDisabled(index == 0);
-        if (ImGuiComponents.IconButton(FontAwesomeIcon.ArrowUp))
+        using (ImRaii.Disabled(index == 0))
         {
-            (config.ChatTabs[index - 1], config.ChatTabs[index]) = (config.ChatTabs[index], config.ChatTabs[index - 1]);
-            plugin.SaveConfiguration();
+            if (ImGuiComponents.IconButton(FontAwesomeIcon.ArrowUp))
+            {
+                (config.ChatTabs[index - 1], config.ChatTabs[index]) = (config.ChatTabs[index], config.ChatTabs[index - 1]);
+                plugin.SaveConfiguration();
+            }
         }
 
-        ImGui.EndDisabled();
         if (ImGui.IsItemHovered())
         {
             ImGui.SetTooltip(Loc.T("Tabs.MoveUp"));
         }
 
         ImGui.SameLine();
-        ImGui.BeginDisabled(index == config.ChatTabs.Count - 1);
-        if (ImGuiComponents.IconButton(FontAwesomeIcon.ArrowDown))
+        using (ImRaii.Disabled(index == config.ChatTabs.Count - 1))
         {
-            (config.ChatTabs[index + 1], config.ChatTabs[index]) = (config.ChatTabs[index], config.ChatTabs[index + 1]);
-            plugin.SaveConfiguration();
+            if (ImGuiComponents.IconButton(FontAwesomeIcon.ArrowDown))
+            {
+                (config.ChatTabs[index + 1], config.ChatTabs[index]) = (config.ChatTabs[index], config.ChatTabs[index + 1]);
+                plugin.SaveConfiguration();
+            }
         }
 
-        ImGui.EndDisabled();
         if (ImGui.IsItemHovered())
         {
             ImGui.SetTooltip(Loc.T("Tabs.MoveDown"));
         }
 
         ImGui.SameLine();
-        ImGui.BeginDisabled(!tab.Removable);
-        if (ImGuiComponents.IconButton(FontAwesomeIcon.TrashAlt))
+        using (ImRaii.Disabled(!tab.Removable))
         {
-            removed = true;
+            if (ImGuiComponents.IconButton(FontAwesomeIcon.TrashAlt))
+            {
+                removed = true;
+            }
         }
 
-        ImGui.EndDisabled();
         if (!tab.Removable && ImGui.IsItemHovered())
         {
             ImGui.SetTooltip(Loc.T("Tabs.CannotRemoveDefault"));
@@ -183,7 +241,7 @@ internal sealed class TabsPage
                 continue;
             }
 
-            ImGui.PushID("group" + group);
+            using var groupId = ImRaii.PushId("group" + group);
 
             if (ImGuiComponents.IconButton(FontAwesomeIcon.Check))
             {
@@ -224,7 +282,6 @@ internal sealed class TabsPage
 
             var flags = group == ChatCategoryGroup.Standard ? ImGuiTreeNodeFlags.DefaultOpen : ImGuiTreeNodeFlags.None;
             var groupOpen = ImGui.CollapsingHeader(ChannelDisplay.GroupName(group), flags);
-            ImGui.PopID();
 
             if (!groupOpen)
             {
@@ -235,7 +292,17 @@ internal sealed class TabsPage
             {
                 var category = gridCategories[i];
                 var included = tab.IncludedChannels.Contains(category);
-                if (ImGui.Checkbox(ChannelDisplay.CategoryName(category) + "##cat" + category, ref included))
+
+                // Color-matched to the channel's own chat color (same as vanilla's channel config
+                // list), so this long checkbox grid reads more like a legend and less like an
+                // undifferentiated wall of identical-looking labels.
+                bool toggled;
+                using (ImRaii.PushColor(ImGuiCol.Text, ChannelDisplay.Color(category, plugin.Configuration)))
+                {
+                    toggled = ImGui.Checkbox(ChannelDisplay.CategoryName(category) + "##cat" + category, ref included);
+                }
+
+                if (toggled)
                 {
                     if (included)
                     {
@@ -302,7 +369,7 @@ internal sealed class TabsPage
             return;
         }
 
-        ImGui.Indent();
+        using var indent = ImRaii.PushIndent();
         foreach (var (number, name) in slots)
         {
             var label = name.Length > 0 ? $"{prefix}{number}: {name}" : $"{prefix}{number}";
@@ -329,7 +396,5 @@ internal sealed class TabsPage
                 plugin.SaveConfiguration();
             }
         }
-
-        ImGui.Unindent();
     }
 }

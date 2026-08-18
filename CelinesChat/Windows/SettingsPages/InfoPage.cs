@@ -1,6 +1,8 @@
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Components;
+using Dalamud.Interface.Utility.Raii;
+using CelinesChat.Services;
 
 namespace CelinesChat.Windows.SettingsPages;
 
@@ -37,6 +39,16 @@ internal sealed class InfoPage
             config.MentionSoundEffect = 6;
             config.ChatWindowLockPosition = false;
             config.ChatWindowLockSize = false;
+            config.RpFormattingCategories = new()
+            {
+                ChatCategory.Say,
+                ChatCategory.Party,
+                ChatCategory.Whisper,
+                ChatCategory.Linkshell,
+                ChatCategory.CrossWorldLinkshell,
+            };
+            config.RpFormattingLinkshellNumbers.Clear();
+            config.RpFormattingCrossWorldLinkshellNumbers.Clear();
             config.WindowOpacity = 1f;
             config.UnfocusedWindowOpacity = 0.35f;
             config.ChatLogBackgroundOpacity = 0.15f;
@@ -50,15 +62,14 @@ internal sealed class InfoPage
             ImGui.OpenPopup("##changelogPopup");
         }
 
-        if (ImGui.BeginPopup("##changelogPopup"))
+        using var popup = ImRaii.Popup("##changelogPopup");
+        if (popup.Success)
         {
             for (var i = Changelog.Entries.Length - 1; i >= 0; i--)
             {
                 var (version, text) = Changelog.Entries[i];
                 ImGui.TextUnformatted($"{version}: {text}");
             }
-
-            ImGui.EndPopup();
         }
     }
 }

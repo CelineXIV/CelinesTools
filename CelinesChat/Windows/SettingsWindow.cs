@@ -1,6 +1,7 @@
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
+using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 using CelinesChat.Windows.SettingsPages;
 
@@ -9,8 +10,10 @@ namespace CelinesChat.Windows;
 internal enum SettingsPage
 {
     General,
+    Sounds,
     Colors,
     Tabs,
+    Rp,
     Display,
     Fonts,
     FileLog,
@@ -23,8 +26,10 @@ internal sealed class SettingsWindow : Window
 {
     private readonly Plugin plugin;
     private readonly GeneralPage generalPage;
+    private readonly SoundsPage soundsPage;
     private readonly ColorsPage colorsPage;
     private readonly TabsPage tabsPage;
+    private readonly RpPage rpPage;
     private readonly DisplayPage displayPage;
     private readonly FontsPage fontsPage;
     private readonly FileLogPage fileLogPage;
@@ -46,8 +51,10 @@ internal sealed class SettingsWindow : Window
         };
 
         generalPage = new GeneralPage(plugin);
+        soundsPage = new SoundsPage(plugin);
         colorsPage = new ColorsPage(plugin);
         tabsPage = new TabsPage(plugin);
+        rpPage = new RpPage(plugin);
         displayPage = new DisplayPage(plugin);
         fontsPage = new FontsPage(plugin);
         fileLogPage = new FileLogPage(plugin);
@@ -58,63 +65,71 @@ internal sealed class SettingsWindow : Window
 
     public override void Draw()
     {
-        ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 0f);
-        ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 4f);
-        ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(6f, 4f));
-        ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 6f);
-        ImGui.PushStyleVar(ImGuiStyleVar.PopupRounding, 6f);
-        ImGui.PushStyleVar(ImGuiStyleVar.ScrollbarRounding, 6f);
-        ImGui.PushStyleVar(ImGuiStyleVar.GrabRounding, 4f);
+        using var style = ImRaii.PushStyle(ImGuiStyleVar.WindowRounding, 0f)
+            .Push(ImGuiStyleVar.FrameRounding, 4f)
+            .Push(ImGuiStyleVar.FramePadding, new Vector2(6f, 4f))
+            .Push(ImGuiStyleVar.ChildRounding, 6f)
+            .Push(ImGuiStyleVar.PopupRounding, 6f)
+            .Push(ImGuiStyleVar.ScrollbarRounding, 6f)
+            .Push(ImGuiStyleVar.GrabRounding, 4f);
 
-        ImGui.BeginChild("##settingsNav", new Vector2(140, 0), true);
-        DrawNavEntry(Loc.T("Nav.General"), FontAwesomeIcon.SlidersH, SettingsPage.General);
-        DrawNavEntry(Loc.T("Nav.Colors"), FontAwesomeIcon.Palette, SettingsPage.Colors);
-        DrawNavEntry(Loc.T("Nav.Tabs"), FontAwesomeIcon.FolderOpen, SettingsPage.Tabs);
-        DrawNavEntry(Loc.T("Nav.Display"), FontAwesomeIcon.Desktop, SettingsPage.Display);
-        DrawNavEntry(Loc.T("Nav.Fonts"), FontAwesomeIcon.Font, SettingsPage.Fonts);
-        DrawNavEntry(Loc.T("Nav.FileLog"), FontAwesomeIcon.Save, SettingsPage.FileLog);
-        DrawNavEntry(Loc.T("Nav.WhisperContacts"), FontAwesomeIcon.UserEdit, SettingsPage.WhisperContacts);
-        DrawNavEntry(Loc.T("Nav.WebClient"), FontAwesomeIcon.Wifi, SettingsPage.WebClient);
-        ImGui.Separator();
-        DrawNavEntry(Loc.T("Nav.Info"), FontAwesomeIcon.InfoCircle, SettingsPage.Info);
-        ImGui.EndChild();
+        using (ImRaii.Child("##settingsNav", new Vector2(140, 0), true))
+        {
+            DrawNavEntry(Loc.T("Nav.General"), FontAwesomeIcon.SlidersH, SettingsPage.General);
+            DrawNavEntry(Loc.T("Nav.Sounds"), FontAwesomeIcon.VolumeUp, SettingsPage.Sounds);
+            DrawNavEntry(Loc.T("Nav.Colors"), FontAwesomeIcon.Palette, SettingsPage.Colors);
+            DrawNavEntry(Loc.T("Nav.Tabs"), FontAwesomeIcon.FolderOpen, SettingsPage.Tabs);
+            DrawNavEntry(Loc.T("Nav.Rp"), FontAwesomeIcon.TheaterMasks, SettingsPage.Rp);
+            DrawNavEntry(Loc.T("Nav.Display"), FontAwesomeIcon.Desktop, SettingsPage.Display);
+            DrawNavEntry(Loc.T("Nav.Fonts"), FontAwesomeIcon.Font, SettingsPage.Fonts);
+            DrawNavEntry(Loc.T("Nav.FileLog"), FontAwesomeIcon.Save, SettingsPage.FileLog);
+            DrawNavEntry(Loc.T("Nav.WhisperContacts"), FontAwesomeIcon.UserEdit, SettingsPage.WhisperContacts);
+            DrawNavEntry(Loc.T("Nav.WebClient"), FontAwesomeIcon.Wifi, SettingsPage.WebClient);
+            ImGui.Separator();
+            DrawNavEntry(Loc.T("Nav.Info"), FontAwesomeIcon.InfoCircle, SettingsPage.Info);
+        }
 
         ImGui.SameLine();
 
-        ImGui.BeginChild("##settingsContent", Vector2.Zero, false);
-        switch (currentPage)
+        using (ImRaii.Child("##settingsContent", Vector2.Zero, false))
         {
-            case SettingsPage.General:
-                generalPage.Draw();
-                break;
-            case SettingsPage.Colors:
-                colorsPage.Draw();
-                break;
-            case SettingsPage.Tabs:
-                tabsPage.Draw();
-                break;
-            case SettingsPage.Display:
-                displayPage.Draw();
-                break;
-            case SettingsPage.Fonts:
-                fontsPage.Draw();
-                break;
-            case SettingsPage.FileLog:
-                fileLogPage.Draw();
-                break;
-            case SettingsPage.WhisperContacts:
-                whisperContactsPage.Draw();
-                break;
-            case SettingsPage.WebClient:
-                webClientPage.Draw();
-                break;
-            case SettingsPage.Info:
-                infoPage.Draw();
-                break;
+            switch (currentPage)
+            {
+                case SettingsPage.General:
+                    generalPage.Draw();
+                    break;
+                case SettingsPage.Sounds:
+                    soundsPage.Draw();
+                    break;
+                case SettingsPage.Colors:
+                    colorsPage.Draw();
+                    break;
+                case SettingsPage.Tabs:
+                    tabsPage.Draw();
+                    break;
+                case SettingsPage.Rp:
+                    rpPage.Draw();
+                    break;
+                case SettingsPage.Display:
+                    displayPage.Draw();
+                    break;
+                case SettingsPage.Fonts:
+                    fontsPage.Draw();
+                    break;
+                case SettingsPage.FileLog:
+                    fileLogPage.Draw();
+                    break;
+                case SettingsPage.WhisperContacts:
+                    whisperContactsPage.Draw();
+                    break;
+                case SettingsPage.WebClient:
+                    webClientPage.Draw();
+                    break;
+                case SettingsPage.Info:
+                    infoPage.Draw();
+                    break;
+            }
         }
-        ImGui.EndChild();
-
-        ImGui.PopStyleVar(7);
     }
 
     private void DrawNavEntry(string label, FontAwesomeIcon icon, SettingsPage page)
@@ -141,12 +156,14 @@ internal sealed class SettingsWindow : Window
                 ImGui.GetColorU32(accent));
         }
 
-        ImGui.PushFont(UiBuilder.IconFont);
-        var iconText = icon.ToIconString();
-        var iconSize = ImGui.CalcTextSize(iconText);
-        var iconPos = startPos + new Vector2(10f, (lineHeight - iconSize.Y) / 2f);
-        drawList.AddText(iconPos, textColor, iconText);
-        ImGui.PopFont();
+        Vector2 iconSize;
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            var iconText = icon.ToIconString();
+            iconSize = ImGui.CalcTextSize(iconText);
+            var iconPos = startPos + new Vector2(10f, (lineHeight - iconSize.Y) / 2f);
+            drawList.AddText(iconPos, textColor, iconText);
+        }
 
         var textSize = ImGui.CalcTextSize(label);
         var textPos = startPos + new Vector2(10f + iconSize.X + 8f, (lineHeight - textSize.Y) / 2f);

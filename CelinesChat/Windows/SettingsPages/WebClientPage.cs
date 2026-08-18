@@ -3,6 +3,7 @@ using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Components;
+using Dalamud.Interface.Utility.Raii;
 
 namespace CelinesChat.Windows.SettingsPages;
 
@@ -19,9 +20,11 @@ internal sealed class WebClientPage
     {
         var config = plugin.Configuration;
 
-        ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.4f, 0.4f, 1f));
-        ImGui.TextWrapped(Loc.T("WebClient.WarningHeader"));
-        ImGui.PopStyleColor();
+        using (ImRaii.PushColor(ImGuiCol.Text, new Vector4(1f, 0.4f, 0.4f, 1f)))
+        {
+            ImGui.TextWrapped(Loc.T("WebClient.WarningHeader"));
+        }
+
         ImGui.TextWrapped(Loc.T("WebClient.WarningBody"));
 
         ImGui.Separator();
@@ -51,17 +54,19 @@ internal sealed class WebClientPage
         {
         }
 
-        ImGui.PushStyleColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);
-        ImGui.TextWrapped(Loc.T("WebClient.PortHint"));
-        ImGui.PopStyleColor();
+        using (ImRaii.PushColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]))
+        {
+            ImGui.TextWrapped(Loc.T("WebClient.PortHint"));
+        }
 
         ImGui.Spacing();
         ImGui.Separator();
 
         ImGui.TextUnformatted(Loc.T("WebClient.AuthCodeLabel"));
-        ImGui.PushFont(UiBuilder.MonoFont);
-        ImGui.TextColored(new Vector4(1f, 0.85f, 0.2f, 1f), config.WebClientAuthCode);
-        ImGui.PopFont();
+        using (ImRaii.PushFont(UiBuilder.MonoFont))
+        {
+            ImGui.TextColored(new Vector4(1f, 0.85f, 0.2f, 1f), config.WebClientAuthCode);
+        }
 
         ImGui.SameLine();
         if (ImGuiComponents.IconButton(FontAwesomeIcon.Copy))

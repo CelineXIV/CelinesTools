@@ -2,6 +2,7 @@ using System;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.Text;
+using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 using CelinesChat.Services;
 
@@ -95,30 +96,27 @@ internal sealed class SecondaryChatWindow : Window
 
         var config = plugin.Configuration;
 
-        ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 0f);
-        ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 4f);
-        ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(6f, 4f));
-        ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 6f);
-        ImGui.PushStyleVar(ImGuiStyleVar.PopupRounding, 6f);
-        ImGui.PushStyleVar(ImGuiStyleVar.ScrollbarRounding, 6f);
-        ImGui.PushStyleVar(ImGuiStyleVar.GrabRounding, 4f);
-        ImGui.PushStyleVar(ImGuiStyleVar.TabRounding, 4f);
+        using var style = ImRaii.PushStyle(ImGuiStyleVar.WindowRounding, 0f)
+            .Push(ImGuiStyleVar.FrameRounding, 4f)
+            .Push(ImGuiStyleVar.FramePadding, new Vector2(6f, 4f))
+            .Push(ImGuiStyleVar.ChildRounding, 6f)
+            .Push(ImGuiStyleVar.PopupRounding, 6f)
+            .Push(ImGuiStyleVar.ScrollbarRounding, 6f)
+            .Push(ImGuiStyleVar.GrabRounding, 4f)
+            .Push(ImGuiStyleVar.TabRounding, 4f);
 
         var state = plugin.GetCharacterState();
 
         DrawTabBar(config, state);
 
         var availableWidth = ImGui.GetContentRegionAvail().X;
-        ImGui.PushStyleColor(ImGuiCol.ChildBg, new Vector4(0f, 0f, 0f, config.ChatLogBackgroundOpacity));
-        ImGui.BeginChild("##secondaryChatLog", new Vector2(-1, -1), true, ImGuiWindowFlags.AlwaysVerticalScrollbar);
+        using (ImRaii.PushColor(ImGuiCol.ChildBg, new Vector4(0f, 0f, 0f, config.ChatLogBackgroundOpacity)))
+        using (ImRaii.Child("##secondaryChatLog", new Vector2(-1, -1), true, ImGuiWindowFlags.AlwaysVerticalScrollbar))
+        {
+            ImGui.SetScrollX(0f);
 
-        ImGui.SetScrollX(0f);
-
-        DrawFilteredEntries(config, availableWidth);
-        ImGui.EndChild();
-        ImGui.PopStyleColor();
-
-        ImGui.PopStyleVar(8);
+            DrawFilteredEntries(config, availableWidth);
+        }
 
         TrackWindowBounds();
     }
@@ -166,133 +164,129 @@ internal sealed class SecondaryChatWindow : Window
             tabBarOrigin + new Vector2(ImGui.GetContentRegionAvail().X, lineHeight),
             ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, config.TabStripBackgroundOpacity)));
 
-        ImGui.BeginChild("##secondaryTabStrip", new Vector2(-1, lineHeight), false, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
-
-        if (TabDragHelper.DrawDropZone(ImGui.GetContentRegionAvail().X, lineHeight) is { } droppedHere)
+        using (ImRaii.Child("##secondaryTabStrip", new Vector2(-1, lineHeight), false, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse))
         {
-            if (Guid.TryParse(droppedHere, out var droppedTabId))
+            if (TabDragHelper.DrawDropZone(ImGui.GetContentRegionAvail().X, lineHeight) is { } droppedHere)
             {
-                plugin.MoveTabToSecondaryWindow(droppedTabId);
-            }
-            else
-            {
-                plugin.MoveWhisperToSecondaryWindow(droppedHere);
-            }
-        }
-
-        ImGui.PushStyleVar(ImGuiStyleVar.SelectableTextAlign, new Vector2(0.5f, 0.5f));
-
-        foreach (var tab in myTabs)
-        {
-            ImGui.PushID(tab.Id.ToString());
-
-            var isSelected = string.IsNullOrEmpty(activeWhisperTarget) && activeTabId == tab.Id;
-            var tabWidth = ImGui.CalcTextSize(tab.Name).X + ImGui.GetStyle().FramePadding.X * 2f;
-            var tabSize = new Vector2(tabWidth, lineHeight);
-
-            ChatWindow.DrawTabBackgroundFill(tab.BackgroundColor ?? (config.TabStripBackgroundColorEnabled ? config.TabStripBackgroundColor : (Vector4?)null), tabSize);
-            var clicked = ImGui.Selectable(tab.Name + "##secTab", isSelected, ImGuiSelectableFlags.None, tabSize);
-
-            TabDragHelper.HandleHoverAndTearOff(tab.Id.ToString(), tab.Name, _ => { });
-
-            if (TabDragHelper.DrawReorderTarget(tab.Id.ToString(), out var insertBefore) is { } droppedTabIdStr
-                && Guid.TryParse(droppedTabIdStr, out var droppedTabId2))
-            {
-                plugin.MoveTabToSecondaryWindow(droppedTabId2);
-
-                var draggedIndex = config.ChatTabs.FindIndex(t => t.Id == droppedTabId2);
-                if (draggedIndex >= 0)
+                if (Guid.TryParse(droppedHere, out var droppedTabId))
                 {
-                    var draggedTab = config.ChatTabs[draggedIndex];
-                    config.ChatTabs.RemoveAt(draggedIndex);
-                    var targetIndex = config.ChatTabs.IndexOf(tab);
-                    config.ChatTabs.Insert(insertBefore ? targetIndex : targetIndex + 1, draggedTab);
-                    plugin.SaveConfiguration();
+                    plugin.MoveTabToSecondaryWindow(droppedTabId);
+                }
+                else
+                {
+                    plugin.MoveWhisperToSecondaryWindow(droppedHere);
                 }
             }
 
-            if (clicked && !isSelected)
+            using (ImRaii.PushStyle(ImGuiStyleVar.SelectableTextAlign, new Vector2(0.5f, 0.5f)))
             {
-                activeTabId = tab.Id;
-                activeWhisperTarget = string.Empty;
-            }
-
-            ImGui.PopID();
-            ImGui.SameLine();
-        }
-
-        foreach (var target in myWhispers)
-        {
-            ImGui.PushID(target);
-
-            var isSelected = activeWhisperTarget == target;
-            var label = ChatWindow.FirstName(target);
-            var tabWidth = ImGui.CalcTextSize(label).X + ImGui.GetStyle().FramePadding.X * 2f;
-            var tabSize = new Vector2(tabWidth, lineHeight);
-
-            var whisperBg = config.WhisperTabBackgroundColours.TryGetValue(target, out var customBg)
-                ? customBg
-                : config.TabStripBackgroundColorEnabled ? config.TabStripBackgroundColor : (Vector4?)null;
-            ChatWindow.DrawTabBackgroundFill(whisperBg, tabSize);
-            var clicked = ImGui.Selectable(label + "##secWhisper", isSelected, ImGuiSelectableFlags.None, tabSize);
-
-            TabDragHelper.HandleHoverAndTearOff(target, label, _ => { });
-
-            if (TabDragHelper.DrawReorderTarget(target, out var insertWhisperBefore) is { } droppedTargetName
-                && !Guid.TryParse(droppedTargetName, out _))
-            {
-                plugin.MoveWhisperToSecondaryWindow(droppedTargetName);
-
-                var draggedIndex = state.RecentWhisperTargets.IndexOf(droppedTargetName);
-                if (draggedIndex >= 0)
+                foreach (var tab in myTabs)
                 {
-                    state.RecentWhisperTargets.RemoveAt(draggedIndex);
-                    var targetIndex = state.RecentWhisperTargets.IndexOf(target);
-                    state.RecentWhisperTargets.Insert(insertWhisperBefore ? targetIndex : targetIndex + 1, droppedTargetName);
-                    plugin.SaveConfiguration();
+                    using var id = ImRaii.PushId(tab.Id.ToString());
+
+                    var isSelected = string.IsNullOrEmpty(activeWhisperTarget) && activeTabId == tab.Id;
+                    var tabWidth = ImGui.CalcTextSize(tab.Name).X + ImGui.GetStyle().FramePadding.X * 2f;
+                    var tabSize = new Vector2(tabWidth, lineHeight);
+
+                    ChatWindow.DrawTabBackgroundFill(tab.BackgroundColor ?? (config.TabStripBackgroundColorEnabled ? config.TabStripBackgroundColor : (Vector4?)null), tabSize);
+                    var clicked = ImGui.Selectable(tab.Name + "##secTab", isSelected, ImGuiSelectableFlags.None, tabSize);
+
+                    TabDragHelper.HandleHoverAndTearOff(tab.Id.ToString(), tab.Name, _ => { });
+
+                    if (TabDragHelper.DrawReorderTarget(tab.Id.ToString(), out var insertBefore) is { } droppedTabIdStr
+                        && Guid.TryParse(droppedTabIdStr, out var droppedTabId2))
+                    {
+                        plugin.MoveTabToSecondaryWindow(droppedTabId2);
+
+                        var draggedIndex = config.ChatTabs.FindIndex(t => t.Id == droppedTabId2);
+                        if (draggedIndex >= 0)
+                        {
+                            var draggedTab = config.ChatTabs[draggedIndex];
+                            config.ChatTabs.RemoveAt(draggedIndex);
+                            var targetIndex = config.ChatTabs.IndexOf(tab);
+                            config.ChatTabs.Insert(insertBefore ? targetIndex : targetIndex + 1, draggedTab);
+                            plugin.SaveConfiguration();
+                        }
+                    }
+
+                    if (clicked && !isSelected)
+                    {
+                        activeTabId = tab.Id;
+                        activeWhisperTarget = string.Empty;
+                    }
+
+                    ImGui.SameLine();
+                }
+
+                foreach (var target in myWhispers)
+                {
+                    using var id = ImRaii.PushId(target);
+
+                    var isSelected = activeWhisperTarget == target;
+                    var label = ChatWindow.FirstName(target);
+                    var tabWidth = ImGui.CalcTextSize(label).X + ImGui.GetStyle().FramePadding.X * 2f;
+                    var tabSize = new Vector2(tabWidth, lineHeight);
+
+                    var whisperBg = config.WhisperTabBackgroundColours.TryGetValue(target, out var customBg)
+                        ? customBg
+                        : config.TabStripBackgroundColorEnabled ? config.TabStripBackgroundColor : (Vector4?)null;
+                    ChatWindow.DrawTabBackgroundFill(whisperBg, tabSize);
+                    var clicked = ImGui.Selectable(label + "##secWhisper", isSelected, ImGuiSelectableFlags.None, tabSize);
+
+                    TabDragHelper.HandleHoverAndTearOff(target, label, _ => { });
+
+                    if (TabDragHelper.DrawReorderTarget(target, out var insertWhisperBefore) is { } droppedTargetName
+                        && !Guid.TryParse(droppedTargetName, out _))
+                    {
+                        plugin.MoveWhisperToSecondaryWindow(droppedTargetName);
+
+                        var draggedIndex = state.RecentWhisperTargets.IndexOf(droppedTargetName);
+                        if (draggedIndex >= 0)
+                        {
+                            state.RecentWhisperTargets.RemoveAt(draggedIndex);
+                            var targetIndex = state.RecentWhisperTargets.IndexOf(target);
+                            state.RecentWhisperTargets.Insert(insertWhisperBefore ? targetIndex : targetIndex + 1, droppedTargetName);
+                            plugin.SaveConfiguration();
+                        }
+                    }
+
+                    if (ImGui.IsItemHovered())
+                    {
+                        if (ImGui.IsMouseClicked(ImGuiMouseButton.Middle))
+                        {
+                            plugin.MoveWhisperToMainWindow(target);
+                        }
+                        else if (!ImGui.IsMouseDragging(ImGuiMouseButton.Left))
+                        {
+                            ImGui.SetTooltip(target);
+                        }
+                    }
+
+                    if (clicked && !isSelected)
+                    {
+                        activeTabId = Guid.Empty;
+                        activeWhisperTarget = target;
+                    }
+
+                    ImGui.SameLine();
                 }
             }
 
-            if (ImGui.IsItemHovered())
+            var dragHandleWidth = ImGui.GetContentRegionAvail().X;
+            if (dragHandleWidth > 1f)
             {
-                if (ImGui.IsMouseClicked(ImGuiMouseButton.Middle))
+                ImGui.InvisibleButton("##secondaryDragHandle", new Vector2(dragHandleWidth, lineHeight));
+                if (ImGui.IsItemActive() && ImGui.IsMouseDragging(ImGuiMouseButton.Left))
                 {
-                    plugin.MoveWhisperToMainWindow(target);
+                    ImGui.SetWindowPos(ImGui.GetWindowPos() + ImGui.GetIO().MouseDelta);
                 }
-                else if (!ImGui.IsMouseDragging(ImGuiMouseButton.Left))
+
+                if (ImGui.IsItemHovered())
                 {
-                    ImGui.SetTooltip(target);
+                    ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
                 }
-            }
-
-            if (clicked && !isSelected)
-            {
-                activeTabId = Guid.Empty;
-                activeWhisperTarget = target;
-            }
-
-            ImGui.PopID();
-            ImGui.SameLine();
-        }
-
-        ImGui.PopStyleVar();
-
-        var dragHandleWidth = ImGui.GetContentRegionAvail().X;
-        if (dragHandleWidth > 1f)
-        {
-            ImGui.InvisibleButton("##secondaryDragHandle", new Vector2(dragHandleWidth, lineHeight));
-            if (ImGui.IsItemActive() && ImGui.IsMouseDragging(ImGuiMouseButton.Left))
-            {
-                ImGui.SetWindowPos(ImGui.GetWindowPos() + ImGui.GetIO().MouseDelta);
-            }
-
-            if (ImGui.IsItemHovered())
-            {
-                ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
             }
         }
-
-        ImGui.EndChild();
 
         var stillHaveActiveTab = activeTabId != Guid.Empty && myTabs.Exists(t => t.Id == activeTabId);
         var stillHaveActiveWhisper = activeWhisperTarget.Length > 0 && myWhispers.Contains(activeWhisperTarget);
@@ -440,10 +434,11 @@ internal sealed class SecondaryChatWindow : Window
 
     private void DrawEntry(ChatLogEntry entry, Configuration config, float availableWidth, bool showingWhisper)
     {
-        ImGui.PushID((int)entry.Sequence);
-        ImGui.BeginGroup();
+        using var id = ImRaii.PushId((int)entry.Sequence);
+        using var group = ImRaii.Group();
 
         var channelColor = ChannelDisplay.Color(entry.ChatType, config);
+        var allowRpFormatting = config.AllowsRpFormatting(entry.ChatType);
         var prefixSize = Vector2.Zero;
 
         var timestamp = entry.Timestamp.ToString("HH:mm") + " ";
@@ -505,16 +500,24 @@ internal sealed class SecondaryChatWindow : Window
                 {
                     plugin.OnChatLinkHovered(target.Payload);
                 }
-            });
+            },
+            allowRpFormatting: allowRpFormatting);
 
         ImGui.Spacing();
-
-        ImGui.EndGroup();
-        ImGui.PopID();
     }
 
     private static bool MatchesWhisper(ChatLogEntry entry, string target)
     {
+        var targetNameOnly = target.Split('@')[0];
+
+        // See ChatWindow.MatchesWhisperTarget's matching remarks - a failed-/tell notice never
+        // carries a Sender, so it needs its own RelatedWhisperTarget-based, name-only match instead.
+        if (entry.ChatType == XivChatType.ErrorMessage)
+        {
+            return entry.RelatedWhisperTarget != null
+                && string.Equals(entry.RelatedWhisperTarget, targetNameOnly, StringComparison.OrdinalIgnoreCase);
+        }
+
         if (entry.ChatType != XivChatType.TellIncoming && entry.ChatType != XivChatType.TellOutgoing)
         {
             return false;
@@ -526,6 +529,6 @@ internal sealed class SecondaryChatWindow : Window
             return true;
         }
 
-        return string.Equals(entry.Sender, target.Split('@')[0], StringComparison.OrdinalIgnoreCase);
+        return string.Equals(entry.Sender, targetNameOnly, StringComparison.OrdinalIgnoreCase);
     }
 }

@@ -7,6 +7,7 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Game.Text;
 using Dalamud.Interface;
 using Dalamud.Interface.Components;
+using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 using CelinesChat.Services;
 
@@ -17,6 +18,12 @@ internal sealed class ChatWindow : Window
     private const string GenericDraftKey = "*generic*";
     private const float SplitterHeight = 6f;
     private const float MaxComposeAreaHeight = 400f;
+
+    // Caps the "Inside" embedded preview's own height with a scrollbar instead of letting it (and
+    // therefore the whole compose area, via minComposeAreaHeight) grow without bound for a message
+    // split into many chunks - a long draft stayed fully visible before this, but at the cost of the
+    // entire chat window growing to match, easily pushing the actual chat log out of view entirely.
+    private const float EmbeddedPreviewHeight = 160f;
 
     private const float FooterBottomPaddingPx = 6f;
 
@@ -34,6 +41,7 @@ internal sealed class ChatWindow : Window
     private string validationMessage = string.Empty;
     private string newSnippetName = string.Empty;
     private string snippetSearchFilter = string.Empty;
+    private string channelPickerWhisperInput = string.Empty;
     private string activeWhisperTabTarget = string.Empty;
 
     private bool noviceNetworkTabActive;
@@ -46,6 +54,7 @@ internal sealed class ChatWindow : Window
 
     private int? pendingCursorCharIndex;
     private int? stashedCursorCharIndex;
+    private int pinToBottomFramesRemaining;
     private string cachedInput = string.Empty;
     private int cachedMaxLength = -1;
     private List<string> cachedChunks = new();
@@ -247,14 +256,14 @@ internal sealed class ChatWindow : Window
 
         var config = plugin.Configuration;
 
-        ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 0f);
-        ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 4f);
-        ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(6f, 4f));
-        ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 6f);
-        ImGui.PushStyleVar(ImGuiStyleVar.PopupRounding, 6f);
-        ImGui.PushStyleVar(ImGuiStyleVar.ScrollbarRounding, 6f);
-        ImGui.PushStyleVar(ImGuiStyleVar.GrabRounding, 4f);
-        ImGui.PushStyleVar(ImGuiStyleVar.TabRounding, 4f);
+        using var style = ImRaii.PushStyle(ImGuiStyleVar.WindowRounding, 0f)
+            .Push(ImGuiStyleVar.FrameRounding, 4f)
+            .Push(ImGuiStyleVar.FramePadding, new Vector2(6f, 4f))
+            .Push(ImGuiStyleVar.ChildRounding, 6f)
+            .Push(ImGuiStyleVar.PopupRounding, 6f)
+            .Push(ImGuiStyleVar.ScrollbarRounding, 6f)
+            .Push(ImGuiStyleVar.GrabRounding, 4f)
+            .Push(ImGuiStyleVar.TabRounding, 4f);
         var state = plugin.GetCharacterState();
 
         if (plugin.PendingWhisperTarget is { } pendingTarget)
@@ -314,18 +323,23 @@ internal sealed class ChatWindow : Window
         // getting clipped off the bottom of the window.
         var previewReserve = config.PreviewPosition == PreviewPosition.Inside ? measuredEmbeddedPreviewHeight : 0f;
         var minComposeAreaHeight = minInputBoxHeight + measuredFooterHeight + previewReserve;
-        var composeAreaHeight = Math.Clamp(config.ComposeAreaHeight, minComposeAreaHeight, MaxComposeAreaHeight);
+
+        // MaxComposeAreaHeight is only a sensible ceiling as long as it's actually reachable - a long
+        // embedded preview (config.PreviewPosition.Inside) can genuinely need more room than that to
+        // avoid clipping/overlap, and minComposeAreaHeight grows with it uncapped. Letting the max
+        // grow to match whenever the real minimum exceeds it keeps Math.Clamp's own min <= max
+        // requirement satisfied instead of throwing, and means content stays fully visible rather
+        // than getting silently squeezed to fit a ceiling that no longer makes sense.
+        var composeAreaHeight = Math.Clamp(config.ComposeAreaHeight, minComposeAreaHeight, MathF.Max(minComposeAreaHeight, MaxComposeAreaHeight));
         var inputBoxHeight = Math.Max(minInputBoxHeight, composeAreaHeight - measuredFooterHeight - previewReserve);
 
-        ImGui.PushStyleColor(ImGuiCol.ChildBg, new Vector4(0f, 0f, 0f, config.ChatLogBackgroundOpacity));
+        using (ImRaii.PushColor(ImGuiCol.ChildBg, new Vector4(0f, 0f, 0f, config.ChatLogBackgroundOpacity)))
+        using (ImRaii.Child("##chatLogScroll", new Vector2(-1, -(composeAreaHeight + SplitterHeight)), true, ImGuiWindowFlags.AlwaysVerticalScrollbar))
+        {
+            ImGui.SetScrollX(0f);
 
-        ImGui.BeginChild("##chatLogScroll", new Vector2(-1, -(composeAreaHeight + SplitterHeight)), true, ImGuiWindowFlags.AlwaysVerticalScrollbar);
-
-        ImGui.SetScrollX(0f);
-
-        DrawChatLogEntries(config, state, composeAreaHeight, inputBoxHeight);
-        ImGui.EndChild();
-        ImGui.PopStyleColor();
+            DrawChatLogEntries(config, state, composeAreaHeight, inputBoxHeight);
+        }
 
         DrawSplitter(config, minComposeAreaHeight);
 
@@ -354,31 +368,36 @@ internal sealed class ChatWindow : Window
             ImGuiP.ClearActiveID();
         }
 
+        DrawChannelPickerButton(config, state);
+        ImGui.SameLine();
+
         if (pendingFocusInput)
         {
             ImGui.SetKeyboardFocusHere();
             pendingFocusInput = false;
         }
 
+        // SendTotal > 1, not just IsSending - a single-message send still briefly has one item queued
+        // (IsSending is just "queue.Count > 0") between Enqueue and the next framework tick actually
+        // dequeuing and sending it, which flashed this whole disabled/progress state for a frame or
+        // two on every single send. The delayed multi-message progress it's meant for only exists at
+        // all once there's more than one message to step through.
+        var sendingMultiMessage = plugin.IsSending && plugin.SendTotal > 1;
+
         ImGui.SetNextItemWidth(-1);
         const ImGuiInputTextFlags composeFlags = ImGuiInputTextFlags.CallbackAlways | ImGuiInputTextFlags.CallbackCharFilter | ImGuiInputTextFlags.AllowTabInput;
         var commandTint = GetCommandTint(config);
-        if (commandTint is { } tint)
+        float inputBoxBottom;
+        using (ImRaii.Disabled(sendingMultiMessage))
+        using (ImRaii.PushColor(ImGuiCol.Text, commandTint))
         {
-            ImGui.PushStyleColor(ImGuiCol.Text, tint);
-        }
+            if (ImGui.InputTextMultiline("##composeText", ref inputText, 4000, new Vector2(-1, inputBoxHeight), composeFlags, TrackTextState))
+            {
+                state.Drafts[currentDraftKey] = inputText;
+                plugin.SaveConfiguration();
+            }
 
-        if (ImGui.InputTextMultiline("##composeText", ref inputText, 4000, new Vector2(-1, inputBoxHeight), composeFlags, TrackTextState))
-        {
-            state.Drafts[currentDraftKey] = inputText;
-            plugin.SaveConfiguration();
-        }
-
-        var inputBoxBottom = ImGui.GetItemRectMax().Y;
-
-        if (commandTint != null)
-        {
-            ImGui.PopStyleColor();
+            inputBoxBottom = ImGui.GetItemRectMax().Y;
         }
 
         composeBoxActive = ImGui.IsItemActive();
@@ -414,27 +433,14 @@ internal sealed class ChatWindow : Window
 
         HandleSendHotkey(state, config);
 
-        // Same FooterBackgroundOpacity as DrawLogTabBar's own row fill (its own TabStripBackgroundOpacity
-        // slider, independently adjustable), but this row's true height isn't known until after
-        // DrawPreviewToggle/the validation message are drawn (it varies by whether a validation
-        // message is showing right now). Rather than wrap it in a new BeginChild sized off a
-        // hand-rolled row-count guess (real risk of drifting from the actual measured content by a
-        // pixel, which is exactly the category of bug this session spent a long time chasing out of
-        // this window), this reuses measuredFooterHeight - already a one-frame-lagged cache of this
-        // exact row's real height, feeding composeAreaHeight below - so the background rect drawn now
-        // (before this frame's content) matches what got measured last frame, same trick this field
-        // already relies on elsewhere.
-        var footerBgOrigin = ImGui.GetCursorScreenPos();
-        ImGui.GetWindowDrawList().AddRectFilled(
-            footerBgOrigin,
-            footerBgOrigin + new Vector2(ImGui.GetContentRegionAvail().X, measuredFooterHeight),
-            ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, config.FooterBackgroundOpacity)));
-
-        DrawPreviewToggle(config, state, chunks);
+        // The footer (channel/count row, whisper indicator, validation message) has no background
+        // fill of its own anymore - always fully transparent, per the user's own explicit request,
+        // rather than an adjustable-but-off-by-default opacity like the tab strip still has.
+        DrawComposeStatusRow(config, state, chunks);
 
         if (state.LastChannel == ChatChannel.Whisper && !string.IsNullOrEmpty(activeWhisperTabTarget))
         {
-            DrawActiveWhisperIndicator(config, activeWhisperTabTarget);
+            DrawActiveWhisperIndicator(config, activeWhisperTabTarget, chunks.Count);
         }
 
         // Used to always reserve a full text line here even with nothing to show, purely so the
@@ -460,21 +466,22 @@ internal sealed class ChatWindow : Window
         // else. Ceiling (not Round) so this never under-reserves space by rounding down.
         measuredFooterHeight = MathF.Ceiling(Math.Max(0f, ImGui.GetCursorScreenPos().Y - inputBoxBottom) + FooterBottomPaddingPx);
 
-        ImGui.PopStyleVar(8);
+        DrawSendingOverlay();
     }
 
     private void DrawSplitter(Configuration config, float minComposeAreaHeight)
     {
-        ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(1f, 1f, 1f, 0.06f));
-        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(1f, 1f, 1f, 0.16f));
-        ImGui.PushStyleColor(ImGuiCol.ButtonActive, new Vector4(1f, 1f, 1f, 0.26f));
-        ImGui.Button("##chatSplitter", new Vector2(-1, SplitterHeight));
-        ImGui.PopStyleColor(3);
+        using (ImRaii.PushColor(ImGuiCol.Button, new Vector4(1f, 1f, 1f, 0.06f))
+                   .Push(ImGuiCol.ButtonHovered, new Vector4(1f, 1f, 1f, 0.16f))
+                   .Push(ImGuiCol.ButtonActive, new Vector4(1f, 1f, 1f, 0.26f)))
+        {
+            ImGui.Button("##chatSplitter", new Vector2(-1, SplitterHeight));
+        }
 
         if (ImGui.IsItemActive())
         {
             splitterDragging = true;
-            config.ComposeAreaHeight = Math.Clamp(config.ComposeAreaHeight - ImGui.GetIO().MouseDelta.Y, minComposeAreaHeight, MaxComposeAreaHeight);
+            config.ComposeAreaHeight = Math.Clamp(config.ComposeAreaHeight - ImGui.GetIO().MouseDelta.Y, minComposeAreaHeight, MathF.Max(minComposeAreaHeight, MaxComposeAreaHeight));
         }
         else if (splitterDragging)
         {
@@ -500,18 +507,10 @@ internal sealed class ChatWindow : Window
             ImGui.SetTooltip(CurrentChannelLabel(state));
         }
 
-        ImGui.SameLine();
-        var channelColor = state.LastChannel switch
+        using var popup = ImRaii.Popup("##channelPicker");
+        if (popup.Success)
         {
-            ChatChannel.Linkshell => ChannelDisplay.LinkshellColor(state.LinkshellNumber, config),
-            ChatChannel.CrossWorldLinkshell => ChannelDisplay.CrossWorldLinkshellColor(state.CrossWorldLinkshellNumber, config),
-            _ => ChannelDisplay.Color(CategoryForChannel(state.LastChannel), config),
-        };
-        ImGui.TextColored(channelColor, CurrentChannelLabel(state));
-
-        if (ImGui.BeginPopup("##channelPicker"))
-        {
-            DrawChannelOption(config, state, ChatChannel.Whisper, Loc.T("Channel.Whisper"));
+            DrawWhisperChannelMenu(state);
             DrawChannelOption(config, state, ChatChannel.Say, Loc.T("Channel.Say"));
             DrawChannelOption(config, state, ChatChannel.Party, Loc.T("Channel.Party"));
             DrawChannelOption(config, state, ChatChannel.Alliance, Loc.T("Channel.Alliance"));
@@ -540,9 +539,77 @@ internal sealed class ChatWindow : Window
                     DrawNumberedChannelOption(config, state, ChatChannel.Linkshell, number, $"{Loc.T("Channel.Linkshell")} [{number}]: {name}");
                 }
             }
-
-            ImGui.EndPopup();
         }
+    }
+
+    // A plain DrawChannelOption(Whisper) routed through SelectChannel, which - for Whisper
+    // specifically - skips straight to re-opening a tab with state.LastWhisperTarget whenever that's
+    // non-empty (originally meant as a "continue where you left off" shortcut). In practice that
+    // stale target is often not what's wanted right now (even the player's own name, left over from
+    // testing) and there was no way to type a different one from here - reported as "opens a whisper
+    // tab with myself instead of asking who to whisper". This submenu always asks instead.
+    private void DrawWhisperChannelMenu(CharacterState state)
+    {
+        using var menu = ImRaii.Menu(Loc.T("Channel.Whisper"));
+        if (!menu.Success)
+        {
+            return;
+        }
+
+        ImGui.SetNextItemWidth(200);
+        if (ImGui.InputTextWithHint("##channelPickerWhisperTarget", Loc.T("Whisper.TargetHint"), ref channelPickerWhisperInput, 100, ImGuiInputTextFlags.EnterReturnsTrue))
+        {
+            TryOpenWhisperFromChannelPicker();
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button(Loc.T("Whisper.Open")))
+        {
+            TryOpenWhisperFromChannelPicker();
+        }
+
+        var partyMembers = plugin.GetPartyMemberNames();
+        if (partyMembers.Count > 0)
+        {
+            ImGui.Separator();
+            ImGui.TextDisabled(Loc.T("Whisper.SuggestionsParty"));
+            foreach (var name in partyMembers)
+            {
+                if (ImGui.Selectable(name + "##channelPickerWhisperParty"))
+                {
+                    plugin.OpenWhisperTab(name);
+                    ImGui.CloseCurrentPopup();
+                }
+            }
+        }
+
+        var recents = state.RecentWhisperTargets;
+        if (recents.Count > 0)
+        {
+            ImGui.Separator();
+            ImGui.TextDisabled(Loc.T("Whisper.SuggestionsRecent"));
+            foreach (var name in recents)
+            {
+                if (ImGui.Selectable(name + "##channelPickerWhisperRecent"))
+                {
+                    plugin.OpenWhisperTab(name);
+                    ImGui.CloseCurrentPopup();
+                }
+            }
+        }
+    }
+
+    private void TryOpenWhisperFromChannelPicker()
+    {
+        var target = channelPickerWhisperInput.Trim();
+        if (target.Length == 0)
+        {
+            return;
+        }
+
+        plugin.OpenWhisperTab(target);
+        channelPickerWhisperInput = string.Empty;
+        ImGui.CloseCurrentPopup();
     }
 
     private void DrawChannelOption(Configuration config, CharacterState state, ChatChannel channel, string label)
@@ -596,10 +663,8 @@ internal sealed class ChatWindow : Window
         {
             if (colorOverride is { } classicColor)
             {
-                ImGui.PushStyleColor(ImGuiCol.Text, classicColor);
-                var clicked = ImGuiComponents.IconButton(icon);
-                ImGui.PopStyleColor();
-                return clicked;
+                using var color = ImRaii.PushColor(ImGuiCol.Text, classicColor);
+                return ImGuiComponents.IconButton(icon);
             }
 
             return ImGuiComponents.IconButton(icon);
@@ -621,11 +686,13 @@ internal sealed class ChatWindow : Window
             ImGui.SetTooltip(Loc.T("ChatLog.SearchButtonTooltip"));
         }
 
-        if (ImGui.BeginPopupContextItem("##logSearchPopup"))
+        using (var searchPopup = ImRaii.ContextPopupItem("##logSearchPopup"))
         {
-            ImGui.SetNextItemWidth(200);
-            ImGui.InputTextWithHint("##chatLogSearch", Loc.T("ChatLog.SearchHint"), ref logSearchFilter, 200);
-            ImGui.EndPopup();
+            if (searchPopup.Success)
+            {
+                ImGui.SetNextItemWidth(200);
+                ImGui.InputTextWithHint("##chatLogSearch", Loc.T("ChatLog.SearchHint"), ref logSearchFilter, 200);
+            }
         }
 
         var showingWhisperForHistory = !string.IsNullOrEmpty(activeWhisperTabTarget);
@@ -710,21 +777,22 @@ internal sealed class ChatWindow : Window
             ImGui.SetTooltip(Loc.T("Compose.WindowLock"));
         }
 
-        if (ImGui.BeginPopup("##windowLockMenu"))
+        using (var lockPopup = ImRaii.Popup("##windowLockMenu"))
         {
-            if (ImGui.Checkbox(Loc.T("Compose.WindowLockPosition"), ref lockPosition))
+            if (lockPopup.Success)
             {
-                plugin.Configuration.ChatWindowLockPosition = lockPosition;
-                plugin.SaveConfiguration();
-            }
+                if (ImGui.Checkbox(Loc.T("Compose.WindowLockPosition"), ref lockPosition))
+                {
+                    plugin.Configuration.ChatWindowLockPosition = lockPosition;
+                    plugin.SaveConfiguration();
+                }
 
-            if (ImGui.Checkbox(Loc.T("Compose.WindowLockSize"), ref lockSize))
-            {
-                plugin.Configuration.ChatWindowLockSize = lockSize;
-                plugin.SaveConfiguration();
+                if (ImGui.Checkbox(Loc.T("Compose.WindowLockSize"), ref lockSize))
+                {
+                    plugin.Configuration.ChatWindowLockSize = lockSize;
+                    plugin.SaveConfiguration();
+                }
             }
-
-            ImGui.EndPopup();
         }
 
         ImGui.SameLine();
@@ -749,19 +817,20 @@ internal sealed class ChatWindow : Window
             ImGui.SetTooltip(Loc.T("NoviceNetwork.MenuTooltip"));
         }
 
-        if (ImGui.BeginPopup("##noviceNetworkMenu"))
+        using (var noviceNetworkPopup = ImRaii.Popup("##noviceNetworkMenu"))
         {
-            if (ImGui.Selectable(Loc.T("NoviceNetwork.Join")))
+            if (noviceNetworkPopup.Success)
             {
-                NoviceNetworkService.Connect(plugin.Log);
-            }
+                if (ImGui.Selectable(Loc.T("NoviceNetwork.Join")))
+                {
+                    NoviceNetworkService.Connect(plugin.Log);
+                }
 
-            if (ImGui.Selectable(Loc.T("NoviceNetwork.Leave")))
-            {
-                NoviceNetworkService.Disconnect(plugin.Log);
+                if (ImGui.Selectable(Loc.T("NoviceNetwork.Leave")))
+                {
+                    NoviceNetworkService.Disconnect(plugin.Log);
+                }
             }
-
-            ImGui.EndPopup();
         }
 
         ImGui.SameLine();
@@ -798,7 +867,8 @@ internal sealed class ChatWindow : Window
 
     private void DrawHistoryDatesPopup()
     {
-        if (!ImGui.BeginPopup("##historyDatesPopup"))
+        using var popup = ImRaii.Popup("##historyDatesPopup");
+        if (!popup.Success)
         {
             return;
         }
@@ -808,14 +878,13 @@ internal sealed class ChatWindow : Window
         if (dates.Count == 0 && whisperTargets.Count == 0)
         {
             ImGui.TextDisabled(Loc.T("ChatLog.NoHistoryFiles"));
-            ImGui.EndPopup();
             return;
         }
 
         ImGui.SetNextItemWidth(220);
         ImGui.InputTextWithHint("##historyDateSearch", Loc.T("ChatLog.HistorySearchHint"), ref historySearchFilter, 40);
 
-        ImGui.BeginChild("##historyDateList", new Vector2(220, 260), true);
+        using var dateList = ImRaii.Child("##historyDateList", new Vector2(220, 260), true);
 
         var anyDateShown = false;
         foreach (var date in dates)
@@ -876,15 +945,12 @@ internal sealed class ChatWindow : Window
         {
             ImGui.TextDisabled(Loc.T("ChatLog.NoHistoryFiles"));
         }
-
-        ImGui.EndChild();
-
-        ImGui.EndPopup();
     }
 
     private void DrawClearTabConfirmationPopup(Configuration config)
     {
-        if (!ImGui.BeginPopupModal("##confirmClearTab", ImGuiWindowFlags.AlwaysAutoResize))
+        using var modal = ImRaii.PopupModal("##confirmClearTab", ImGuiWindowFlags.AlwaysAutoResize);
+        if (!modal.Success)
         {
             return;
         }
@@ -925,8 +991,6 @@ internal sealed class ChatWindow : Window
         {
             ImGui.CloseCurrentPopup();
         }
-
-        ImGui.EndPopup();
     }
 
     private void DrawChatLogEntries(Configuration config, CharacterState state, float composeAreaHeight, float inputBoxHeight)
@@ -1165,11 +1229,25 @@ internal sealed class ChatWindow : Window
             if (config.ScrollToBottomOnTabSwitch || !viewScrollPositions.TryGetValue(viewKey, out var savedScrollY))
             {
                 ImGui.SetScrollHereY(1f);
+
+                // Whisper tabs (unlike fixed tabs) can take a frame or two beyond this one for their
+                // content to finish merging/measuring (whisperPreload file-history merged against the
+                // live list) - GetScrollMaxY() here can still reflect a lower, not-yet-final height,
+                // so a single SetScrollHereY on just this frame locks onto a target short of the real
+                // bottom once the true height is established. Re-pinning for a few more frames covers
+                // that lag without needing to special-case whisper tabs directly.
+                pinToBottomFramesRemaining = 5;
             }
             else
             {
                 ImGui.SetScrollY(savedScrollY);
+                pinToBottomFramesRemaining = 0;
             }
+        }
+        else if (pinToBottomFramesRemaining > 0)
+        {
+            pinToBottomFramesRemaining--;
+            ImGui.SetScrollHereY(1f);
         }
         else if (hasNewOwnMessageInView || (!viewingHistory && hasNewEntries && nearBottomBeforeDraw))
         {
@@ -1264,99 +1342,101 @@ internal sealed class ChatWindow : Window
 
     private void DrawLogEntry(ChatLogEntry entry, Configuration config, string mentionTerm, float availableWidth, bool showingWhisper)
     {
-        ImGui.PushID((int)entry.Sequence);
-        ImGui.BeginGroup();
+        using var id = ImRaii.PushId((int)entry.Sequence);
 
         var prefixSize = Vector2.Zero;
         var channelColor = ChannelDisplay.Color(entry.ChatType, config);
-
-        var timestamp = entry.Timestamp.ToString("HH:mm") + " ";
-        ImGui.TextColored(config.TimestampColor, timestamp);
-        ImGui.SameLine(0, 0);
-        prefixSize += ImGui.CalcTextSize(timestamp);
-
-        var tag = ChannelDisplay.DisplayTag(entry.ChatType) + " ";
-        ImGui.TextColored(channelColor, tag);
-        ImGui.SameLine(0, 0);
-        prefixSize += ImGui.CalcTextSize(tag);
-
-        var isOutgoingTell = entry.ChatType == XivChatType.TellOutgoing;
-        if (!isOutgoingTell && config.ShowSenderStatusIcons)
-        {
-            prefixSize.X += StatusIconRenderer.Draw(plugin, entry.SenderPayloads);
-        }
-
-        var displayName = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
-
-        var rawName = isOutgoingTell && showingWhisper ? plugin.OwnCharacterName : displayName;
-
-        var namePart = string.IsNullOrEmpty(rawName) ? string.Empty : rawName + ": ";
-
-        var senderColor = isOutgoingTell
-            ? config.SendAccentColor
-            : logSearchFilter.Length > 0 && entry.Sender.Contains(logSearchFilter, StringComparison.OrdinalIgnoreCase)
-                ? SearchHighlightColor
-                : entry.ChatType == XivChatType.TellIncoming
-                    ? ChannelDisplay.WhisperColor(displayName, config)
-                    : channelColor;
-        ImGui.TextColored(senderColor, namePart);
-
+        var allowRpFormatting = config.AllowsRpFormatting(entry.ChatType);
         var nameHovered = false;
         var whisperTarget = string.Empty;
         var nameRectMin = Vector2.Zero;
         var nameRectMax = Vector2.Zero;
+        Vector4 senderColor;
+        var isOutgoingTell = entry.ChatType == XivChatType.TellOutgoing;
 
-        if (!IsSelfAuthored(entry))
+        using (ImRaii.Group())
         {
-            nameHovered = ImGui.IsItemHovered();
-            var nameClicked = ImGui.IsItemClicked();
-            nameRectMin = ImGui.GetItemRectMin();
-            nameRectMax = ImGui.GetItemRectMax();
-            whisperTarget = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
+            var timestamp = entry.Timestamp.ToString("HH:mm") + " ";
+            ImGui.TextColored(config.TimestampColor, timestamp);
+            ImGui.SameLine(0, 0);
+            prefixSize += ImGui.CalcTextSize(timestamp);
 
-            if (nameHovered && nameClicked && ImGui.GetIO().KeyCtrl)
+            var tag = ChannelDisplay.DisplayTag(entry.ChatType) + " ";
+            ImGui.TextColored(channelColor, tag);
+            ImGui.SameLine(0, 0);
+            prefixSize += ImGui.CalcTextSize(tag);
+
+            if (!isOutgoingTell && config.ShowSenderStatusIcons)
             {
-                OpenWhisperTabWithHistory(whisperTarget);
+                prefixSize.X += StatusIconRenderer.Draw(plugin, entry.SenderPayloads);
             }
+
+            var displayName = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
+
+            var rawName = isOutgoingTell && showingWhisper ? plugin.OwnCharacterName : displayName;
+
+            var namePart = string.IsNullOrEmpty(rawName) ? string.Empty : rawName + ": ";
+
+            senderColor = isOutgoingTell
+                ? config.SendAccentColor
+                : logSearchFilter.Length > 0 && entry.Sender.Contains(logSearchFilter, StringComparison.OrdinalIgnoreCase)
+                    ? SearchHighlightColor
+                    : entry.ChatType == XivChatType.TellIncoming
+                        ? ChannelDisplay.WhisperColor(displayName, config)
+                        : channelColor;
+            ImGui.TextColored(senderColor, namePart);
+
+            if (!IsSelfAuthored(entry) && entry.IsRealPlayer)
+            {
+                nameHovered = ImGui.IsItemHovered();
+                var nameClicked = ImGui.IsItemClicked();
+                nameRectMin = ImGui.GetItemRectMin();
+                nameRectMax = ImGui.GetItemRectMax();
+                whisperTarget = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
+
+                if (nameHovered && nameClicked && ImGui.GetIO().KeyCtrl)
+                {
+                    OpenWhisperTabWithHistory(whisperTarget);
+                }
+            }
+
+            var namePartSize = ImGui.CalcTextSize(namePart);
+
+            ImGui.SameLine(0, 0);
+            ColoredTextRenderer.DrawForEntry(
+                entry,
+                channelColor,
+                config.EmoteTextColor,
+                config.OocTextColor,
+                config.MentionColor,
+                LinkColor,
+                availableWidth,
+                mentionTerm,
+                prefixSize.X + namePartSize.X,
+                logSearchFilter,
+                SearchHighlightColor,
+                target =>
+                {
+                    if (target.Url != null)
+                    {
+                        OpenUrl(target.Url, plugin);
+                    }
+                    else if (target.Payload != null && entry.Payloads != null)
+                    {
+                        plugin.HandleChatLinkClicked(target.Payload, entry.Payloads);
+                    }
+                },
+                target =>
+                {
+                    if (target.Payload != null)
+                    {
+                        plugin.OnChatLinkHovered(target.Payload);
+                    }
+                },
+                allowRpFormatting: allowRpFormatting);
+
+            ImGui.Spacing();
         }
-
-        var namePartSize = ImGui.CalcTextSize(namePart);
-
-        ImGui.SameLine(0, 0);
-        ColoredTextRenderer.DrawForEntry(
-            entry,
-            channelColor,
-            config.EmoteTextColor,
-            config.OocTextColor,
-            config.MentionColor,
-            LinkColor,
-            availableWidth,
-            mentionTerm,
-            prefixSize.X + namePartSize.X,
-            logSearchFilter,
-            SearchHighlightColor,
-            target =>
-            {
-                if (target.Url != null)
-                {
-                    OpenUrl(target.Url, plugin);
-                }
-                else if (target.Payload != null && entry.Payloads != null)
-                {
-                    plugin.HandleChatLinkClicked(target.Payload, entry.Payloads);
-                }
-            },
-            target =>
-            {
-                if (target.Payload != null)
-                {
-                    plugin.OnChatLinkHovered(target.Payload);
-                }
-            });
-
-        ImGui.Spacing();
-
-        ImGui.EndGroup();
 
         if (ImGui.IsItemHovered())
         {
@@ -1370,8 +1450,10 @@ internal sealed class ChatWindow : Window
             rightClickedOnName = nameHovered;
         }
 
-        if (ImGui.BeginPopupContextItem("##logEntryContext"))
+        using (var entryContextPopup = ImRaii.ContextPopupItem("##logEntryContext"))
         {
+            if (entryContextPopup.Success)
+            {
             if (!isOutgoingTell && rightClickedOnName)
             {
                 if (ImGui.Selectable(Loc.T("ChatLog.WhisperAction")))
@@ -1395,26 +1477,28 @@ internal sealed class ChatWindow : Window
                     }
                 }
 
-                if (ImGui.BeginMenu(Loc.T("ChatLog.BlockFunctionsMenu")))
+                using (var blockMenu = ImRaii.Menu(Loc.T("ChatLog.BlockFunctionsMenu")))
                 {
-                    if (ImGui.Selectable(Loc.T("ChatLog.AddToBlacklistAction")))
+                    if (blockMenu.Success)
                     {
-                        plugin.AddToBlacklist(entry.Sender, entry.SenderWorld);
-                    }
+                        if (ImGui.Selectable(Loc.T("ChatLog.AddToBlacklistAction")))
+                        {
+                            plugin.AddToBlacklist(entry.Sender, entry.SenderWorld);
+                        }
 
-                    ImGui.BeginDisabled(entry.AccountId == 0);
-                    if (ImGui.Selectable(Loc.T("ChatLog.AddToMuteListAction")))
-                    {
-                        plugin.AddToMuteList(entry.Sender, entry.SenderWorld, entry.ContentId, entry.AccountId);
-                    }
+                        using (ImRaii.Disabled(entry.AccountId == 0))
+                        {
+                            if (ImGui.Selectable(Loc.T("ChatLog.AddToMuteListAction")))
+                            {
+                                plugin.AddToMuteList(entry.Sender, entry.SenderWorld, entry.ContentId, entry.AccountId);
+                            }
+                        }
 
-                    ImGui.EndDisabled();
-                    if (entry.AccountId == 0 && ImGui.IsItemHovered())
-                    {
-                        ImGui.SetTooltip(Loc.T("ChatLog.AddToMuteListUnavailable"));
+                        if (entry.AccountId == 0 && ImGui.IsItemHovered())
+                        {
+                            ImGui.SetTooltip(Loc.T("ChatLog.AddToMuteListUnavailable"));
+                        }
                     }
-
-                    ImGui.EndMenu();
                 }
 
                 if (ImGui.Selectable(Loc.T("ChatLog.InviteNoviceNetworkAction")))
@@ -1444,8 +1528,7 @@ internal sealed class ChatWindow : Window
             {
                 ImGui.SetClipboardText($"{entry.Sender}: {entry.Text}");
             }
-
-            ImGui.EndPopup();
+            }
         }
 
         if (nameHovered)
@@ -1459,8 +1542,6 @@ internal sealed class ChatWindow : Window
                 new Vector2(nameRectMax.X, underlineY),
                 ImGui.GetColorU32(senderColor));
         }
-
-        ImGui.PopID();
     }
 
     private void SyncDraft(CharacterState state)
@@ -1600,7 +1681,8 @@ internal sealed class ChatWindow : Window
 
     private void DrawAutoTranslatePopup(CharacterState state)
     {
-        if (!ImGui.BeginPopup("##autoTranslatePopup"))
+        using var popup = ImRaii.Popup("##autoTranslatePopup");
+        if (!popup.Success)
         {
             return;
         }
@@ -1614,7 +1696,7 @@ internal sealed class ChatWindow : Window
         ImGui.InputTextWithHint("##autoTranslateSearch", Loc.T("Compose.AutoTranslateSearchHint"), ref autoTranslateSearch, 100);
 
         ImGui.Separator();
-        ImGui.BeginChild("##autoTranslateList", new Vector2(300, 300));
+        using var list = ImRaii.Child("##autoTranslateList", new Vector2(300, 300));
 
         if (autoTranslateSearch.Length > 0)
         {
@@ -1670,9 +1752,6 @@ internal sealed class ChatWindow : Window
                 }
             }
         }
-
-        ImGui.EndChild();
-        ImGui.EndPopup();
     }
 
     private void InsertAutoTranslateEntry(CharacterState state, AutoTranslateService.Entry entry)
@@ -1836,25 +1915,108 @@ internal sealed class ChatWindow : Window
         }
     }
 
-    private void DrawPreviewToggle(Configuration config, CharacterState state, List<string> chunks)
+    // Active channel bottom-left, message count bottom-right - moved down here (off the button row
+    // the channel picker's icon shares with the compose box now) per a Photoshop mockup the user
+    // provided, matching the compact "icon beside the input field" layout of the vanilla chat log.
+    private void DrawComposeStatusRow(Configuration config, CharacterState state, List<string> chunks)
     {
-        DrawChannelPickerButton(config, state);
-
-        ImGui.SameLine();
-        ImGui.TextDisabled(Loc.T("Compose.MessageCount", chunks.Count));
-
-        if (plugin.IsSending)
+        // Skipped entirely (channel label AND message count) while a dedicated whisper tab is active -
+        // DrawActiveWhisperIndicator draws its own row right below this one either way, so leaving
+        // this row empty just wasted a whole row's height only in whisper tabs, making the compose
+        // area visibly taller there than in a fixed tab. The count moved into that row instead (see
+        // its own remarks), keeping exactly one footer row's height the same in both cases.
+        if (!string.IsNullOrEmpty(activeWhisperTabTarget))
         {
-            var done = plugin.SendTotal - plugin.SendRemaining;
-            ImGui.SameLine();
-            ImGui.TextUnformatted(Loc.T("Compose.Sending", done, plugin.SendTotal));
-            ImGui.SameLine();
-            if (ImGuiComponents.IconButton(FontAwesomeIcon.Ban, new Vector4(0.55f, 0.18f, 0.18f, 1f), new Vector4(0.55f, 0.18f, 0.18f, 1f), new Vector4(0.68f, 0.22f, 0.22f, 1f)))
+            return;
+        }
+
+        var channelColor = GetActiveChannelColor(config, state);
+        ImGui.TextColored(channelColor, CurrentChannelLabel(state));
+        ImGui.SameLine();
+
+        var countText = Loc.T("Compose.MessageCount", chunks.Count);
+        var countWidth = ImGui.CalcTextSize(countText).X;
+        var avail = ImGui.GetContentRegionAvail().X;
+        if (avail > countWidth)
+        {
+            ImGui.SetCursorPosX(ImGui.GetCursorPosX() + avail - countWidth);
+        }
+
+        ImGui.TextDisabled(countText);
+    }
+
+    // Whole-window dimming with the progress bar and Cancel button centered in the middle, rather
+    // than a plain inline row - per the user's own follow-up request after seeing the first version
+    // (an inline progress row) drawn as a normal row here.
+    //
+    // Everything here is drawn manually onto the foreground draw list (GetForegroundDrawList(), which
+    // paints above every window with no clipping) rather than as normal ImGui widgets on the window's
+    // own draw list - submitting real widgets this late in Draw() (after the compose box and its
+    // frame background were already drawn earlier in the same call) still left them rendering behind
+    // the compose box rather than over it, self-reported by the user after the first version of this.
+    // The Cancel "button" is a plain rect + text with its own manual hover/click test
+    // (IsMouseHoveringRect + IsMouseClicked) since a real ImGui widget can't be submitted to the
+    // foreground draw list at all - only raw shapes/text can.
+    private void DrawSendingOverlay()
+    {
+        if (!(plugin.IsSending && plugin.SendTotal > 1))
+        {
+            return;
+        }
+
+        var windowPos = ImGui.GetWindowPos();
+        var windowSize = ImGui.GetWindowSize();
+        var drawList = ImGui.GetForegroundDrawList();
+        drawList.AddRectFilled(windowPos, windowPos + windowSize, ImGui.GetColorU32(new Vector4(0f, 0f, 0f, 0.6f)));
+
+        var done = plugin.SendTotal - plugin.SendRemaining;
+        var fraction = Math.Clamp(plugin.SendTotal > 0 ? (float)done / plugin.SendTotal : 0f, 0f, 1f);
+        var progressText = Loc.T("Compose.Sending", done, plugin.SendTotal);
+        var cancelLabel = Loc.T("Compose.Cancel");
+        var textColor = ImGui.GetColorU32(new Vector4(1f, 1f, 1f, 1f));
+
+        var barWidth = Math.Clamp(windowSize.X - 80f, 80f, 280f);
+        var barHeight = ImGui.GetFrameHeight();
+        var cancelTextSize = ImGui.CalcTextSize(cancelLabel);
+        var cancelSize = new Vector2(cancelTextSize.X + 28f, barHeight);
+        const float rowSpacing = 10f;
+        var blockSize = new Vector2(MathF.Max(barWidth, cancelSize.X), barHeight + rowSpacing + cancelSize.Y);
+        var blockPos = windowPos + (windowSize - blockSize) * 0.5f;
+
+        var barPos = new Vector2(blockPos.X + (blockSize.X - barWidth) * 0.5f, blockPos.Y);
+        drawList.AddRectFilled(barPos, barPos + new Vector2(barWidth, barHeight), ImGui.GetColorU32(new Vector4(1f, 1f, 1f, 0.14f)), 4f);
+        if (fraction > 0f)
+        {
+            drawList.AddRectFilled(barPos, barPos + new Vector2(barWidth * fraction, barHeight), ImGui.GetColorU32(new Vector4(0.16f, 0.45f, 0.24f, 1f)), 4f);
+        }
+
+        var progressTextSize = ImGui.CalcTextSize(progressText);
+        drawList.AddText(barPos + (new Vector2(barWidth, barHeight) - progressTextSize) * 0.5f, textColor, progressText);
+
+        var cancelPos = new Vector2(blockPos.X + (blockSize.X - cancelSize.X) * 0.5f, barPos.Y + barHeight + rowSpacing);
+        var cancelHovered = ImGui.IsMouseHoveringRect(cancelPos, cancelPos + cancelSize);
+        var cancelColor = cancelHovered
+            ? (ImGui.IsMouseDown(ImGuiMouseButton.Left) ? new Vector4(0.78f, 0.26f, 0.26f, 1f) : new Vector4(0.68f, 0.22f, 0.22f, 1f))
+            : new Vector4(0.55f, 0.18f, 0.18f, 1f);
+        drawList.AddRectFilled(cancelPos, cancelPos + cancelSize, ImGui.GetColorU32(cancelColor), 4f);
+        drawList.AddText(cancelPos + (cancelSize - cancelTextSize) * 0.5f, textColor, cancelLabel);
+
+        if (cancelHovered)
+        {
+            ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
+            if (ImGui.IsMouseClicked(ImGuiMouseButton.Left))
             {
                 plugin.CancelSending();
             }
         }
     }
+
+    private static Vector4 GetActiveChannelColor(Configuration config, CharacterState state) => state.LastChannel switch
+    {
+        ChatChannel.Linkshell => ChannelDisplay.LinkshellColor(state.LinkshellNumber, config),
+        ChatChannel.CrossWorldLinkshell => ChannelDisplay.CrossWorldLinkshellColor(state.CrossWorldLinkshellNumber, config),
+        _ => ChannelDisplay.Color(CategoryForChannel(state.LastChannel), config),
+    };
 
     /// The "Inside" PreviewPosition mode - same click-to-cursor preview PreviewWindow shows, just
     /// embedded directly here in the compose area instead of a separate floating window. Because
@@ -1871,6 +2033,7 @@ internal sealed class ChatWindow : Window
 
         ImGui.Separator();
 
+        using var scrollArea = ImRaii.Child("##embeddedPreviewScroll", new Vector2(-1, EmbeddedPreviewHeight), true, ImGuiWindowFlags.AlwaysVerticalScrollbar);
         var availableWidth = ImGui.GetContentRegionAvail().X;
         for (var i = 0; i < chunks.Count; i++)
         {
@@ -1899,7 +2062,8 @@ internal sealed class ChatWindow : Window
             ImGui.SetTooltip(Loc.T("Compose.RpActionsTooltip"));
         }
 
-        if (!ImGui.BeginPopup("##rpActionsMenu"))
+        using var popup = ImRaii.Popup("##rpActionsMenu");
+        if (!popup.Success)
         {
             return;
         }
@@ -1934,16 +2098,20 @@ internal sealed class ChatWindow : Window
 
         ImGui.Separator();
 
-        if (ImGui.BeginMenu(Loc.T("Compose.Snippets")))
+        using (var snippetsMenu = ImRaii.Menu(Loc.T("Compose.Snippets")))
         {
-            DrawSnippetsMenuContent();
-            ImGui.EndMenu();
+            if (snippetsMenu.Success)
+            {
+                DrawSnippetsMenuContent();
+            }
         }
 
-        if (ImGui.BeginMenu(Loc.T("Compose.History")))
+        using (var historyMenu = ImRaii.Menu(Loc.T("Compose.History")))
         {
-            DrawHistoryMenuContent();
-            ImGui.EndMenu();
+            if (historyMenu.Success)
+            {
+                DrawHistoryMenuContent();
+            }
         }
 
         ImGui.Separator();
@@ -1953,8 +2121,6 @@ internal sealed class ChatWindow : Window
             ImGui.SetClipboardText(inputText);
             ImGui.CloseCurrentPopup();
         }
-
-        ImGui.EndPopup();
     }
 
     private string GetWordAtCursor()
@@ -2028,7 +2194,7 @@ internal sealed class ChatWindow : Window
                 continue;
             }
 
-            ImGui.PushID(i);
+            using var id = ImRaii.PushId(i);
             if (ImGui.Selectable(snippets[i].Name))
             {
                 inputText = string.IsNullOrEmpty(inputText) ? snippets[i].Text : inputText + " " + snippets[i].Text;
@@ -2042,8 +2208,6 @@ internal sealed class ChatWindow : Window
             {
                 removeIndex = i;
             }
-
-            ImGui.PopID();
         }
 
         if (removeIndex >= 0)
@@ -2057,15 +2221,15 @@ internal sealed class ChatWindow : Window
         ImGui.InputText(Loc.T("Compose.SnippetNameLabel"), ref newSnippetName, 60);
         ImGui.SameLine();
         var canSave = !string.IsNullOrWhiteSpace(newSnippetName) && !string.IsNullOrWhiteSpace(inputText);
-        ImGui.BeginDisabled(!canSave);
-        if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.Save, Loc.T("Compose.SaveSnippet")))
+        using (ImRaii.Disabled(!canSave))
         {
-            snippets.Add(new Snippet { Name = newSnippetName, Text = inputText });
-            plugin.SaveConfiguration();
-            newSnippetName = string.Empty;
+            if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.Save, Loc.T("Compose.SaveSnippet")))
+            {
+                snippets.Add(new Snippet { Name = newSnippetName, Text = inputText });
+                plugin.SaveConfiguration();
+                newSnippetName = string.Empty;
+            }
         }
-
-        ImGui.EndDisabled();
     }
 
     private void DrawHistoryMenuContent()
@@ -2089,15 +2253,15 @@ internal sealed class ChatWindow : Window
         }
     }
 
-    private static void DrawActiveWhisperIndicator(Configuration config, string target)
+    private static void DrawActiveWhisperIndicator(Configuration config, string target, int messageCount)
     {
         var color = ChannelDisplay.WhisperColor(target, config);
 
         var lineHeight = MathF.Max(ImGui.GetTextLineHeight(), ImGui.GetFrameHeight()) + 2f;
-        ImGui.PushStyleColor(ImGuiCol.ChildBg, new Vector4(color.X, color.Y, color.Z, 0.16f));
-        ImGui.PushStyleColor(ImGuiCol.Border, new Vector4(color.X, color.Y, color.Z, 0.75f));
-        ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 4f);
-        ImGui.BeginChild("##activeWhisperIndicator", new Vector2(-1, lineHeight), true, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
+        using var indicatorColor = ImRaii.PushColor(ImGuiCol.ChildBg, new Vector4(color.X, color.Y, color.Z, 0.16f))
+            .Push(ImGuiCol.Border, new Vector4(color.X, color.Y, color.Z, 0.75f));
+        using var indicatorRounding = ImRaii.PushStyle(ImGuiStyleVar.ChildRounding, 4f);
+        using var indicatorChild = ImRaii.Child("##activeWhisperIndicator", new Vector2(-1, lineHeight), true, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
 
         // Centered against the child's own actually-measured content height, not
         // AlignTextToFramePadding() - that assumes the surrounding frame height derives from the
@@ -2108,15 +2272,19 @@ internal sealed class ChatWindow : Window
         var contentHeight = ImGui.GetContentRegionAvail().Y;
         var rowStartY = ImGui.GetCursorPosY();
 
-        ImGui.PushFont(UiBuilder.IconFont);
-        var iconText = FontAwesomeIcon.EnvelopeOpen.ToIconString();
-        var iconHeight = ImGui.CalcTextSize(iconText).Y;
-        ImGui.SetCursorPosY(rowStartY + (contentHeight - iconHeight) / 2f);
-        ImGui.TextColored(color, iconText);
-        ImGui.PopFont();
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            var iconText = FontAwesomeIcon.EnvelopeOpen.ToIconString();
+            var iconHeight = ImGui.CalcTextSize(iconText).Y;
+            ImGui.SetCursorPosY(rowStartY + (contentHeight - iconHeight) / 2f);
+            ImGui.TextColored(color, iconText);
+        }
+
         ImGui.SameLine();
 
-        var availableWidth = ImGui.GetContentRegionAvail().X;
+        var countText = Loc.T("Compose.MessageCount", messageCount);
+        var countWidth = ImGui.CalcTextSize(countText).X;
+        var availableWidth = MathF.Max(0f, ImGui.GetContentRegionAvail().X - countWidth - ImGui.GetStyle().ItemSpacing.X);
         var displayTarget = target;
         var fullText = Loc.T("Whisper.ActiveIndicator", displayTarget);
         if (ImGui.CalcTextSize(fullText).X > availableWidth)
@@ -2142,9 +2310,19 @@ internal sealed class ChatWindow : Window
             ImGui.SetTooltip(Loc.T("Whisper.ActiveIndicator", target));
         }
 
-        ImGui.EndChild();
-        ImGui.PopStyleVar();
-        ImGui.PopStyleColor(2);
+        // Right-aligned in this same row (matching DrawComposeStatusRow's own placement for every
+        // other channel) rather than a separate row above it - so a whisper tab and a fixed tab both
+        // occupy exactly one footer row here, keeping the compose area the same height switching
+        // between them instead of a whisper tab always sitting visibly taller.
+        ImGui.SameLine();
+        var avail = ImGui.GetContentRegionAvail().X;
+        if (avail > countWidth)
+        {
+            ImGui.SetCursorPosX(ImGui.GetCursorPosX() + avail - countWidth);
+        }
+
+        ImGui.SetCursorPosY(rowStartY + (contentHeight - ImGui.CalcTextSize(countText).Y) / 2f);
+        ImGui.TextDisabled(countText);
     }
 
     private void DrawWhisperTarget(CharacterState state)
@@ -2159,18 +2337,18 @@ internal sealed class ChatWindow : Window
 
         ImGui.SameLine();
         var currentTargetName = plugin.GetCurrentTargetPlayerName();
-        ImGui.BeginDisabled(currentTargetName == null);
-        if (ImGuiComponents.IconButton(FontAwesomeIcon.Crosshairs))
+        using (ImRaii.Disabled(currentTargetName == null))
         {
-            plugin.OpenWhisperTab(currentTargetName!);
-        }
+            if (ImGuiComponents.IconButton(FontAwesomeIcon.Crosshairs))
+            {
+                plugin.OpenWhisperTab(currentTargetName!);
+            }
 
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip(Loc.T("Whisper.UseTarget"));
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(Loc.T("Whisper.UseTarget"));
+            }
         }
-
-        ImGui.EndDisabled();
 
         ImGui.SameLine();
         if (ImGuiComponents.IconButton(FontAwesomeIcon.Users))
@@ -2183,7 +2361,8 @@ internal sealed class ChatWindow : Window
             ImGui.SetTooltip(Loc.T("Whisper.Suggestions"));
         }
 
-        if (ImGui.BeginPopup("##whisperSuggestions"))
+        using var suggestionsPopup = ImRaii.Popup("##whisperSuggestions");
+        if (suggestionsPopup.Success)
         {
             var partyMembers = plugin.GetPartyMemberNames();
             var recents = state.RecentWhisperTargets;
@@ -2218,9 +2397,14 @@ internal sealed class ChatWindow : Window
                     }
                 }
             }
-
-            ImGui.EndPopup();
         }
+    }
+
+    private static Vector4 BlinkColor()
+    {
+        var pulse = (MathF.Sin(Environment.TickCount64 / 250f) + 1f) * 0.5f;
+        var normal = ImGui.GetStyle().Colors[(int)ImGuiCol.Text];
+        return Vector4.Lerp(normal, SearchHighlightColor, pulse);
     }
 
     private const float TabStripWheelStepPx = 60f;
@@ -2274,12 +2458,11 @@ internal sealed class ChatWindow : Window
     {
         // TabStripBackgroundOpacity - a plain opacity fill behind the *whole* tab bar row (collapse
         // arrow, scroll arrows, and the scrolling tab strip together), separate from
-        // TabStripBackgroundColor (which only tints individual tab buttons' own selection/hover
-        // fill, not this row as a whole) and independently adjustable from the footer's own
-        // FooterBackgroundOpacity. arrowSize/GetFrameHeight() is deterministic from the current
-        // font/style alone, not dependent on anything drawn yet, so this can size and draw itself
-        // before any of the row's own content - no need for the previous-frame-lag trick
-        // DrawPreviewToggle's own equivalent needs below.
+        // TabStripBackgroundColor (which only tints individual tab buttons' own selection/hover fill,
+        // not this row as a whole) - unlike the footer below it, which has no such background fill at
+        // all. arrowSize/GetFrameHeight() is deterministic from the current font/style alone, not
+        // dependent on anything drawn yet, so this can size and draw itself before any of the row's
+        // own content.
         var rowHeight = ImGui.GetFrameHeight();
         var rowOrigin = ImGui.GetCursorScreenPos();
         ImGui.GetWindowDrawList().AddRectFilled(
@@ -2304,29 +2487,35 @@ internal sealed class ChatWindow : Window
         var arrowSize = ImGui.GetFrameHeight();
         var spacing = ImGui.GetStyle().ItemSpacing.X;
 
-        var stripWidth = MathF.Max(1f, ImGui.GetContentRegionAvail().X - (arrowSize + spacing) * 2f);
+        // The trailing "- spacing" reserves a sliver of breathing room to the right of the
+        // right-arrow button - without it, the button's own right edge lands exactly on
+        // GetContentRegionAvail().X's true boundary (the window's actual edge, which unlike most
+        // ImGui layout has no built-in padding of its own), leaving it flush against the window edge
+        // with no margin at all.
+        var stripWidth = MathF.Max(1f, ImGui.GetContentRegionAvail().X - (arrowSize + spacing) * 2f - spacing);
 
         var lastTabStart = tabStripTabStartOffsets.Count > 0 ? tabStripTabStartOffsets[^1] : 0f;
         var maxScroll = MathF.Max(MathF.Max(0f, tabStripContentWidth - stripWidth), lastTabStart);
         tabStripScrollRawTarget = Math.Clamp(tabStripScrollRawTarget, 0f, maxScroll);
         tabStripScrollX = SnapScrollToTabBoundary(tabStripScrollRawTarget);
 
-        ImGui.BeginDisabled(tabStripScrollX <= 0f);
-        if (DrawToolbarIconButton(FontAwesomeIcon.ChevronLeft, unreadTabScrolledLeft ? SearchHighlightColor : null))
+        using (ImRaii.Disabled(tabStripScrollX <= 0f))
         {
-            tabStripScrollX = PrevTabBoundaryBefore(tabStripScrollX);
-            tabStripScrollRawTarget = tabStripScrollX;
+            if (DrawToolbarIconButton(FontAwesomeIcon.ChevronLeft, unreadTabScrolledLeft ? SearchHighlightColor : null))
+            {
+                tabStripScrollX = PrevTabBoundaryBefore(tabStripScrollX);
+                tabStripScrollRawTarget = tabStripScrollX;
+            }
+
+            if (unreadTabScrolledLeft && ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(Loc.T("ChatLog.UnreadTabScrolledOffScreen"));
+            }
         }
 
-        if (unreadTabScrolledLeft && ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip(Loc.T("ChatLog.UnreadTabScrolledOffScreen"));
-        }
-
-        ImGui.EndDisabled();
         ImGui.SameLine();
 
-        ImGui.BeginChild("##logTabsStrip", new Vector2(stripWidth, arrowSize), false, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
+        var tabsStripChild = ImRaii.Child("##logTabsStrip", new Vector2(stripWidth, arrowSize), false, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
 
         if (TabDragHelper.DrawDropZone(stripWidth, arrowSize) is { } droppedOnMain)
         {
@@ -2340,7 +2529,7 @@ internal sealed class ChatWindow : Window
             }
         }
 
-        ImGui.PushStyleVar(ImGuiStyleVar.SelectableTextAlign, new Vector2(0.5f, 0.5f));
+        var tabsStripTextAlign = ImRaii.PushStyle(ImGuiStyleVar.SelectableTextAlign, new Vector2(0.5f, 0.5f));
 
         var basePos = ImGui.GetCursorPos();
         var runningX = 0f;
@@ -2510,18 +2699,10 @@ internal sealed class ChatWindow : Window
                 DrawTabBackgroundFill(whisperBg, tabSize);
 
                 var blinking = whisperUnread > 0 && config.BlinkUnreadWhisperTabs;
-                if (blinking)
+                bool clicked;
+                using (ImRaii.PushColor(ImGuiCol.Text, BlinkColor(), blinking))
                 {
-                    var pulse = (MathF.Sin(Environment.TickCount64 / 250f) + 1f) * 0.5f;
-                    var normal = ImGui.GetStyle().Colors[(int)ImGuiCol.Text];
-                    ImGui.PushStyleColor(ImGuiCol.Text, Vector4.Lerp(normal, SearchHighlightColor, pulse));
-                }
-
-                var clicked = ImGui.Selectable(whisperText + "##whisper" + targetName, isSelected, ImGuiSelectableFlags.None, tabSize);
-
-                if (blinking)
-                {
-                    ImGui.PopStyleColor();
+                    clicked = ImGui.Selectable(whisperText + "##whisper" + targetName, isSelected, ImGuiSelectableFlags.None, tabSize);
                 }
 
                 DrawUnreadBadge(whisperUnread);
@@ -2601,23 +2782,29 @@ internal sealed class ChatWindow : Window
             }
         }
 
-        ImGui.PopStyleVar();
-        ImGui.EndChild();
+        // Plain locals (not `using var`) deliberately disposed exactly here, once - both the tab
+        // strip child and its text-align style var need to close before the right-arrow button
+        // below, which draws in the *parent* window next to the child rather than inside it. Not
+        // risking a second, method-end Dispose on top of this one - an accidental double EndChild()
+        // would desync ImGui's window stack for the rest of the frame, which is a much worse bug
+        // than anything a leaked scope could cause.
+        tabsStripTextAlign.Dispose();
+        tabsStripChild.Dispose();
 
         ImGui.SameLine();
-        ImGui.BeginDisabled(tabStripScrollX >= wheelMaxScroll);
-        if (DrawToolbarIconButton(FontAwesomeIcon.ChevronRight, unreadTabScrolledRight ? SearchHighlightColor : null))
+        using (ImRaii.Disabled(tabStripScrollX >= wheelMaxScroll))
         {
-            tabStripScrollX = MathF.Min(wheelMaxScroll, NextTabBoundaryAfter(tabStripScrollX));
-            tabStripScrollRawTarget = tabStripScrollX;
-        }
+            if (DrawToolbarIconButton(FontAwesomeIcon.ChevronRight, unreadTabScrolledRight ? SearchHighlightColor : null))
+            {
+                tabStripScrollX = MathF.Min(wheelMaxScroll, NextTabBoundaryAfter(tabStripScrollX));
+                tabStripScrollRawTarget = tabStripScrollX;
+            }
 
-        if (unreadTabScrolledRight && ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip(Loc.T("ChatLog.UnreadTabScrolledOffScreen"));
+            if (unreadTabScrolledRight && ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(Loc.T("ChatLog.UnreadTabScrolledOffScreen"));
+            }
         }
-
-        ImGui.EndDisabled();
 
         pendingTabForceSelect = null;
 
@@ -2733,7 +2920,8 @@ internal sealed class ChatWindow : Window
 
     private void DrawFixedTabQuickEdit(ChatTab tab)
     {
-        if (!ImGui.BeginPopupContextItem("##tabQuickEdit" + tab.Id))
+        using var popup = ImRaii.ContextPopupItem("##tabQuickEdit" + tab.Id);
+        if (!popup.Success)
         {
             return;
         }
@@ -2784,13 +2972,12 @@ internal sealed class ChatWindow : Window
         {
             ImGui.SetTooltip(Loc.T("Settings.ColorsResetRow"));
         }
-
-        ImGui.EndPopup();
     }
 
     private bool DrawWhisperTabQuickEdit(CharacterState state, string targetName)
     {
-        if (!ImGui.BeginPopupContextItem("##whisperTabQuickEdit" + targetName))
+        using var popup = ImRaii.ContextPopupItem("##whisperTabQuickEdit" + targetName);
+        if (!popup.Success)
         {
             return false;
         }
@@ -2880,7 +3067,6 @@ internal sealed class ChatWindow : Window
             ImGui.SetTooltip(Loc.T("Settings.ColorsResetRow"));
         }
 
-        ImGui.EndPopup();
         return closeRequested;
     }
 
@@ -3027,15 +3213,29 @@ internal sealed class ChatWindow : Window
 
     internal bool MatchesWhisperTarget(ChatLogEntry entry, string target)
     {
-        if (entry.ChatType is not (XivChatType.TellIncoming or XivChatType.TellOutgoing))
+        var targetNameOnly = target.Split('@')[0];
+
+        bool isMatch;
+        if (entry.ChatType == XivChatType.ErrorMessage)
         {
-            return false;
+            // A failed-/tell notice (see WhisperFailureDetector) never carries a Sender - it's a
+            // system message, not really "from" the named player - so it can't go through the normal
+            // Sender-identity match below. The game's own wording never includes an @World either, so
+            // this can only ever be a first-name-only match, same as the Sender-only fallback below.
+            isMatch = entry.RelatedWhisperTarget != null
+                && string.Equals(entry.RelatedWhisperTarget, targetNameOnly, StringComparison.OrdinalIgnoreCase);
+        }
+        else if (entry.ChatType is XivChatType.TellIncoming or XivChatType.TellOutgoing)
+        {
+            var entryIdentity = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
+            isMatch = string.Equals(entryIdentity, target, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(entry.Sender, targetNameOnly, StringComparison.OrdinalIgnoreCase);
+        }
+        else
+        {
+            isMatch = false;
         }
 
-        var entryIdentity = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
-        var targetNameOnly = target.Split('@')[0];
-        var isMatch = string.Equals(entryIdentity, target, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(entry.Sender, targetNameOnly, StringComparison.OrdinalIgnoreCase);
         if (!isMatch)
         {
             return false;

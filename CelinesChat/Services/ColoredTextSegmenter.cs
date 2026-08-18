@@ -16,9 +16,10 @@ internal static class ColoredTextSegmenter
         Vector4 emoteColor,
         Vector4 oocColor,
         Vector4 mentionColor,
-        Vector4 linkColor)
+        Vector4 linkColor,
+        bool allowRpFormatting = true)
     {
-        return Merge(ColoredTextRenderer.BuildRuns(payloads, mentionTerm), defaultColor, emoteColor, oocColor, mentionColor, linkColor, payloads);
+        return Merge(ColoredTextRenderer.BuildRuns(payloads, mentionTerm, allowRpFormatting), defaultColor, emoteColor, oocColor, mentionColor, linkColor, payloads);
     }
 
     public static List<WebTextSegmentDto> BuildSegments(
@@ -27,10 +28,11 @@ internal static class ColoredTextSegmenter
         Vector4 defaultColor,
         Vector4 emoteColor,
         Vector4 oocColor,
-        Vector4 mentionColor)
+        Vector4 mentionColor,
+        bool allowRpFormatting = true)
     {
         var state = new ColoredTextRenderer.TokenizeState();
-        return Merge(Widen(ColoredTextRenderer.Tokenize(text, mentionTerm, state)), defaultColor, emoteColor, oocColor, mentionColor, default, null);
+        return Merge(Widen(ColoredTextRenderer.Tokenize(text, mentionTerm, state, allowRpFormatting)), defaultColor, emoteColor, oocColor, mentionColor, default, null);
 
         static IEnumerable<(string Word, ColoredTextRenderer.TextSegmentKind Kind, ColoredTextRenderer.LinkTarget? Link, Vector4? Foreground)> Widen(
             IEnumerable<(string Word, ColoredTextRenderer.TextSegmentKind Kind)> words)
