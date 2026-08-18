@@ -134,10 +134,7 @@ public class Configuration : IPluginConfiguration
         [5] = new Vector4(0.82941526f, 0.27999997f, 1f, 1f),
     };
 
-    public Dictionary<string, Vector4> WhisperColours { get; set; } = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["Sayuri Kwiat@Shiva"] = new Vector4(1f, 0.55f, 0.84907705f, 1f),
-    };
+    public Dictionary<string, Vector4> WhisperColours { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     public List<ChatTab> ChatTabs { get; set; } = new();
 

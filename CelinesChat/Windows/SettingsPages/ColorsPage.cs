@@ -198,6 +198,5 @@ internal sealed class ColorsPage
         config.CrossWorldLinkshellColours[5] = new Vector4(0.82941526f, 0.27999997f, 1f, 1f);
 
         config.WhisperColours.Clear();
-        config.WhisperColours["Sayuri Kwiat@Shiva"] = new Vector4(1f, 0.55f, 0.84907705f, 1f);
     }
 }

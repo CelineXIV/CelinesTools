@@ -17,5 +17,6 @@ internal static class Changelog
         ("1.0.12", "Added Link support"),
         ("1.0.13", "huge update"),
         ("1.0.17", "I'm to lazy for patchnotes!"),
+        ("1.0.18", "Bugfix"),
     };
 }
