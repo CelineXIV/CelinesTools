@@ -88,6 +88,17 @@ public class CharacterState
     public List<Snippet> Snippets { get; set; } = new();
 
     public bool SnippetsMigrated { get; set; }
+
+    // Which view (fixed tab / whisper tab / novice network) was active when this character last
+    // closed or logged out - restored on the next login so it "feels the same" as before, instead of
+    // always falling back to the first fixed tab. Exactly one of these three should be set at once;
+    // ChatWindow.RestoreLastActiveView checks them in this same order (whisper, then novice network,
+    // then fixed tab) and clears the other two whenever it saves a new one.
+    public Guid? LastActiveTabId { get; set; }
+
+    public string? LastActiveWhisperTarget { get; set; }
+
+    public bool LastActiveNoviceNetwork { get; set; }
 }
 
 public class Configuration : IPluginConfiguration

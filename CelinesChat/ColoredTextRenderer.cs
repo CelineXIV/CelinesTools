@@ -152,6 +152,17 @@ internal static class ColoredTextRenderer
                     break;
                 case RawPayload raw when raw.Equals(RawPayload.LinkTerminator):
                     currentLink = null;
+
+                    // A link's own foreground colour (an item's rarity colour, say) is meant to be
+                    // scoped to exactly that link's display text - reported as "linking an item
+                    // turned the rest of the whole message white too." The colour push and this
+                    // terminator both come from the same encoded link, but nothing guarantees a
+                    // matching UIForegroundPayload "disable" is actually present in what the game
+                    // sends for a link built by *another* player's client (Dalamud's own link-
+                    // building API always emits one, but that's not proof the wire format always
+                    // does) - clearing here regardless of whether one showed up already means an
+                    // unmatched push can never bleed into the rest of the message either way.
+                    foregroundStack.Clear();
                     break;
                 case ITextProvider textProvider:
                     var currentForeground = foregroundStack.Count > 0 ? foregroundStack.Peek() : (Vector4?)null;
@@ -421,6 +432,15 @@ internal static class ColoredTextRenderer
     {
         var words = text.Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
 
+        // A message that's nothing but one word opening with '*' and never closing it anywhere in
+        // that same word reads exactly like the common chat convention of "*corrected" - a quick
+        // typo-fix note for the previous line, not the start of an RP action - not "*waves happily*"
+        // or even "*waves" followed by more words, both of which stay real emote formatting below.
+        // Each chat message gets its own fresh TokenizeState (see BuildPlainRuns/BuildRuns), so a
+        // genuine multi-message emote could never have been closed by a *later* message anyway -
+        // there's no continuation case this would be stealing from.
+        var treatAsTypoCorrection = allowRpFormatting && words.Length == 1 && IsLikelyTypoCorrectionMarker(words[0]);
+
         foreach (var word in words)
         {
             foreach (var (segment, isIconGlyph) in SplitIconGlyphRuns(word))
@@ -431,10 +451,13 @@ internal static class ColoredTextRenderer
                     continue;
                 }
 
-                yield return (segment, ClassifySegment(segment, mentionTerm, state, allowRpFormatting));
+                yield return (segment, ClassifySegment(segment, mentionTerm, state, allowRpFormatting && !treatAsTypoCorrection));
             }
         }
     }
+
+    private static bool IsLikelyTypoCorrectionMarker(string word)
+        => word.Length > 1 && word[0] == '*' && word.IndexOf('*', 1) < 0;
 
     // allowRpFormatting off (a channel that isn't configured for RP, e.g. a plugin/bot notice posted
     // into an ordinary channel) skips the */( )/ state machine entirely rather than just discarding
@@ -481,9 +504,32 @@ internal static class ColoredTextRenderer
         }
 
         var isOoc = touchedOoc;
-        var isEmote = !isOoc && (startedInEmote || word.Contains('*'));
+        var isEmote = !isOoc && IsWholeWordEmote(word, startedInEmote, state.InEmote);
 
         return isOoc ? TextSegmentKind.Ooc : (isEmote ? TextSegmentKind.Emote : TextSegmentKind.Default);
+    }
+
+    // A word is only safe to colour as one whole Emote run if neither edge leaves real, non-
+    // asterisk content sitting "outside" the boundary its own asterisk represents - e.g. "bla*"
+    // (asterisk glued directly onto unrelated preceding text with no space) used to colour "bla"
+    // itself as part of the emote too, since a lone word.Contains('*') check has no idea *where*
+    // in the word the asterisk actually sits. Tokenize only ever splits on whitespace, so a mid-
+    // word asterisk can't be carved into its own run here without risking a stray rendered space
+    // where the source text had none (the same trade-off SplitIconGlyphRuns already accepts for
+    // icon glyphs) - falling back to Default for a "dirty" edge undercolours that rare case
+    // instead, which is the safer direction to get wrong.
+    private static bool IsWholeWordEmote(string word, bool startedInEmote, bool endedInEmote)
+    {
+        var firstStar = word.IndexOf('*');
+        if (firstStar < 0)
+        {
+            return startedInEmote;
+        }
+
+        var lastStar = word.LastIndexOf('*');
+        var leftDirty = !startedInEmote && firstStar > 0;
+        var rightDirty = !endedInEmote && lastStar < word.Length - 1;
+        return !leftDirty && !rightDirty;
     }
 
     private static bool IsMessagePartCounter(string word)

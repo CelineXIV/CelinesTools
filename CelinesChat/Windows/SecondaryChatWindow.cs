@@ -58,10 +58,30 @@ internal sealed class SecondaryChatWindow : Window
         };
 
         Flags |= ImGuiWindowFlags.NoTitleBar;
+
+        // See ChatWindow's matching RespectCloseHotkey = false - without it, Escape closed this
+        // window outright (dumping every tab in it back onto the main window via OnClose), which for
+        // a window with no title bar and no close button felt like an accidental trap door rather
+        // than a deliberate action. Right-click on a tab now offers an explicit, deliberate way back
+        // instead (see DrawReturnToMainWindowContextMenu).
+        RespectCloseHotkey = false;
     }
 
     public override void OnClose()
     {
+        // Only a close the user actually triggered (right-clicking a tab back to the main window,
+        // which empties this one) should return its remaining tabs and tear this window down. A
+        // close that happens to fire while the plugin itself is unloading/reloading (Plugin.
+        // IsDisposing), or because ApplyGameStateVisibility is hiding it for a cutscene/loading
+        // screen/GPose the same way it hides the main window (IsSecondaryWindowHiddenByGameState),
+        // must leave SecondaryChatTabIds/SecondaryChatWhisperTargets untouched - otherwise a reload
+        // or simply walking into a cutscene would silently dump every torn-off tab back onto the
+        // main window instead of restoring/reappearing exactly as it was.
+        if (plugin.IsDisposing || plugin.IsSecondaryWindowHiddenByGameState)
+        {
+            return;
+        }
+
         plugin.ReturnAllTabsFromSecondaryWindow();
         onEmpty();
     }
@@ -190,6 +210,8 @@ internal sealed class SecondaryChatWindow : Window
 
                     ChatWindow.DrawTabBackgroundFill(tab.BackgroundColor ?? (config.TabStripBackgroundColorEnabled ? config.TabStripBackgroundColor : (Vector4?)null), tabSize);
                     var clicked = ImGui.Selectable(tab.Name + "##secTab", isSelected, ImGuiSelectableFlags.None, tabSize);
+                    ChatWindow.DrawActiveTabUnderline(isSelected, config);
+                    DrawReturnToMainWindowContextMenu("##secTabQuickEdit", () => plugin.MoveTabToMainWindow(tab.Id));
 
                     TabDragHelper.HandleHoverAndTearOff(tab.Id.ToString(), tab.Name, _ => { });
 
@@ -232,6 +254,8 @@ internal sealed class SecondaryChatWindow : Window
                         : config.TabStripBackgroundColorEnabled ? config.TabStripBackgroundColor : (Vector4?)null;
                     ChatWindow.DrawTabBackgroundFill(whisperBg, tabSize);
                     var clicked = ImGui.Selectable(label + "##secWhisper", isSelected, ImGuiSelectableFlags.None, tabSize);
+                    ChatWindow.DrawActiveTabUnderline(isSelected, config);
+                    DrawReturnToMainWindowContextMenu("##secWhisperQuickEdit", () => plugin.MoveWhisperToMainWindow(target));
 
                     TabDragHelper.HandleHoverAndTearOff(target, label, _ => { });
 
@@ -302,6 +326,25 @@ internal sealed class SecondaryChatWindow : Window
                 activeTabId = Guid.Empty;
                 activeWhisperTarget = myWhispers[0];
             }
+        }
+    }
+
+    // Right-click on a torn-off tab to send it back to the main window one at a time - a deliberate
+    // alternative to closing this whole window, now that RespectCloseHotkey = false means Escape no
+    // longer does that for you. Moving the very last tab out closes this window on its own (see the
+    // myTabs/myWhispers-both-empty check above), so there's no separate "close" action needed either.
+    private static void DrawReturnToMainWindowContextMenu(string popupId, Action onReturn)
+    {
+        using var popup = ImRaii.ContextPopupItem(popupId);
+        if (!popup.Success)
+        {
+            return;
+        }
+
+        if (ImGui.Selectable(Loc.T("Tabs.ReturnToMainWindow")))
+        {
+            onReturn();
+            ImGui.CloseCurrentPopup();
         }
     }
 

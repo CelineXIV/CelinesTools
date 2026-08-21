@@ -236,6 +236,7 @@ internal static class Loc
         ["Tabs.Muted"] = ("Muted", "Stummgeschaltet"),
         ["Tabs.MutedTooltip"] = ("Missed messages in this tab no longer show an unread number - the tab still works normally otherwise.", "Verpasste Nachrichten in diesem Tab zeigen keine Zahl mehr an - der Tab funktioniert ansonsten ganz normal weiter."),
         ["Tabs.CloseConversation"] = ("Close conversation", "Unterhaltung schliessen"),
+        ["Tabs.ReturnToMainWindow"] = ("Return to main window", "Zurueck ins Hauptfenster"),
         ["Tabs.WhisperColorLabel"] = ("Color for this person", "Farbe fuer diese Person"),
         ["Tabs.BackgroundColorLabel"] = ("Tab background", "Tab-Hintergrund"),
         ["Tabs.MoveUp"] = ("Move up", "Nach oben"),

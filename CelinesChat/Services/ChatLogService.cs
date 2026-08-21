@@ -15,20 +15,15 @@ namespace CelinesChat.Services;
 
 internal sealed class ChatLogService : IDisposable
 {
-    // A live view's scroll position isn't anchored to a specific entry - it's a raw pixel offset into
-    // whatever's currently rendered. Every eviction here (RemoveOldestFromLargestCategory, below)
-    // shrinks that view's total content height by one entry's worth if the evicted entry happened to
-    // be in the same category the user's looking at, and ImGui's own automatic end-of-frame clamp
-    // then yanks their scroll position down to match the new, smaller max - during a busy fight
-    // (usually the very category most likely to be both the largest and the one being watched),
-    // evictions happen often enough for this to read as a continuous jitter rather than one clean
-    // jump ("scrolls up and jitters out of nowhere"). Raising the cap doesn't fix the underlying
-    // per-eviction clamp, but it cuts how often eviction happens at all by a wide enough margin that
-    // it stops being noticeable during ordinary play - a properly anchor-preserving fix (compensating
-    // the scroll position by exactly what was lost) was tried and reverted after it introduced a
-    // worse regression (silently breaking auto-scroll-to-bottom for live chat) that wasn't worth
-    // this bug's own severity to keep chasing further.
-    private const int MaxEntries = 10000;
+    // Was temporarily raised to 10000 as a band-aid for the "chat jitters/scrolls up during combat"
+    // bug - eviction here (RemoveOldestFromLargestCategory, below) used to shrink a view's rendered
+    // content height whenever it hit the evicted entry's category, and ImGui's own end-of-frame
+    // clamp then yanked a scrolled-up reader's position down to match. A wider buffer only cut how
+    // often eviction happened, it didn't fix the underlying clamp - the actual fix now lives in
+    // ChatWindow.DrawChatLogEntries (heightLostFromViewShrink), which compensates the scroll position
+    // by exactly the height of whatever dropped out of the *current view's* own rendered list, so
+    // this cap is back to its original value with no jitter regression.
+    private const int MaxEntries = 3000;
 
     private readonly IChatGui chatGui;
     private readonly Configuration configuration;
@@ -179,6 +174,26 @@ internal sealed class ChatLogService : IDisposable
             Payloads = message.Message.Payloads.ToList(),
             SenderPayloads = message.Sender.Payloads.ToList(),
         };
+
+        // TEMP-DIAG: reported bug - a message with an item link ("Fantasia") rendered entirely in
+        // one flat colour (white) instead of the normal per-word colouring. ColoredTextRenderer.
+        // BuildRuns pushes/pops a foreground colour stack from UIForegroundPayload.IsEnabled, which
+        // should be exactly symmetric for a real item link - dumping the raw payload sequence the
+        // next time an item gets linked will show directly whether that's actually true, instead of
+        // guessing. Remove once the real cause is confirmed.
+        if (entry.Payloads?.Any(p => p is ItemPayload) == true)
+        {
+            var dump = string.Join(" | ", entry.Payloads.Select(p => p switch
+            {
+                UIForegroundPayload fg => $"UIForeground(enabled={fg.IsEnabled}, colorKey={fg.ColorKey}, rgba={(fg.IsEnabled ? fg.RGBA.ToString("X8") : "n/a")})",
+                ItemPayload item => $"Item(id={item.RawItemId}, hq={item.IsHQ})",
+                RawPayload raw when raw.Equals(RawPayload.LinkTerminator) => "LinkTerminator",
+                TextPayload text => $"Text(\"{text.Text}\")",
+                _ => p.GetType().Name,
+            }));
+
+            log.Info($"[CelinesChat][ColorDiag] item-link message payloads: {dump}");
+        }
 
         if (message.LogKind == XivChatType.NoviceNetworkSystem)
         {

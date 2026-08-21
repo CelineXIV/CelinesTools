@@ -44,10 +44,26 @@ internal sealed class ChatWindow : Window
     private string channelPickerWhisperInput = string.Empty;
     private string activeWhisperTabTarget = string.Empty;
 
+    // ulong.MaxValue as "never checked yet" - 0 is CurrentCharacterKey's own real value while logged
+    // out, so it can't double as the sentinel too, or a normal login right after startup (0 -> a real
+    // content ID) would look identical to "no change" if this started at 0 as well.
+    private ulong lastRestoredCharacterKey = ulong.MaxValue;
+    private bool forceScrollToBottomOnNextViewChange;
+
     private bool noviceNetworkTabActive;
 
     private int noviceNetworkUnread;
     private string? pendingTabForceSelect;
+
+    // Mirrors pendingTabForceSelect, but for fixed tabs - RestoreLastActiveView's fixed-tab branch
+    // sets activeTabId directly, which is correct for what actually gets *drawn* as chat content,
+    // but the tab strip only highlights a tab it actually renders this frame (the isSelected check
+    // at DrawLogTabBar's fixed-tab loop), and tabStripScrollX always starts back at 0 on a fresh
+    // plugin load - if the restored tab isn't among the first few tabs visible at that default
+    // scroll position, its own Selectable never gets submitted at all, so nothing in the strip
+    // shows as selected even though the correct tab's content is genuinely showing underneath.
+    // Reported as "content is right after login/update, but no tab looks active."
+    private Guid? pendingFixedTabForceSelect;
     private int selectionStart;
     private int selectionEnd;
     private int cursorPos;
@@ -69,6 +85,18 @@ internal sealed class ChatWindow : Window
     private bool pendingSendFromEnter;
     private bool pendingFocusInput;
     private bool composeBoxActive;
+
+    // plugin.SaveConfiguration() does a full synchronous JSON-serialize-and-write of the *entire*
+    // plugin config (every character's tabs, whisper colours, drafts for every character, ...) to
+    // disk - calling that on literally every keystroke (as the compose box's draft-autosave used to)
+    // caused a real, reported hitch while typing, regardless of message length, that went away the
+    // instant typing stopped. state.Drafts[currentDraftKey] itself is a cheap in-memory write and
+    // still happens on every keystroke; only the actual disk flush is debounced, so a draft is never
+    // more than DraftSaveDebounceMs stale, and FlushPendingDraftSave forces an immediate write at
+    // every point that already mattered before (losing focus, sending, switching views/characters).
+    private const long DraftSaveDebounceMs = 800;
+    private bool draftSavePending;
+    private long draftSaveDueTick;
     private bool pendingAutoTranslatePopup;
     private string autoTranslateSearch = string.Empty;
     private uint? autoTranslateBrowseGroup;
@@ -122,6 +150,12 @@ internal sealed class ChatWindow : Window
     // Reused every frame (Clear() keeps the backing array, no reallocation once warmed up) for the
     // active view's own capped, filtered entry list - see DrawChatLogEntries' matching remarks.
     private readonly List<ChatLogEntry> viewMatchingLiveEntriesBuffer = new();
+
+    // Snapshot of the previous frame's viewMatchingLiveEntriesBuffer sequences, used to detect
+    // exactly which entries dropped off the *front* of the current view between frames (eviction or
+    // the 600-entry window sliding forward) - see the scroll-jitter compensation remarks in
+    // DrawChatLogEntries for why this replaced an earlier, less precise net-height-delta approach.
+    private readonly List<long> previousViewEntrySequences = new();
     private bool unreadTabScrolledLeft;
     private bool unreadTabScrolledRight;
     private List<ChatLogEntry>? loadedHistoryEntries;
@@ -171,15 +205,12 @@ internal sealed class ChatWindow : Window
 
         IsOpen = true;
 
-        var initialState = plugin.GetCharacterState();
-        if (initialState.LastChannel == ChatChannel.Whisper && !string.IsNullOrEmpty(initialState.LastWhisperTarget))
-        {
-            activeWhisperTabTarget = plugin.RememberWhisperTarget(initialState, initialState.LastWhisperTarget);
-            pendingTabForceSelect = activeWhisperTabTarget;
-
-            PreloadWhisperHistoryForFirstView(activeWhisperTabTarget);
-        }
-
+        // Which view (if any) to land on is now Draw()'s own job - see RestoreLastActiveView, which
+        // runs on the very first Draw() call via the same CurrentCharacterKey check it uses for every
+        // later login/character switch, rather than duplicating a narrower, less accurate version of
+        // the same restoration here (this used to infer "was viewing a whisper tab" from
+        // LastChannel/LastWhisperTarget - the *compose* channel, not necessarily which tab was
+        // actually being looked at - a real mismatch whenever those differed).
         var existingEntries = plugin.ChatLog.Snapshot();
         if (existingEntries.Count > 0)
         {
@@ -265,6 +296,12 @@ internal sealed class ChatWindow : Window
             .Push(ImGuiStyleVar.GrabRounding, 4f)
             .Push(ImGuiStyleVar.TabRounding, 4f);
         var state = plugin.GetCharacterState();
+
+        if (plugin.CurrentCharacterKey != lastRestoredCharacterKey)
+        {
+            lastRestoredCharacterKey = plugin.CurrentCharacterKey;
+            RestoreLastActiveView(config, state);
+        }
 
         if (plugin.PendingWhisperTarget is { } pendingTarget)
         {
@@ -394,10 +431,16 @@ internal sealed class ChatWindow : Window
             if (ImGui.InputTextMultiline("##composeText", ref inputText, 4000, new Vector2(-1, inputBoxHeight), composeFlags, TrackTextState))
             {
                 state.Drafts[currentDraftKey] = inputText;
-                plugin.SaveConfiguration();
+                draftSavePending = true;
+                draftSaveDueTick = Environment.TickCount64 + DraftSaveDebounceMs;
             }
 
             inputBoxBottom = ImGui.GetItemRectMax().Y;
+        }
+
+        if (draftSavePending && (ImGui.IsItemDeactivated() || Environment.TickCount64 >= draftSaveDueTick))
+        {
+            FlushPendingDraftSave();
         }
 
         composeBoxActive = ImGui.IsItemActive();
@@ -1122,6 +1165,63 @@ internal sealed class ChatWindow : Window
 
         viewMatchingLiveEntriesBuffer.Reverse();
 
+        // A view's rendered entry list can lose entries off its *front* between one frame and the
+        // next - either because ChatLogService evicted them from its own global buffer once it hit
+        // MaxEntries, or simply because maxLiveEntriesConsidered's "last 600 matching" window above
+        // slid forward as new matching messages kept arriving (the far more common trigger during a
+        // busy fight, well before the global buffer's own cap is ever reached). Either way, the
+        // Dummy() a dropped entry used to contribute to this view's total content height (see
+        // ProcessEntry below) stops being added this frame, so GetScrollMaxY() shrinks - and since a
+        // live GetScrollY() is a raw pixel offset, not anchored to any particular entry, ImGui's own
+        // end-of-frame clamp (Scroll.y = min(Scroll.y, ScrollMax.y)) silently yanks a scrolled-up
+        // reader's view down by however much shrank. Two earlier attempts at compensating for this
+        // inferred "how much shrank" from a net GetScrollMaxY() delta between frames - fragile,
+        // because that delta also conflates any *growth* from new messages arriving the same frame,
+        // and both attempts caused real regressions (breaking the "already at bottom" auto-scroll).
+        // Comparing the exact previous-frame vs current-frame sequence lists instead gives an exact
+        // answer with no ambiguity: entries are always chronologically ordered, so eviction/window-
+        // sliding only ever removes a prefix from the front, and entryHeightCache is never cleared
+        // just because an entry fell out of the view buffer - a dropped entry's last-measured height
+        // is still there to look up. Skipped entirely for whisper tabs (whisperPreload merges in a
+        // second, unrelated source whose own front isn't tracked here) and for loaded history
+        // (a static snapshot that never shrinks) - neither has been reported as jittery.
+        var heightLostFromViewShrink = 0f;
+        var trackViewShrink = !viewChanged && whisperPreload == null && loadedHistoryEntries == null;
+        if (trackViewShrink && previousViewEntrySequences.Count > 0)
+        {
+            var currentFirstSequence = viewMatchingLiveEntriesBuffer.Count > 0 ? viewMatchingLiveEntriesBuffer[0].Sequence : long.MaxValue;
+            foreach (var droppedSequence in previousViewEntrySequences)
+            {
+                if (droppedSequence >= currentFirstSequence)
+                {
+                    break;
+                }
+
+                if (entryHeightCache.TryGetValue(droppedSequence, out var lostHeight))
+                {
+                    heightLostFromViewShrink += lostHeight;
+                }
+                else
+                {
+                    plugin.Log.Info($"[CelinesChat][JitterDiag] view={viewKey} droppedSeq={droppedSequence} had NO cached height (undercounts compensation)");
+                }
+            }
+
+            if (heightLostFromViewShrink > 0.5f)
+            {
+                plugin.Log.Info($"[CelinesChat][JitterDiag] view={viewKey} heightLost={heightLostFromViewShrink:F1} nearBottom={nearBottomBeforeDraw} scrollY={ImGui.GetScrollY():F1} scrollMaxY={ImGui.GetScrollMaxY():F1} prevFirstSeq={previousViewEntrySequences[0]} newFirstSeq={(viewMatchingLiveEntriesBuffer.Count > 0 ? viewMatchingLiveEntriesBuffer[0].Sequence : -1)}");
+            }
+        }
+
+        previousViewEntrySequences.Clear();
+        if (trackViewShrink)
+        {
+            for (var i = 0; i < viewMatchingLiveEntriesBuffer.Count; i++)
+            {
+                previousViewEntrySequences.Add(viewMatchingLiveEntriesBuffer[i].Sequence);
+            }
+        }
+
         IReadOnlyList<ChatLogEntry> entries = loadedHistoryEntries ?? viewMatchingLiveEntriesBuffer;
 
         void ProcessEntry(ChatLogEntry entry)
@@ -1172,6 +1272,11 @@ internal sealed class ChatWindow : Window
             var entryTop = ImGui.GetCursorPosY();
             DrawLogEntry(entry, config, mentionTerm, availableWidth, showingWhisper);
             var newHeight = ImGui.GetCursorPosY() - entryTop;
+
+            if (hadCache && MathF.Abs(newHeight - cachedHeight) > 0.5f)
+            {
+                plugin.Log.Info($"[CelinesChat][JitterDiag] view={viewKey} seq={entry.Sequence} height changed while visible: {cachedHeight:F1} -> {newHeight:F1} fontAvailable={plugin.IsChatFontAvailable} availableWidth={availableWidth:F1}");
+            }
 
             if (!plugin.IsChatFontAvailable)
             {
@@ -1226,8 +1331,9 @@ internal sealed class ChatWindow : Window
 
         if (viewChanged)
         {
-            if (config.ScrollToBottomOnTabSwitch || !viewScrollPositions.TryGetValue(viewKey, out var savedScrollY))
+            if (forceScrollToBottomOnNextViewChange || config.ScrollToBottomOnTabSwitch || !viewScrollPositions.TryGetValue(viewKey, out var savedScrollY))
             {
+                forceScrollToBottomOnNextViewChange = false;
                 ImGui.SetScrollHereY(1f);
 
                 // Whisper tabs (unlike fixed tabs) can take a frame or two beyond this one for their
@@ -1248,6 +1354,15 @@ internal sealed class ChatWindow : Window
         {
             pinToBottomFramesRemaining--;
             ImGui.SetScrollHereY(1f);
+        }
+        else if (heightLostFromViewShrink > 0f && !nearBottomBeforeDraw)
+        {
+            // Only applies while genuinely scrolled up (reading back) - a reader already at/near the
+            // bottom wants to stay pinned there, which the "hasNewEntries && nearBottomBeforeDraw"
+            // branch below (or ImGui's own clamp) already does correctly; subtracting height on top
+            // of that would overshoot and pull the view back up, reintroducing the exact jitter this
+            // is meant to eliminate.
+            ImGui.SetScrollY(MathF.Max(0f, ImGui.GetScrollY() - heightLostFromViewShrink));
         }
         else if (hasNewOwnMessageInView || (!viewingHistory && hasNewEntries && nearBottomBeforeDraw))
         {
@@ -1542,6 +1657,19 @@ internal sealed class ChatWindow : Window
                 new Vector2(nameRectMax.X, underlineY),
                 ImGui.GetColorU32(senderColor));
         }
+    }
+
+    // Public so Plugin.Dispose can flush any still-debounced draft edit before the game closes -
+    // otherwise up to DraftSaveDebounceMs worth of the most recent keystrokes could be lost on exit.
+    internal void FlushPendingDraftSave()
+    {
+        if (!draftSavePending)
+        {
+            return;
+        }
+
+        draftSavePending = false;
+        plugin.SaveConfiguration();
     }
 
     private void SyncDraft(CharacterState state)
@@ -1879,6 +2007,16 @@ internal sealed class ChatWindow : Window
         {
             validationMessage = string.Empty;
             ImGuiP.ClearActiveID();
+
+            // Pressing Enter on an empty compose box is the deliberate "close the chat again" half
+            // of the gpose Enter-toggle (see Plugin.chatOpenedDuringGpose's own remarks) - explicit
+            // here rather than left to emerge from losing focus, since losing focus for *any* reason
+            // (e.g. clicking a tab) must not close the window, only this specific action should.
+            if (plugin.IsGPosing)
+            {
+                plugin.CloseGposeChatWindow();
+            }
+
             return;
         }
 
@@ -2552,6 +2690,12 @@ internal sealed class ChatWindow : Window
             tabStripTabStartOffsets.Add(runningX);
             var fixedUnread = fixedTabUnreadCounts.GetValueOrDefault(tab.Id);
 
+            if (tab.Id == pendingFixedTabForceSelect)
+            {
+                forceScrollTabStart = runningX;
+                forceScrollTabEnd = runningX + tabWidth;
+            }
+
             if (fixedUnread > 0)
             {
                 if (runningX + tabWidth <= tabStripScrollX + 0.5f)
@@ -2572,6 +2716,7 @@ internal sealed class ChatWindow : Window
                 ImGui.SetCursorPos(new Vector2(basePos.X + runningX - tabStripScrollX, basePos.Y));
                 DrawTabBackgroundFill(tab.BackgroundColor ?? (config.TabStripBackgroundColorEnabled ? config.TabStripBackgroundColor : (Vector4?)null), tabSize);
                 var clicked = ImGui.Selectable(tab.Name + "##tab" + tab.Id, isSelected, ImGuiSelectableFlags.None, tabSize);
+                DrawActiveTabUnderline(isSelected, config);
 
                 DrawUnreadBadge(fixedUnread);
 
@@ -2638,12 +2783,13 @@ internal sealed class ChatWindow : Window
 
                 ImGui.SetCursorPos(new Vector2(basePos.X + runningX - tabStripScrollX, basePos.Y));
                 var clicked = ImGui.Selectable(noviceLabel + "##noviceNetworkTab", isSelected, ImGuiSelectableFlags.None, tabSize);
+                DrawActiveTabUnderline(isSelected, config);
 
                 DrawUnreadBadge(noviceNetworkUnread);
 
                 if (clicked && !isSelected)
                 {
-                    EnterNoviceNetworkView();
+                    EnterNoviceNetworkView(state);
                     noviceNetworkUnread = 0;
                 }
             }
@@ -2705,6 +2851,7 @@ internal sealed class ChatWindow : Window
                     clicked = ImGui.Selectable(whisperText + "##whisper" + targetName, isSelected, ImGuiSelectableFlags.None, tabSize);
                 }
 
+                DrawActiveTabUnderline(isSelected, config);
                 DrawUnreadBadge(whisperUnread);
 
                 var locked = state.LockedWhisperTargets.Contains(targetName);
@@ -2807,6 +2954,7 @@ internal sealed class ChatWindow : Window
         }
 
         pendingTabForceSelect = null;
+        pendingFixedTabForceSelect = null;
 
         if (closedTarget != null)
         {
@@ -2841,6 +2989,30 @@ internal sealed class ChatWindow : Window
         ImGui.GetWindowDrawList().AddRectFilled(min, min + size, ImGui.GetColorU32(fill), ImGui.GetStyle().FrameRounding);
     }
 
+    private const float ActiveTabUnderlineThickness = 2.5f;
+
+    // ImGui's own Selectable(selected: true) highlight is a faint background tint that a tab's own
+    // custom background color (per-tab BackgroundColor, whisper tabs' own colours, or the shared
+    // TabStripBackgroundColor) can easily wash out or hide entirely - reported as "hard to tell which
+    // tab is actually active." Drawn last (over the tab's own fill and the Selectable), so it's
+    // never lost underneath either. Reuses SendAccentColor rather than adding a whole new setting -
+    // it's already the plugin's one user-configurable "accent" colour, used elsewhere for exactly
+    // this "this is the thing that's active/mine" role (see the outgoing-tell sender name).
+    internal static void DrawActiveTabUnderline(bool isSelected, Configuration config)
+    {
+        if (!isSelected)
+        {
+            return;
+        }
+
+        var min = ImGui.GetItemRectMin();
+        var max = ImGui.GetItemRectMax();
+        ImGui.GetWindowDrawList().AddRectFilled(
+            new Vector2(min.X, max.Y - ActiveTabUnderlineThickness),
+            new Vector2(max.X, max.Y),
+            ImGui.GetColorU32(config.SendAccentColor));
+    }
+
     internal static void OpenUrl(string url, Plugin plugin)
     {
         try
@@ -2866,7 +3038,71 @@ internal sealed class ChatWindow : Window
         noviceNetworkTabActive = false;
 
         LoadChannelSelection(newTab, state);
+        SaveLastActiveView(state, tabId: newTab.Id);
         ViewChanged?.Invoke();
+    }
+
+    // Persists whichever one of the three views (fixed tab / whisper / novice network) is now active
+    // so RestoreLastActiveView can bring the user back to it on their next login - exactly one of the
+    // three CharacterState fields should ever be set at a time, so setting one always clears the
+    // other two rather than leaving a stale value from whatever was active before.
+    private void SaveLastActiveView(CharacterState state, Guid? tabId = null, string? whisperTarget = null, bool noviceNetwork = false)
+    {
+        state.LastActiveTabId = tabId;
+        state.LastActiveWhisperTarget = whisperTarget;
+        state.LastActiveNoviceNetwork = noviceNetwork;
+        plugin.SaveConfiguration();
+    }
+
+    // Runs once per detected login/character switch (see Draw()'s own CurrentCharacterKey check) -
+    // brings this character back to whichever view they last had active instead of always landing on
+    // the first fixed tab, and forces the chat log to jump to the very bottom for it regardless of
+    // ScrollToBottomOnTabSwitch/any scroll position remembered for that same view from a *different*
+    // character's own last session (ChatTabs, and therefore their view keys, are shared configuration
+    // across every character - without forcing this, a stale scroll position saved by whichever
+    // character was active last could otherwise leak into this one's very first frame).
+    private void RestoreLastActiveView(Configuration config, CharacterState state)
+    {
+        forceScrollToBottomOnNextViewChange = true;
+
+        // ChatTabs (and therefore view keys like "T:<guid>") are shared configuration across every
+        // character - if the character logging in now happens to have the same LastActiveTabId as
+        // whoever was active last, DrawChatLogEntries' own viewChanged (viewKey != lastViewKey) would
+        // read false despite this genuinely being a fresh login, silently stranding the flag above
+        // unconsumed until some later, unrelated switch. Clearing lastViewKey guarantees the very next
+        // DrawChatLogEntries call sees a real change regardless.
+        lastViewKey = string.Empty;
+
+        if (!string.IsNullOrEmpty(state.LastActiveWhisperTarget))
+        {
+            var target = plugin.RememberWhisperTarget(state, state.LastActiveWhisperTarget);
+            activeTabId = Guid.Empty;
+            activeWhisperTabTarget = target;
+            pendingTabForceSelect = target;
+            noviceNetworkTabActive = false;
+            PreloadWhisperHistoryForFirstView(target);
+            ViewChanged?.Invoke();
+            return;
+        }
+
+        if (state.LastActiveNoviceNetwork && NoviceNetworkService.IsConnected)
+        {
+            activeTabId = Guid.Empty;
+            activeWhisperTabTarget = string.Empty;
+            noviceNetworkTabActive = true;
+            ViewChanged?.Invoke();
+            return;
+        }
+
+        if (state.LastActiveTabId is { } tabId && config.ChatTabs.Find(t => t.Id == tabId) is { } tab)
+        {
+            activeTabId = tab.Id;
+            activeWhisperTabTarget = string.Empty;
+            noviceNetworkTabActive = false;
+            pendingFixedTabForceSelect = tab.Id;
+            LoadChannelSelection(tab, state);
+            ViewChanged?.Invoke();
+        }
     }
 
     private static void SaveChannelSelection(ChatTab? tab, CharacterState state)
@@ -2908,13 +3144,15 @@ internal sealed class ChatWindow : Window
 
         noviceNetworkTabActive = false;
 
+        SaveLastActiveView(state, whisperTarget: resolvedTarget);
         ViewChanged?.Invoke();
     }
 
-    internal void EnterNoviceNetworkView()
+    internal void EnterNoviceNetworkView(CharacterState state)
     {
         activeWhisperTabTarget = string.Empty;
         noviceNetworkTabActive = true;
+        SaveLastActiveView(state, noviceNetwork: true);
         ViewChanged?.Invoke();
     }
 

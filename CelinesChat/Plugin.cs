@@ -33,6 +33,7 @@ public sealed class Plugin : IDalamudPlugin
 {
     private const string CommandName = "/celineschat";
     private const string LogCommandName = "/celineschatlog";
+
     private const int MaxSentHistory = 10;
 
     private const long EnterActivationGraceMs = 500;
@@ -321,6 +322,34 @@ public sealed class Plugin : IDalamudPlugin
 
     private long lastEnterActivationTick;
 
+    internal bool IsGPosing => clientState.IsGPosing;
+
+    // Set when Enter opens the chat while gposing (see OnFrameworkUpdate), cleared on leaving GPose
+    // or via CloseGposeChatWindow - deliberately NOT tied to IsChatInputActive/focus at all, unlike
+    // the grace-period check below. It used to be: ApplyGameStateVisibility's GPose suppression only
+    // stayed bypassed while the compose box had keyboard focus (or briefly after, via the grace
+    // period), so clicking anything else in the window - a tab, a toolbar button - dropped that
+    // focus and the very next frame's suppression check slammed the window shut again ("man kann in
+    // gpose keine tabs wechseln, sobald man es versucht geht das fenster nur zu"). A persistent flag
+    // keeps it open regardless of *why* the compose box isn't focused right now, and ChatWindow.
+    // TrySend's empty-input branch calls CloseGposeChatWindow explicitly to still support the
+    // "press Enter on nothing to dismiss" toggle the user wants kept - just as a deliberate action
+    // instead of an accidental side effect of losing focus.
+    private bool chatOpenedDuringGpose;
+
+    internal void CloseGposeChatWindow()
+    {
+        chatOpenedDuringGpose = false;
+        chatWindow.IsOpen = false;
+
+        // Without this, IsChatInputActive stays stuck at whatever it was the instant the window
+        // closed (Draw() never runs again to naturally refresh it while IsOpen is false) - and
+        // OnFrameworkUpdate's Enter handler treats IsChatInputActive == true as "already open and
+        // focused, just consume the key," permanently swallowing every later Enter press meant to
+        // reopen the window. Matches HideChatWindow's own reset for the same reason.
+        IsChatInputActive = false;
+    }
+
     /// Single on/off switch for the message preview, regardless of which PreviewPosition mode is
     /// active - backed by previewWindow.IsOpen either way. In "Window" mode that's already what
     /// governs the floating window's own visibility; in "Inside" mode there's no separate window to
@@ -416,9 +445,16 @@ public sealed class Plugin : IDalamudPlugin
 
     public void CancelSending() => sender.Cancel();
 
+    // Exposed separately from GetCharacterState() (rather than having callers infer "did the
+    // character change" from the CharacterState reference itself) so ChatWindow can detect a real
+    // login/character switch on its own, using its own locally-tracked "last seen" value - restoring
+    // that character's last active tab and forcing a scroll-to-bottom needs to happen exactly once
+    // per switch, not on every one of the several GetCharacterState() calls a single frame makes.
+    internal ulong CurrentCharacterKey => playerState.IsLoaded ? playerState.ContentId : 0UL;
+
     internal CharacterState GetCharacterState()
     {
-        var key = playerState.IsLoaded ? playerState.ContentId : 0UL;
+        var key = CurrentCharacterKey;
         if (!Configuration.Characters.TryGetValue(key, out var state))
         {
             state = new CharacterState();
@@ -1021,12 +1057,21 @@ public sealed class Plugin : IDalamudPlugin
         keyState[VirtualKey.RETURN] = false;
         chatManuallyHidden = false;
         chatWindow.IsOpen = true;
+        chatOpenedDuringGpose = clientState.IsGPosing;
         pendingChatActivation = true;
         lastEnterActivationTick = Environment.TickCount64;
     }
 
     private void ApplyGameStateVisibility()
     {
+        // Kept in sync regardless of the early-return below, so a *later* gpose session always
+        // starts fresh (requiring its own Enter press) instead of inheriting a stale "already opened
+        // this session" flag from whenever gposing last ended.
+        if (!clientState.IsGPosing)
+        {
+            chatOpenedDuringGpose = false;
+        }
+
         if (IsChatInputActive || Environment.TickCount64 - lastEnterActivationTick < EnterActivationGraceMs)
         {
             return;
@@ -1045,10 +1090,25 @@ public sealed class Plugin : IDalamudPlugin
         var suppressedByGameState = !clientState.IsLoggedIn
             || (inCutscene && !Configuration.ShowChatDuringCutscenes)
             || (inLoadingScreen && !Configuration.ShowChatDuringLoadingScreens)
-            || clientState.IsGPosing;
+            || (clientState.IsGPosing && !chatOpenedDuringGpose);
 
         chatWindow.IsOpen = !chatManuallyHidden && !suppressedByGameState;
+
+        // The secondary window has no manual show/hide toggle of its own (chatManuallyHidden doesn't
+        // apply here), but it should still honour the same ShowChatDuringCutscenes/
+        // ShowChatDuringLoadingScreens/GPose rules the main window does - without this it just sat at
+        // whatever IsOpen its own OnClose/empty-check last left it at, ignoring those settings
+        // entirely. IsSecondaryWindowHiddenByGameState is checked by SecondaryChatWindow.OnClose so
+        // this programmatic hide is never mistaken for the user actually closing the window (which
+        // would otherwise dump every tab in it back onto the main window every time a cutscene starts).
+        if (secondaryChatWindow != null)
+        {
+            IsSecondaryWindowHiddenByGameState = suppressedByGameState;
+            secondaryChatWindow.IsOpen = !suppressedByGameState;
+        }
     }
+
+    internal bool IsSecondaryWindowHiddenByGameState { get; private set; }
 
     private static unsafe void SetNativeChatVisible(bool visible)
     {
@@ -1110,8 +1170,19 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
+    // Set for the duration of Dispose() so SecondaryChatWindow.OnClose can tell a genuine, user-
+    // clicked close (which should return its tabs to the main window) apart from any close Dalamud's
+    // own teardown triggers while the plugin is unloading/reloading - without this, tearing a tab out
+    // never survived a reload: OnClose ran during shutdown just like a real close would, wiping
+    // SecondaryChatTabIds/SecondaryChatWhisperTargets right before that now-empty config got saved.
+    internal bool IsDisposing { get; private set; }
+
     public void Dispose()
     {
+        IsDisposing = true;
+
+        chatWindow.FlushPendingDraftSave();
+
         pluginInterface.UiBuilder.Draw -= DrawUi;
         pluginInterface.UiBuilder.OpenMainUi -= ToggleChatWindow;
         pluginInterface.UiBuilder.OpenConfigUi -= ToggleSettingsWindow;
