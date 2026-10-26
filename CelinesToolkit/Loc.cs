@@ -188,6 +188,8 @@ internal static class Loc
         ["GroupPoseCountdown.ColumnCodeword"] = ("Codeword", "Codewort"),
         ["GroupPoseCountdown.ColumnCommand"] = ("Command (e.g. /emote wave)", "Kommando (z.B. /emote wave)"),
         ["GroupPoseCountdown.CommandInputHint"] = ("/emote wave", "/emote wave"),
+        ["GroupPoseCountdown.ColumnDelay"] = ("Delay", "Verzoegerung"),
+        ["GroupPoseCountdown.DelayTooltip"] = ("How long to wait after the codeword before running the command (0-10000 ms). Drag to adjust, Ctrl+click or double-click to type a value.", "Wie lange nach dem Codewort gewartet wird, bevor der Befehl ausgefuehrt wird (0-10000 ms). Ziehen zum Einstellen, Strg+Klick oder Doppelklick zum Eintippen."),
         ["GroupPoseCountdown.TriggerAdd"] = ("Add", "Hinzufuegen"),
         ["Nav.FpsPing"] = ("FPS / Ping", "FPS / Ping"),
         ["Overview.FeatureFpsPing"] = ("FPS / Ping: small draggable overlay showing current framerate and/or server ping", "FPS / Ping: kleines verschiebbares Overlay mit aktueller Bildrate und/oder Server-Ping"),

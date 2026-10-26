@@ -24,6 +24,9 @@ public class GroupPoseCountdownTrigger
 {
     public string Codeword { get; set; } = string.Empty;
     public string Command { get; set; } = string.Empty;
+
+    /// <summary>How long to wait after the codeword appears before running the command - lets each group member offset their pose (e.g. a staggered wave).</summary>
+    public int DelayMs { get; set; }
 }
 
 public class Configuration : IPluginConfiguration

@@ -1,4 +1,5 @@
 using System;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Threading.Tasks;
 using Dalamud.Plugin.Services;
@@ -10,16 +11,26 @@ namespace CelinesToolkit.Services;
 /// Periodically measures round-trip time to the current zone server. FFXIVClientStructs has no
 /// mapped field for the game's own internally-computed ping (only NetworkModule.LobbyPing, which is
 /// character-select only, not in-game) - verified directly against the actual struct layout via
-/// reflection rather than guessed, so this measures its own. A plain ICMP echo (System.Net.
-/// NetworkInformation.Ping) was considered but rejected: many game server operators drop/deprioritize
-/// ICMP at the network edge for security even though the actual game port is fully reachable, which
-/// would make the reading show as constantly timed out despite the connection being fine. Timing a
-/// TCP connect handshake to the real host:port the game itself is connected to doesn't have that
-/// problem and is a closer proxy to "how it actually feels to play" besides.
+/// reflection rather than guessed, so this measures its own.
+///
+/// Tries a real ICMP echo (System.Net.NetworkInformation.Ping) to the same host first - reported
+/// as consistently reading ~0ms with only the TCP fallback below in use, while a separate plugin
+/// that actually measures the real path (ICMP or genuine packet-level RTT) showed plausible,
+/// nonzero numbers on the same connection. The TCP-connect approach measures how fast a *new*
+/// connection attempt gets answered, not the real round-trip of the already-established game
+/// session - for game infrastructure fronted by a nearby load-balancer/edge node (common for
+/// large-scale server operators), that new-connection handshake can be answered almost instantly
+/// by that nearby node regardless of how far away the actual zone server is, which is exactly a
+/// "always reads ~0ms" symptom the TCP method alone can't tell apart from a genuinely fast
+/// connection. ICMP measures the real path directly when it's allowed through - the TCP-connect
+/// timing is kept only as a fallback for the servers that do drop/deprioritize ICMP at the edge
+/// (the original, still-valid reason it was added at all), so there's still *some* reading instead
+/// of a hard failure on those.
 /// </summary>
 internal sealed class FpsPingService : IDisposable
 {
     private const int PingIntervalMs = 2000;
+    private const int IcmpTimeoutMs = 1000;
     private const int PingTimeoutMs = 2000;
 
     private readonly IFramework framework;
@@ -78,7 +89,7 @@ internal sealed class FpsPingService : IDisposable
     {
         try
         {
-            LastPingMs = await MeasureTcpConnectMs(host, port);
+            LastPingMs = await MeasureIcmpMs(host) ?? await MeasureTcpConnectMs(host, port);
         }
         catch (Exception ex)
         {
@@ -88,6 +99,23 @@ internal sealed class FpsPingService : IDisposable
         finally
         {
             pingInFlight = false;
+        }
+    }
+
+    private static async Task<int?> MeasureIcmpMs(string host)
+    {
+        try
+        {
+            using var ping = new Ping();
+            var reply = await ping.SendPingAsync(host, IcmpTimeoutMs);
+            return reply.Status == IPStatus.Success ? (int)reply.RoundtripTime : null;
+        }
+        catch
+        {
+            // Blocked/filtered ICMP, a resolver failure, or any other reason this specific
+            // technique can't get an answer - null here just means MeasureAndStoreAsync falls
+            // through to the TCP-connect timing below instead of surfacing a hard failure.
+            return null;
         }
     }
 

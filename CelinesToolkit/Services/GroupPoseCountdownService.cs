@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using Dalamud.Game.Chat;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.System.String;
@@ -27,16 +28,23 @@ internal sealed unsafe class GroupPoseCountdownService : IDisposable
     /// <summary>Guards against a single chat line re-triggering the same codeword repeatedly (e.g. it appearing again moments later in a fast-scrolling channel).</summary>
     private const long CooldownMs = 3000;
 
+    public const int MaxDelayMs = 10000;
+
     private readonly IChatGui chatGui;
+    private readonly IFramework framework;
     private readonly IPluginLog log;
     private readonly Configuration configuration;
     private readonly Dictionary<string, long> lastTriggeredTicks = new(StringComparer.OrdinalIgnoreCase);
 
     private bool listenerRegistered;
 
-    public GroupPoseCountdownService(IChatGui chatGui, IPluginLog log, Configuration configuration)
+    /// <summary>Cancels still-pending delayed commands when the feature is turned off, so a pose doesn't fire after disabling.</summary>
+    private CancellationTokenSource pendingCommandsCts = new();
+
+    public GroupPoseCountdownService(IChatGui chatGui, IFramework framework, IPluginLog log, Configuration configuration)
     {
         this.chatGui = chatGui;
+        this.framework = framework;
         this.log = log;
         this.configuration = configuration;
     }
@@ -58,6 +66,9 @@ internal sealed unsafe class GroupPoseCountdownService : IDisposable
         {
             chatGui.ChatMessage -= OnChatMessage;
             lastTriggeredTicks.Clear();
+            pendingCommandsCts.Cancel();
+            pendingCommandsCts.Dispose();
+            pendingCommandsCts = new CancellationTokenSource();
             listenerRegistered = false;
             log.Info($"{LogPrefix} Disabled.");
         }
@@ -96,8 +107,17 @@ internal sealed unsafe class GroupPoseCountdownService : IDisposable
                 }
 
                 lastTriggeredTicks[trigger.Codeword] = Environment.TickCount64;
-                log.Info($"{LogPrefix} Codeword \"{trigger.Codeword}\" detected - running \"{trigger.Command}\".");
-                ExecuteChatCommand(trigger.Command);
+                var delayMs = Math.Clamp(trigger.DelayMs, 0, MaxDelayMs);
+                log.Info($"{LogPrefix} Codeword \"{trigger.Codeword}\" detected - running \"{trigger.Command}\" in {delayMs} ms.");
+                if (delayMs == 0)
+                {
+                    ExecuteChatCommand(trigger.Command);
+                }
+                else
+                {
+                    var command = trigger.Command;
+                    framework.RunOnTick(() => ExecuteChatCommand(command), TimeSpan.FromMilliseconds(delayMs), cancellationToken: pendingCommandsCts.Token);
+                }
             }
         }
         catch (Exception ex)

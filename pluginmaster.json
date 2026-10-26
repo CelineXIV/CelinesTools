@@ -23,7 +23,7 @@
     "Author": "CelineXIV",
     "Name": "CelinesToolkit",
     "InternalName": "CelinesToolkit",
-    "AssemblyVersion": "1.8.5.0",
+    "AssemblyVersion": "1.8.6.0",
     "Description": "Just some QoL Features i was missing on other Plugins",
     "Punchline": "Eigene Makro-Sequenzen anlegen, Glamourer-Designs mit Vorschaubild anwenden und den Slidecast-Moment beim Zaubern anzeigen.",
     "ApplicableVersion": "any",
@@ -35,9 +35,9 @@
     ],
     "DalamudApiLevel": 15,
     "IconUrl": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesToolkit/images/icon.png",
-    "DownloadLinkInstall": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesToolkit/dist/CelinesToolkit-1.8.5.0.zip",
-    "DownloadLinkUpdate": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesToolkit/dist/CelinesToolkit-1.8.5.0.zip",
-    "DownloadLinkTesting": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesToolkit/dist/CelinesToolkit-1.8.5.0.zip"
+    "DownloadLinkInstall": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesToolkit/dist/CelinesToolkit-1.8.6.0.zip",
+    "DownloadLinkUpdate": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesToolkit/dist/CelinesToolkit-1.8.6.0.zip",
+    "DownloadLinkTesting": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesToolkit/dist/CelinesToolkit-1.8.6.0.zip"
   },
   {
     "Author": "CelineXIV",

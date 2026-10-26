@@ -1,4 +1,5 @@
 using System.Numerics;
+using CelinesToolkit.Services;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Components;
@@ -10,6 +11,7 @@ internal sealed class GroupPoseCountdownPage
     private readonly Plugin plugin;
     private string newCodeword = string.Empty;
     private string newCommand = string.Empty;
+    private int newDelayMs;
 
     public GroupPoseCountdownPage(Plugin plugin)
     {
@@ -41,10 +43,11 @@ internal sealed class GroupPoseCountdownPage
         ImGui.Spacing();
 
         var removeIndex = -1;
-        if (ImGui.BeginTable("##groupPoseCountdownTriggers", 3, ImGuiTableFlags.Borders | ImGuiTableFlags.SizingStretchProp))
+        if (ImGui.BeginTable("##groupPoseCountdownTriggers", 4, ImGuiTableFlags.Borders | ImGuiTableFlags.SizingStretchProp))
         {
             ImGui.TableSetupColumn(Loc.T("GroupPoseCountdown.ColumnCodeword"), ImGuiTableColumnFlags.WidthStretch, 1f);
             ImGui.TableSetupColumn(Loc.T("GroupPoseCountdown.ColumnCommand"), ImGuiTableColumnFlags.WidthStretch, 1.5f);
+            ImGui.TableSetupColumn(Loc.T("GroupPoseCountdown.ColumnDelay"), ImGuiTableColumnFlags.WidthFixed, 110f);
             ImGui.TableSetupColumn(string.Empty, ImGuiTableColumnFlags.WidthFixed, 32f);
             ImGui.TableHeadersRow();
 
@@ -74,6 +77,15 @@ internal sealed class GroupPoseCountdownPage
                 }
 
                 ImGui.TableNextColumn();
+                ImGui.SetNextItemWidth(-1);
+                var delayMs = trigger.DelayMs;
+                if (DrawDelayInput("##delay", ref delayMs))
+                {
+                    trigger.DelayMs = delayMs;
+                    plugin.SaveConfiguration();
+                }
+
+                ImGui.TableNextColumn();
                 if (ImGuiComponents.IconButton(FontAwesomeIcon.Times))
                 {
                     removeIndex = i;
@@ -98,16 +110,32 @@ internal sealed class GroupPoseCountdownPage
         ImGui.SetNextItemWidth(220);
         ImGui.InputTextWithHint("##groupPoseCountdownNewCommand", Loc.T("GroupPoseCountdown.CommandInputHint"), ref newCommand, 200);
         ImGui.SameLine();
+        ImGui.SetNextItemWidth(110);
+        DrawDelayInput("##groupPoseCountdownNewDelay", ref newDelayMs);
+        ImGui.SameLine();
         var canAdd = !string.IsNullOrWhiteSpace(newCodeword) && !string.IsNullOrWhiteSpace(newCommand);
         ImGui.BeginDisabled(!canAdd);
         if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.Plus, Loc.T("GroupPoseCountdown.TriggerAdd")))
         {
-            config.GroupPoseCountdownTriggers.Add(new GroupPoseCountdownTrigger { Codeword = newCodeword.Trim(), Command = newCommand.Trim() });
+            config.GroupPoseCountdownTriggers.Add(new GroupPoseCountdownTrigger { Codeword = newCodeword.Trim(), Command = newCommand.Trim(), DelayMs = newDelayMs });
             newCodeword = string.Empty;
             newCommand = string.Empty;
+            newDelayMs = 0;
             plugin.SaveConfiguration();
         }
 
         ImGui.EndDisabled();
+    }
+
+    /// <summary>Drag to adjust; Ctrl+click or double-click turns it into a text field for typing an exact value.</summary>
+    private static bool DrawDelayInput(string id, ref int delayMs)
+    {
+        var changed = ImGui.DragInt(id, ref delayMs, 10f, 0, GroupPoseCountdownService.MaxDelayMs, "%d ms", ImGuiSliderFlags.AlwaysClamp);
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("GroupPoseCountdown.DelayTooltip"));
+        }
+
+        return changed;
     }
 }

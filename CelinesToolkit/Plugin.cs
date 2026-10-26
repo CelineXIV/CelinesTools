@@ -126,7 +126,7 @@ public sealed class Plugin : IDalamudPlugin
         tradeAutoAcceptService = new TradeAutoAcceptService(framework, gameGui, addonLifecycle, objectTable, log, Configuration);
         tradeAutoAcceptService.SetEnabled(Configuration.AutoAcceptTradeEnabled);
 
-        groupPoseCountdownService = new GroupPoseCountdownService(chatGui, log, Configuration);
+        groupPoseCountdownService = new GroupPoseCountdownService(chatGui, framework, log, Configuration);
         groupPoseCountdownService.SetEnabled(Configuration.GroupPoseCountdownEnabled);
 
         fpsPingService = new FpsPingService(framework, log);
