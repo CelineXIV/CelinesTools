@@ -6,10 +6,8 @@ using Dalamud.Interface.Utility;
 namespace CelinesChat.Windows;
 
 /// <summary>
-/// The "C4T" look shared with SpotifySync (Ui/Theme.xaml) and the ActivityChecker (C4tPaint and the
-/// app's C4T variants): dark panel, accent colour with a soft outer glow, corner brackets in the
-/// second colour, the C4T cat logo. Two variants, matching the ActivityChecker's "Ozean" (blue,
-/// SpotifySync's colours) and "Lila" (purple/pink, the original C4T colours).
+/// The "C4T" look: dark panel, accent colour with a soft outer glow, corner brackets in the
+/// second colour, the C4T cat logo. Two variants: blue, and purple/pink (the original C4T colours).
 ///
 /// Only colours are pushed, from each window's PreDraw and popped in its PostDraw - never style
 /// vars: Dalamud's WindowHost pops one style var of its own between ImGui.End() and PostDraw()
@@ -32,7 +30,6 @@ internal static class C4tTheme
         public required string LogoFile { get; init; }
     }
 
-    // ActivityChecker "Ozean" = SpotifySync's Theme.xaml.
     public static readonly Palette Blue = new()
     {
         Bg = Rgb(0x08, 0x0C, 0x18),
@@ -47,7 +44,7 @@ internal static class C4tTheme
         LogoFile = "c4t-logo-blau.png",
     };
 
-    // ActivityChecker "Lila" - the original C4T colours (c4t.css).
+    // The original C4T colours.
     public static readonly Palette Purple = new()
     {
         Bg = Rgb(0x10, 0x09, 0x1B),
@@ -130,7 +127,7 @@ internal static class C4tTheme
         var rounding = ImGui.GetStyle().WindowRounding;
         var strength = Math.Clamp(opacity, 0.3f, 1f);
 
-        // Soft outer glow, like the DropShadow (blur 16, opacity ~0.45) of SpotifySync's panels.
+        // Soft outer glow around the panel.
         var background = ImGui.GetBackgroundDrawList();
         var glowSteps = (int)MathF.Max(4f, 9f * scale);
         for (var i = glowSteps; i >= 1; i--)

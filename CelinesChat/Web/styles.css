@@ -41,7 +41,7 @@ html[data-theme="celines-classic"] {
   --danger: #ff6b5c;
 }
 
-/* "C4T" - same look as SpotifySync (blue, "c4t") and the ActivityChecker (purple, "c4t-lila"):
+/* "C4T" - blue ("c4t") and purple ("c4t-lila") variants:
    dark panel, accent with glow, corner markers in the second colour. Shared rules use
    [data-theme^="c4t"] and only read the per-variant variables. Rajdhani/Share Tech Mono are used
    if installed, else close fallbacks. */

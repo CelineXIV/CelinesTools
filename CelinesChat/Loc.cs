@@ -106,7 +106,7 @@ internal static class Loc
         ["Settings.Design.Standard"] = ("Standard", "Standard"),
         ["Settings.Design.C4T"] = ("C4T Blue", "C4T Blau"),
         ["Settings.Design.C4TPurple"] = ("C4T Purple", "C4T Lila"),
-        ["Settings.DesignHint"] = ("C4T: dark panel, accent colour with a soft glow, corner markers and the C4T logo - the same look as SpotifySync (blue) and the ActivityChecker (purple). The matching font (Rajdhani) can be picked under Fonts. Your chat and channel colours stay as they are.", "C4T: dunkles Panel, Akzentfarbe mit sanftem Leuchten, Eckwinkel und das C4T-Logo - derselbe Look wie SpotifySync (blau) und der ActivityChecker (lila). Die passende Schrift (Rajdhani) kannst du unter Schriften waehlen. Deine Chat- und Kanalfarben bleiben unveraendert."),
+        ["Settings.DesignHint"] = ("C4T: dark panel, accent colour with a soft glow, corner markers and the C4T logo, in blue or purple. The matching font (Rajdhani) can be picked under Fonts. Your chat and channel colours stay as they are.", "C4T: dunkles Panel, Akzentfarbe mit sanftem Leuchten, Eckwinkel und das C4T-Logo, in Blau oder Lila. Die passende Schrift (Rajdhani) kannst du unter Schriften waehlen. Deine Chat- und Kanalfarben bleiben unveraendert."),
         ["Settings.C4tLogo"] = ("Logo at the start of the tab row", "Logo am Anfang der Tab-Leiste"),
         ["Settings.C4tWatermark"] = ("Faint logo behind the chat log", "Dezentes Logo hinter dem Chatverlauf"),
         ["Compose.NotLoggedIn"] = ("You need to be logged in to send messages.", "Zum Senden musst du eingeloggt sein."),

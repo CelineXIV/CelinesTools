@@ -15,7 +15,7 @@ public enum ChatFontChoice
     NotoSansCjkMedium,
     InconsolataRegular,
 
-    // Ships with the plugin (Fonts folder, SIL OFL) - the C4T design's font, same as SpotifySync.
+    // Ships with the plugin (Fonts folder, SIL OFL) - the C4T design's font.
     Rajdhani,
 }
 
@@ -24,10 +24,10 @@ public enum ChatDesign
 {
     Standard,
 
-    // Blue ("Ozean" in the ActivityChecker, SpotifySync's colours).
+    // Blue variant.
     C4T,
 
-    // Purple/pink - the original C4T colours ("Lila" in the ActivityChecker).
+    // Purple/pink - the original C4T colours.
     C4TPurple,
 }
 
