@@ -41,6 +41,9 @@ internal sealed class SecondaryChatWindow : Window
     // per-frame list allocation/growth.
     private readonly List<ChatLogEntry> viewMatchingLiveEntriesBuffer = new();
 
+    // See ChatWindow.liveEntriesBuffer's own remarks.
+    private readonly List<ChatLogEntry> liveEntriesBuffer = new();
+
     private const long BoundsSaveDebounceMs = 400;
 
     public SecondaryChatWindow(Plugin plugin, Action onEmpty)
@@ -86,14 +89,28 @@ internal sealed class SecondaryChatWindow : Window
         onEmpty();
     }
 
+    // See C4tTheme - colours pushed in PreDraw, popped in PostDraw.
+    private int c4tColorsPushed;
+    private float currentOpacity = 1f;
+
     public override void PreDraw()
     {
         var opacity = IsFocused ? plugin.Configuration.WindowOpacity : plugin.Configuration.UnfocusedWindowOpacity;
         ImGui.SetNextWindowBgAlpha(opacity);
+        currentOpacity = opacity;
+        c4tColorsPushed = C4tTheme.PushColors(plugin.Configuration);
+    }
+
+    public override void PostDraw()
+    {
+        C4tTheme.PopColors(c4tColorsPushed);
+        c4tColorsPushed = 0;
     }
 
     public override void Draw()
     {
+        C4tTheme.DrawDecorations(plugin.Configuration, currentOpacity);
+
         // See ChatWindow.Draw's matching remarks - drawing proceeds either way; only caching a
         // height measured with the wrong font is skipped, not the whole frame.
         using var chatFontScope = plugin.PushChatFont();
@@ -130,10 +147,11 @@ internal sealed class SecondaryChatWindow : Window
         DrawTabBar(config, state);
 
         var availableWidth = ImGui.GetContentRegionAvail().X;
-        using (ImRaii.PushColor(ImGuiCol.ChildBg, new Vector4(0f, 0f, 0f, config.ChatLogBackgroundOpacity)))
+        using (ImRaii.PushColor(ImGuiCol.ChildBg, C4tTheme.LogBackground(config)))
         using (ImRaii.Child("##secondaryChatLog", new Vector2(-1, -1), true, ImGuiWindowFlags.AlwaysVerticalScrollbar))
         {
             ImGui.SetScrollX(0f);
+            C4tTheme.DrawWatermark(plugin);
 
             DrawFilteredEntries(config, availableWidth);
         }
@@ -373,9 +391,10 @@ internal sealed class SecondaryChatWindow : Window
         var viewSeenBefore = lastSeenSequenceByView.GetValueOrDefault(viewKey, 0L);
         var viewSeenMax = viewSeenBefore;
 
-        // See ChatWindow.DrawChatLogEntries' matching remarks - Snapshot(), not the live Entries
-        // property, taken once here.
-        var liveEntries = plugin.ChatLog.Snapshot();
+        // See ChatWindow.DrawChatLogEntries' matching remarks - a locked copy, not the live Entries
+        // property, taken once here into a reused buffer.
+        plugin.ChatLog.CopyEntriesTo(liveEntriesBuffer);
+        var liveEntries = liveEntriesBuffer;
 
         // See ChatWindow.DrawChatLogEntries' matching remarks - filter to the active view *before*
         // capping (walking backward and stopping once the cap is filled, not collecting every match
@@ -497,7 +516,7 @@ internal sealed class SecondaryChatWindow : Window
         var isOutgoingTell = entry.ChatType == XivChatType.TellOutgoing;
         if (!isOutgoingTell && config.ShowSenderStatusIcons)
         {
-            prefixSize.X += StatusIconRenderer.Draw(plugin, entry.SenderPayloads);
+            prefixSize.X += StatusIconRenderer.Draw(plugin, entry);
         }
 
         var displayName = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
@@ -549,29 +568,8 @@ internal sealed class SecondaryChatWindow : Window
         ImGui.Spacing();
     }
 
-    private static bool MatchesWhisper(ChatLogEntry entry, string target)
-    {
-        var targetNameOnly = target.Split('@')[0];
-
-        // See ChatWindow.MatchesWhisperTarget's matching remarks - a failed-/tell notice never
-        // carries a Sender, so it needs its own RelatedWhisperTarget-based, name-only match instead.
-        if (entry.ChatType == XivChatType.ErrorMessage)
-        {
-            return entry.RelatedWhisperTarget != null
-                && string.Equals(entry.RelatedWhisperTarget, targetNameOnly, StringComparison.OrdinalIgnoreCase);
-        }
-
-        if (entry.ChatType != XivChatType.TellIncoming && entry.ChatType != XivChatType.TellOutgoing)
-        {
-            return false;
-        }
-
-        var entryIdentity = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
-        if (string.Equals(entryIdentity, target, StringComparison.OrdinalIgnoreCase))
-        {
-            return true;
-        }
-
-        return string.Equals(entry.Sender, targetNameOnly, StringComparison.OrdinalIgnoreCase);
-    }
+    // Same match as the main window's whisper tabs (minus their per-tab "clear" cutoff, which this
+    // window never had) - see ChatWindow.MatchesWhisperTargetIgnoringCutoff.
+    private static bool MatchesWhisper(ChatLogEntry entry, string target) =>
+        ChatWindow.MatchesWhisperTargetIgnoringCutoff(entry, target);
 }

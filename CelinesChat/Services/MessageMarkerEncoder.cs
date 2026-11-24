@@ -52,6 +52,30 @@ internal static class MessageMarkerEncoder
         return result.ToArray();
     }
 
+    /// <summary>
+    /// If a valid auto-translate marker ("[[Text#group.key]]") starts at <paramref name="markerStart"/>,
+    /// gives the index just past its closing "]]". The phrase text inside can contain spaces, so the
+    /// message splitter uses this to keep a marker in one piece instead of cutting it apart at a
+    /// word boundary, which would send it as broken literal text.
+    /// </summary>
+    public static bool TryGetMarkerEnd(string text, int markerStart, out int endExclusive)
+    {
+        endExclusive = markerStart;
+        if (markerStart + 1 >= text.Length || text[markerStart] != '[' || text[markerStart + 1] != '[')
+        {
+            return false;
+        }
+
+        var markerEnd = text.IndexOf("]]", markerStart + 2, StringComparison.Ordinal);
+        if (markerEnd < 0 || !TryParseMarker(text, markerStart, markerEnd, out _, out _))
+        {
+            return false;
+        }
+
+        endExclusive = markerEnd + 2;
+        return true;
+    }
+
     private static bool TryParseMarker(string text, int markerStart, int markerEnd, out uint group, out uint key)
     {
         group = 0;

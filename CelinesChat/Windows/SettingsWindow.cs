@@ -63,8 +63,24 @@ internal sealed class SettingsWindow : Window
         infoPage = new InfoPage(plugin);
     }
 
+    // See C4tTheme - colours pushed in PreDraw, popped in PostDraw.
+    private int c4tColorsPushed;
+
+    public override void PreDraw()
+    {
+        c4tColorsPushed = C4tTheme.PushColors(plugin.Configuration);
+    }
+
+    public override void PostDraw()
+    {
+        C4tTheme.PopColors(c4tColorsPushed);
+        c4tColorsPushed = 0;
+    }
+
     public override void Draw()
     {
+        C4tTheme.DrawDecorations(plugin.Configuration, 1f);
+
         using var style = ImRaii.PushStyle(ImGuiStyleVar.WindowRounding, 0f)
             .Push(ImGuiStyleVar.FrameRounding, 4f)
             .Push(ImGuiStyleVar.FramePadding, new Vector2(6f, 4f))

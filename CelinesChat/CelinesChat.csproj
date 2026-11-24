@@ -10,7 +10,7 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>CelinesChat</AssemblyName>
     <RootNamespace>CelinesChat</RootNamespace>
-    <Version>1.0.19.0</Version>
+    <Version>1.1.0.0</Version>
     <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
@@ -67,6 +67,8 @@
     <!-- Same wildcard pattern as the (since-removed) theme frame images used - DalamudPackager's
          zip step scans the whole flat output folder, so anything copied here ships automatically. -->
     <None Include="Web\**" CopyToOutputDirectory="PreserveNewest" Condition="Exists('Web')" />
+    <None Include="Fonts\**" CopyToOutputDirectory="PreserveNewest" Condition="Exists('Fonts')" />
+    <None Include="Assets\**" CopyToOutputDirectory="PreserveNewest" Condition="Exists('Assets')" />
   </ItemGroup>
 
 </Project>

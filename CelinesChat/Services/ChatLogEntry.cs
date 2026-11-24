@@ -65,4 +65,33 @@ internal sealed class ChatLogEntry
     // Payloads never change after an entry is created, so the parsed result is safe to compute once
     // and reuse for as long as the entry itself lives - see ColoredTextRenderer.DrawForEntry.
     internal List<(string Word, ColoredTextRenderer.TextSegmentKind Kind, ColoredTextRenderer.LinkTarget? Link, Vector4? Foreground)>? CachedRuns { get; set; }
+
+    // What CachedRuns was built with - the mention highlight depends on the logged-in character's
+    // name and the */(( )) colouring on the per-channel RP setting, so a change to either (character
+    // switch, settings toggle) has to rebuild it instead of keeping the stale colouring forever.
+    internal string? CachedRunsMentionTerm { get; set; }
+
+    internal bool CachedRunsRpFormatting { get; set; }
+
+    // Same reasoning as CachedRuns, for per-frame lookups that never change for a given entry.
+    private bool senderIconResolved;
+    private Dalamud.Game.Text.SeStringHandling.Payloads.IconPayload? senderIcon;
+
+    internal Dalamud.Game.Text.SeStringHandling.Payloads.IconPayload? SenderIcon
+    {
+        get
+        {
+            if (!senderIconResolved)
+            {
+                senderIconResolved = true;
+                senderIcon = SenderPayloads?.OfType<Dalamud.Game.Text.SeStringHandling.Payloads.IconPayload>().FirstOrDefault();
+            }
+
+            return senderIcon;
+        }
+    }
+
+    private string? searchTimestamp;
+
+    internal string SearchTimestamp => searchTimestamp ??= Timestamp.ToString("yyyy-MM-dd HH:mm:ss");
 }

@@ -1,12 +1,125 @@
-:root {
+/* Saved presets (see app.js's THEMES/applyTheme, persisted per-device in localStorage) - the
+   bare :root values are the "dark" preset and also the fallback before app.js applies whichever
+   theme was saved, so a first paint before JS runs still looks intentional rather than unstyled. */
+:root, html[data-theme="dark"] {
   color-scheme: dark;
   --bg: #16181d;
   --bg-raised: #1e2128;
+  --bg-sunken: #101216;
   --border: #2c303a;
   --text: #e8e8ea;
   --text-dim: #8b8f9a;
   --accent: #4a9eff;
+  --accent-text: #ffffff;
   --danger: #ff5c5c;
+}
+
+html[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f5f7;
+  --bg-raised: #ffffff;
+  --bg-sunken: #eceef2;
+  --border: #d8dbe1;
+  --text: #1c1e22;
+  --text-dim: #6b7280;
+  --accent: #2f6fed;
+  --accent-text: #ffffff;
+  --danger: #d63333;
+}
+
+/* "Celines Classic" - a warmer, near-black dark theme with an orange accent instead of blue. */
+html[data-theme="celines-classic"] {
+  color-scheme: dark;
+  --bg: #15100c;
+  --bg-raised: #1e1712;
+  --bg-sunken: #0e0a07;
+  --border: #3a2c1f;
+  --text: #f1e9df;
+  --text-dim: #a8927b;
+  --accent: #ff8a2b;
+  --accent-text: #1a0f00;
+  --danger: #ff6b5c;
+}
+
+/* "C4T" - same look as SpotifySync (blue, "c4t") and the ActivityChecker (purple, "c4t-lila"):
+   dark panel, accent with glow, corner markers in the second colour. Shared rules use
+   [data-theme^="c4t"] and only read the per-variant variables. Rajdhani/Share Tech Mono are used
+   if installed, else close fallbacks. */
+html[data-theme="c4t"] {
+  color-scheme: dark;
+  --bg: #03050c;
+  --bg-raised: #080c18;
+  --bg-sunken: #050812;
+  --border: rgba(40, 120, 255, 0.35);
+  --text: #dde8ff;
+  --text-dim: #8796b8;
+  --accent: #2878ff;
+  --accent-text: #ffffff;
+  --danger: #ff4d8d;
+  --c4t-accent-rgb: 40, 120, 255;
+  --c4t-second: #00e6c8;
+  --c4t-second-rgb: 0, 230, 200;
+}
+
+html[data-theme="c4t-lila"] {
+  color-scheme: dark;
+  --bg: #06030b;
+  --bg-raised: #10091b;
+  --bg-sunken: #08040e;
+  --border: rgba(176, 38, 255, 0.35);
+  --text: #f1e8ff;
+  --text-dim: #a08cbf;
+  --accent: #b026ff;
+  --accent-text: #ffffff;
+  --danger: #ff4d8d;
+  --c4t-accent-rgb: 176, 38, 255;
+  --c4t-second: #ff3ec8;
+  --c4t-second-rgb: 255, 62, 200;
+}
+
+html[data-theme^="c4t"] body {
+  font-family: "Rajdhani", "Bahnschrift", "Segoe UI", Roboto, Arial, sans-serif;
+  background:
+    radial-gradient(ellipse at 0% 0%, rgba(var(--c4t-second-rgb), 0.10), transparent 55%),
+    radial-gradient(ellipse at 100% 100%, rgba(var(--c4t-accent-rgb), 0.14), transparent 60%),
+    var(--bg);
+}
+
+html[data-theme^="c4t"] .time,
+html[data-theme^="c4t"] .tag {
+  font-family: "Share Tech Mono", Consolas, "Courier New", monospace;
+}
+
+html[data-theme^="c4t"] button:focus-visible,
+html[data-theme^="c4t"] textarea:focus,
+html[data-theme^="c4t"] input:focus {
+  outline: none;
+  box-shadow: 0 0 0 1px rgba(var(--c4t-accent-rgb), 0.6), 0 0 14px rgba(var(--c4t-accent-rgb), 0.45);
+}
+
+/* Corner markers top-left and bottom-right, fixed to the viewport and never in the way of clicks. */
+html[data-theme^="c4t"] body::before,
+html[data-theme^="c4t"] body::after {
+  content: "";
+  position: fixed;
+  width: 16px;
+  height: 16px;
+  pointer-events: none;
+  z-index: 50;
+}
+
+html[data-theme^="c4t"] body::before {
+  top: 4px;
+  left: 4px;
+  border-top: 2px solid var(--c4t-second);
+  border-left: 2px solid var(--c4t-second);
+}
+
+html[data-theme^="c4t"] body::after {
+  right: 4px;
+  bottom: 4px;
+  border-right: 2px solid var(--c4t-second);
+  border-bottom: 2px solid var(--c4t-second);
 }
 
 * {
@@ -22,8 +135,12 @@ html, body {
   font-size: 15px;
 }
 
+/* --app-height is set by app.js from window.visualViewport.height, tracking the actual visible
+   area under an open on-screen keyboard on browsers that don't honour the viewport meta tag's
+   interactive-widget=resizes-content hint. 100dvh is the fallback until that first JS-driven value
+   lands (and stays the fallback entirely on browsers with no visualViewport support at all). */
 .screen {
-  height: 100dvh;
+  height: var(--app-height, 100dvh);
   display: flex;
   flex-direction: column;
 }
@@ -66,10 +183,10 @@ html, body {
 
 .login-card input {
   width: 100%;
-  font-size: 24px;
-  letter-spacing: 4px;
+  font-size: 18px;
+  letter-spacing: 2px;
   text-align: center;
-  padding: 10px;
+  padding: 12px;
   border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--bg);
@@ -79,12 +196,12 @@ html, body {
 
 .login-card button {
   width: 100%;
-  padding: 12px;
+  padding: 14px;
   font-size: 16px;
   border-radius: 8px;
   border: none;
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-text);
   cursor: pointer;
 }
 
@@ -94,7 +211,7 @@ html, body {
   margin-top: 12px;
 }
 
-/* ----- Chat ----- */
+/* ----- Chat header / tab strip / channel button ----- */
 
 #chat-header {
   display: flex;
@@ -104,21 +221,24 @@ html, body {
   padding-top: max(8px, env(safe-area-inset-top));
   background: var(--bg-raised);
   border-bottom: 1px solid var(--border);
-  flex-wrap: wrap;
 }
 
 .picker {
   display: flex;
-  gap: 4px;
+  gap: 6px;
   overflow-x: auto;
   flex: 1 1 auto;
   min-width: 0;
 }
 
-.picker button, .picker select {
+/* Direct children only (not .whisper-pill's own nested buttons below) - plain fixed-tab buttons
+   are direct children of .picker, but a whisper's label+close pair needs different per-side
+   border-radius/border that this shared rule can't express without a specificity fight. */
+.picker > button {
   flex: 0 0 auto;
-  padding: 6px 12px;
-  border-radius: 8px;
+  padding: 10px 14px;
+  min-height: 40px;
+  border-radius: 10px;
   border: 1px solid var(--border);
   background: var(--bg);
   color: var(--text);
@@ -127,10 +247,82 @@ html, body {
   cursor: pointer;
 }
 
-.picker button.active {
+.picker > button.active {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--accent-text);
+}
+
+.whisper-pill {
+  display: flex;
+  align-items: stretch;
+  flex: 0 0 auto;
+}
+
+.whisper-pill-label {
+  padding: 10px 14px;
+  min-height: 40px;
+  border-radius: 10px 0 0 10px;
+  border: 1px solid var(--border);
+  border-right: none;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.whisper-pill-label.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.whisper-pill-close {
+  flex: 0 0 auto;
+  padding: 0 10px;
+  min-height: 40px;
+  border-radius: 0 10px 10px 0;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-dim);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.whisper-pill-close:hover {
+  color: var(--danger);
+}
+
+.channel-button {
+  flex: 0 0 auto;
+  max-width: 45vw;
+  padding: 10px 14px;
+  min-height: 40px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.theme-button {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
 }
 
 .dot {
@@ -145,13 +337,15 @@ html, body {
   background: #4caf50;
 }
 
+/* ----- Message list ----- */
+
 #message-list {
   flex: 1 1 auto;
   overflow-y: auto;
   padding: 8px 12px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
 }
 
 .msg {
@@ -182,8 +376,22 @@ html, body {
   cursor: pointer;
 }
 
+/* ----- Send error banner ----- */
+
+.error-banner {
+  background: rgba(255, 92, 92, 0.16);
+  color: var(--danger);
+  border-top: 1px solid var(--border);
+  padding: 8px 12px;
+  font-size: 13px;
+  text-align: center;
+}
+
+/* ----- Compose ----- */
+
 #compose-form {
   display: flex;
+  align-items: flex-end;
   gap: 8px;
   padding: 8px 10px;
   padding-bottom: max(8px, env(safe-area-inset-bottom));
@@ -194,7 +402,7 @@ html, body {
 #compose-text {
   flex: 1 1 auto;
   resize: none;
-  max-height: 120px;
+  overflow-y: auto;
   padding: 10px 12px;
   border-radius: 10px;
   border: 1px solid var(--border);
@@ -202,17 +410,174 @@ html, body {
   color: var(--text);
   font-size: 15px;
   font-family: inherit;
+  /* Actual height is driven by app.js's autoGrowTextarea, up to COMPOSE_MAX_HEIGHT_PX - this is
+     just the natural single-line starting point. */
+  min-height: 40px;
 }
 
 #compose-form button {
   flex: 0 0 auto;
   padding: 0 18px;
+  min-height: 44px;
   border-radius: 10px;
   border: none;
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-text);
   font-size: 15px;
   cursor: pointer;
+}
+
+/* ----- Channel picker bottom sheet ----- */
+
+.sheet-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: flex-end;
+  z-index: 20;
+}
+
+.sheet-overlay[hidden] {
+  display: none;
+}
+
+.sheet {
+  width: 100%;
+  max-height: calc(var(--app-height, 100vh) * 0.8);
+  background: var(--bg-raised);
+  border-top: 1px solid var(--border);
+  border-radius: 16px 16px 0 0;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: max(8px, env(safe-area-inset-bottom));
+}
+
+.sheet-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px 8px;
+  flex: 0 0 auto;
+}
+
+.sheet-header h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.sheet-close {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 24px;
+  line-height: 1;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.sheet-content {
+  overflow-y: auto;
+  padding: 4px 16px 16px;
+}
+
+.sheet-section-title {
+  margin: 16px 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+
+.sheet-section-title:first-child {
+  margin-top: 0;
+}
+
+.sheet-whisper-input {
+  display: flex;
+  gap: 8px;
+}
+
+.sheet-whisper-input input {
+  flex: 1 1 auto;
+  min-height: 44px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-sunken);
+  color: var(--text);
+  font-size: 15px;
+}
+
+.sheet-whisper-input button {
+  flex: 0 0 auto;
+  min-height: 44px;
+  padding: 0 16px;
+  border-radius: 10px;
+  border: none;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.sheet-suggestion-list, .sheet-option-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.sheet-suggestion-list button, .sheet-option {
+  min-height: 40px;
+  padding: 8px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-sunken);
+  color: var(--text);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.sheet-option.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.theme-swatch-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.theme-swatch {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 52px;
+  padding: 8px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-sunken);
+  color: var(--text);
+  font-size: 14px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.theme-swatch.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+
+.theme-swatch-preview {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
 }
 
 @media (min-width: 700px) {
@@ -227,5 +592,16 @@ html, body {
   #chat-header, #compose-form {
     padding-left: 24px;
     padding-right: 24px;
+  }
+
+  .sheet-overlay {
+    align-items: center;
+    justify-content: center;
+  }
+
+  .sheet {
+    width: 480px;
+    max-height: 70vh;
+    border-radius: 16px;
   }
 }

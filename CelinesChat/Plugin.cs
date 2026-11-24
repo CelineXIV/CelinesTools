@@ -38,7 +38,22 @@ public sealed class Plugin : IDalamudPlugin
 
     private const long EnterActivationGraceMs = 500;
 
+    // Configuration changes are written to disk once they've settled for this long (but at the
+    // latest after ConfigSaveMaxDelayMs) instead of on every call - SavePluginConfig serializes the
+    // whole config (every character's tabs, drafts, whisper colours, ...) on the game's main thread,
+    // and settings sliders/colour pickers used to trigger that on every single frame while dragged.
+    private const long ConfigSaveDebounceMs = 1000;
+    private const long ConfigSaveMaxDelayMs = 5000;
+
     internal const int MinWhisperDelayMs = 1200;
+
+    private static readonly string[] NativeChatAddonNames =
+    {
+        "ChatLog", "ChatLogPanel_0", "ChatLogPanel_1", "ChatLogPanel_2", "ChatLogPanel_3",
+    };
+
+    private long configDirtySince = -1;
+    private long lastConfigChange;
 
     private readonly IDalamudPluginInterface pluginInterface;
     private readonly ICommandManager commandManager;
@@ -218,7 +233,7 @@ public sealed class Plugin : IDalamudPlugin
             }
         }
 
-        sender = new MessageQueueSender(framework, log);
+        sender = new MessageQueueSender(framework, clientState, condition, log);
         var whisperFailureDetector = new WhisperFailureDetector(dataManager);
         ChatLog = new ChatLogService(chatGui, Configuration, this.pluginInterface, log, gameInteropProvider, playerState, whisperFailureDetector);
         chatActivationWatcher = new ChatActivationWatcher(gameInteropProvider, log);
@@ -278,7 +293,49 @@ public sealed class Plugin : IDalamudPlugin
         this.framework.Update += OnFrameworkUpdate;
     }
 
-    public void SaveConfiguration() => pluginInterface.SavePluginConfig(Configuration);
+    /// <summary>
+    /// Marks the configuration as changed. It's written to disk shortly afterwards (see
+    /// FlushConfigurationIfDue), so this is cheap enough to call on every edit.
+    /// </summary>
+    public void SaveConfiguration()
+    {
+        var now = Environment.TickCount64;
+        if (configDirtySince < 0)
+        {
+            configDirtySince = now;
+        }
+
+        lastConfigChange = now;
+    }
+
+    private void SaveConfigurationNow()
+    {
+        configDirtySince = -1;
+        try
+        {
+            pluginInterface.SavePluginConfig(Configuration);
+        }
+        catch (Exception ex)
+        {
+            log.Error(ex, "[CelinesChat] Konnte die Konfiguration nicht speichern.");
+        }
+    }
+
+    private void FlushConfigurationIfDue()
+    {
+        if (configDirtySince < 0)
+        {
+            return;
+        }
+
+        var now = Environment.TickCount64;
+        if (now - lastConfigChange >= ConfigSaveDebounceMs || now - configDirtySince >= ConfigSaveMaxDelayMs)
+        {
+            SaveConfigurationNow();
+        }
+    }
+
+    internal bool IsLoggedIn => clientState.IsLoggedIn;
 
     public void ToggleSettingsWindow() => settingsWindow.Toggle();
 
@@ -304,9 +361,16 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
-    internal void RegenerateWebClientAuthCode()
+    internal void RegenerateWebClientAuthCode() => SetWebClientAuthCode(WebAuth.GenerateAuthCode());
+
+    // Shared by the "generate a random one" and "type your own" paths (WebClientPage) - clearing
+    // WebClientAuthStore on any code change (not just a random regeneration) is deliberate: a
+    // session token is independent of the code itself, but treating "the code changed" as "log
+    // everyone out" consistently, regardless of *why* it changed, is simpler to reason about than a
+    // rule that only applies to one of the two ways of changing it.
+    internal void SetWebClientAuthCode(string code)
     {
-        Configuration.WebClientAuthCode = WebAuth.GenerateAuthCode();
+        Configuration.WebClientAuthCode = code;
         Configuration.WebClientAuthStore.Clear();
         SaveConfiguration();
     }
@@ -513,26 +577,42 @@ public sealed class Plugin : IDalamudPlugin
         return ownWorld == null || string.Equals(targetWorld, ownWorld, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// The targeted player as "Name@HomeWorld". Without the world, /tell only reaches players from
+    /// your current world - visitors from other worlds never got the message.
+    /// </summary>
     internal string? GetCurrentTargetPlayerName()
     {
-        var target = targetManager.Target;
-        return target is { ObjectKind: Dalamud.Game.ClientState.Objects.Enums.ObjectKind.Pc } ? target.Name.TextValue : null;
+        return targetManager.Target is IPlayerCharacter player
+            ? WithWorld(player.Name.TextValue, player.HomeWorld.ValueNullable?.Name.ExtractText())
+            : null;
     }
 
+    // "Name@HomeWorld" for the same reason as GetCurrentTargetPlayerName - cross-world parties are
+    // common. Skips the player themselves.
     internal List<string> GetPartyMemberNames()
     {
         var names = new List<string>();
         foreach (var member in partyList)
         {
             var name = member.Name.TextValue;
-            if (!string.IsNullOrWhiteSpace(name) && !names.Contains(name))
+            if (string.IsNullOrWhiteSpace(name))
             {
-                names.Add(name);
+                continue;
+            }
+
+            var qualified = WithWorld(name, member.World.ValueNullable?.Name.ExtractText());
+            if (!IsOwnCharacterTarget(qualified) && !names.Contains(qualified))
+            {
+                names.Add(qualified);
             }
         }
 
         return names;
     }
+
+    private static string WithWorld(string name, string? world) =>
+        string.IsNullOrEmpty(world) ? name : $"{name}@{world}";
 
     private IPlayerCharacter? FindNearbyPlayer(string name, string? world)
     {
@@ -755,6 +835,28 @@ public sealed class Plugin : IDalamudPlugin
         return new StatusIconInfo(texture.Handle, uv0, uv1, size);
     }
 
+    // Same reasoning as fontIconTexture above - held for the plugin's lifetime so the texture stays
+    // resolved instead of flickering in and out between frames. Keyed by file name (one per C4T variant).
+    private readonly Dictionary<string, ISharedImmediateTexture> c4tLogoTextures = new();
+
+    /// <summary>The C4T logo from the plugin's Assets folder, or null until it's loaded (or if it's missing).</summary>
+    internal Dalamud.Bindings.ImGui.ImTextureID? GetC4tLogo(string fileName)
+    {
+        if (!c4tLogoTextures.TryGetValue(fileName, out var texture))
+        {
+            var path = Path.Combine(pluginInterface.AssemblyLocation.DirectoryName ?? string.Empty, "Assets", fileName);
+            if (!File.Exists(path))
+            {
+                return null;
+            }
+
+            texture = TextureProvider.GetFromFile(new FileInfo(path));
+            c4tLogoTextures[fileName] = texture;
+        }
+
+        return texture.GetWrapOrDefault()?.Handle;
+    }
+
     private ItemPayload? hoveredItemThisFrame;
 
     private uint? shownItemTooltipId;
@@ -867,14 +969,19 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        try
+        // The try/catch has to live inside the deferred callback - wrapped around RunOnTick itself it
+        // only covered scheduling, and an exception thrown by the other plugin's handler went unseen.
+        framework.RunOnTick(() =>
         {
-            framework.RunOnTick(() => handler.Invoke(link.CommandId, new SeString(linkPayloads)));
-        }
-        catch (Exception ex)
-        {
-            log.Error(ex, "[CelinesChat] Fehler beim Ausfuehren eines Dalamud-Link-Handlers.");
-        }
+            try
+            {
+                handler.Invoke(link.CommandId, new SeString(linkPayloads));
+            }
+            catch (Exception ex)
+            {
+                log.Error(ex, "[CelinesChat] Fehler beim Ausfuehren eines Dalamud-Link-Handlers.");
+            }
+        });
     }
 
     internal void OpenWhisperTab(string target)
@@ -889,17 +996,27 @@ public sealed class Plugin : IDalamudPlugin
         chatWindow.IsOpen = true;
     }
 
-    public void SendRawCommand(string command)
+    /// <summary>
+    /// Sends a slash command as typed. Returns false (and sends nothing) if it's longer than the
+    /// game allows for one chat line - unlike normal messages, a command can't be split up.
+    /// </summary>
+    public bool SendRawCommand(string command)
     {
         var encoded = MessageMarkerEncoder.Encode(command);
+        if (encoded.Length > MessageSplitter.MaxChatLineBytes)
+        {
+            return false;
+        }
+
         sender.Enqueue(new[] { encoded }, Configuration.DelayMs);
         RecordSentHistory(command);
+        return true;
     }
 
     public void SendChunks(List<string> chunks, string originalDraft)
     {
         var state = GetCharacterState();
-        var prefix = BuildChannelPrefix(state);
+        var prefix = GetChannelPrefix(state);
         var commands = new List<byte[]>(chunks.Count);
         foreach (var chunk in chunks)
         {
@@ -1014,11 +1131,14 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
-    private string BuildChannelPrefix(CharacterState state) => state.LastChannel switch
+    /// <summary>UTF-8 size of the channel command each message goes out with - MessageSplitter needs it to keep every whole line within the game's limit.</summary>
+    internal int GetChannelPrefixBytes(CharacterState state) => System.Text.Encoding.UTF8.GetByteCount(GetChannelPrefix(state));
+
+    internal string GetChannelPrefix(CharacterState state) => state.LastChannel switch
     {
         ChatChannel.Say => "/say ",
         ChatChannel.Party => "/p ",
-        ChatChannel.Whisper => $"/tell {state.LastWhisperTarget} ",
+        ChatChannel.Whisper => $"/tell {state.LastWhisperTarget.Trim()} ",
         ChatChannel.Yell => "/yell ",
         ChatChannel.Shout => "/shout ",
         ChatChannel.FreeCompany => "/fc ",
@@ -1034,6 +1154,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private unsafe void OnFrameworkUpdate(IFramework _)
     {
+        FlushConfigurationIfDue();
         SetNativeChatVisible(!Configuration.HideNativeChat);
         ApplyGameStateVisibility();
 
@@ -1118,10 +1239,10 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        SetAddonVisible(raptureAtkModule, "ChatLog", visible);
-        for (var i = 0; i < 4; i++)
+        // Runs every frame - the names are fixed strings rather than rebuilt (and allocated) each time.
+        foreach (var name in NativeChatAddonNames)
         {
-            SetAddonVisible(raptureAtkModule, $"ChatLogPanel_{i}", visible);
+            SetAddonVisible(raptureAtkModule, name, visible);
         }
     }
 
@@ -1200,5 +1321,11 @@ public sealed class Plugin : IDalamudPlugin
         chatActivationWatcher.Dispose();
         chatFontManager.Dispose();
         sender.Dispose();
+
+        // Last, so it also catches anything the teardown above still changed.
+        if (configDirtySince >= 0)
+        {
+            SaveConfigurationNow();
+        }
     }
 }

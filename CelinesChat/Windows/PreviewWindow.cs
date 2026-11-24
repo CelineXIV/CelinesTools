@@ -25,14 +25,28 @@ internal sealed class PreviewWindow : Window
     // that mode (regardless of its own manually-toggled IsOpen state) so there's never a duplicate.
     public override bool DrawConditions() => plugin.Configuration.PreviewPosition == PreviewPosition.Window;
 
+    // See C4tTheme - colours pushed in PreDraw, popped in PostDraw.
+    private int c4tColorsPushed;
+    private float currentOpacity = 1f;
+
     public override void PreDraw()
     {
         var opacity = IsFocused ? plugin.Configuration.WindowOpacity : plugin.Configuration.UnfocusedWindowOpacity;
         ImGui.SetNextWindowBgAlpha(opacity);
+        currentOpacity = opacity;
+        c4tColorsPushed = C4tTheme.PushColors(plugin.Configuration);
+    }
+
+    public override void PostDraw()
+    {
+        C4tTheme.PopColors(c4tColorsPushed);
+        c4tColorsPushed = 0;
     }
 
     public override void Draw()
     {
+        C4tTheme.DrawDecorations(plugin.Configuration, currentOpacity);
+
         // See ChatWindow.Draw's matching remarks - drawing proceeds either way. This window has no
         // cached heights to worry about (it redraws its preview text fresh every frame), so there's
         // nothing further to guard here beyond just letting it draw with whatever font is active.

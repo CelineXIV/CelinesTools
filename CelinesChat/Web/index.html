@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <title>CelinesChat</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
@@ -10,8 +10,8 @@
   <div id="login-screen" class="screen">
     <form id="login-form" class="login-card">
       <h1>CelinesChat</h1>
-      <p>Enter the code shown in the plugin's settings.</p>
-      <input id="login-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="5" placeholder="12345" autofocus>
+      <p>Enter the code or password shown in the plugin's settings.</p>
+      <input id="login-code" type="password" autocomplete="current-password" maxlength="100" autofocus>
       <button type="submit">Connect</button>
       <p id="login-error" class="error" hidden></p>
     </form>
@@ -19,17 +19,42 @@
 
   <div id="chat-screen" class="screen" hidden>
     <header id="chat-header">
-      <div id="view-picker" class="picker"></div>
-      <div id="channel-picker" class="picker"></div>
+      <div id="tab-strip" class="picker"></div>
+      <button id="channel-button" type="button" class="channel-button">
+        <span id="channel-label">...</span>
+      </button>
+      <button id="theme-button" type="button" class="theme-button" title="Design" aria-label="Design">&#127912;</button>
       <span id="connection-dot" class="dot" title="Connection status"></span>
     </header>
 
     <main id="message-list" aria-live="polite"></main>
 
+    <div id="send-error" class="error-banner" hidden></div>
+
     <form id="compose-form">
       <textarea id="compose-text" rows="1" placeholder="Message..." maxlength="4000"></textarea>
       <button type="submit">Send</button>
     </form>
+  </div>
+
+  <div id="channel-sheet" class="sheet-overlay" hidden>
+    <div class="sheet" role="dialog" aria-modal="true" aria-label="Change channel">
+      <div class="sheet-header">
+        <h2>Change channel</h2>
+        <button id="sheet-close" type="button" class="sheet-close" aria-label="Close">&times;</button>
+      </div>
+      <div id="sheet-content" class="sheet-content"></div>
+    </div>
+  </div>
+
+  <div id="theme-sheet" class="sheet-overlay" hidden>
+    <div class="sheet" role="dialog" aria-modal="true" aria-label="Design">
+      <div class="sheet-header">
+        <h2>Design</h2>
+        <button id="theme-sheet-close" type="button" class="sheet-close" aria-label="Close">&times;</button>
+      </div>
+      <div id="theme-sheet-content" class="sheet-content"></div>
+    </div>
   </div>
 
   <script src="/app.js"></script>

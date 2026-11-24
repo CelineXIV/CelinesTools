@@ -19,5 +19,6 @@ internal static class Changelog
         ("1.0.17", "I'm to lazy for patchnotes!"),
         ("1.0.18", "Bugfix"),
         ("1.0.19", "Small features and possible FPS fix"),
+        ("1.1.0", "Performance, Bugfixes & C4T Design"),
     };
 }

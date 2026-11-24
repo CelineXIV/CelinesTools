@@ -28,24 +28,33 @@ internal sealed unsafe class ChatActivationWatcher : IDisposable
         }
     }
 
+    // A native hook detour: an exception escaping from here would crash the game, so anything
+    // unexpected falls back to letting the game handle the event itself.
     private byte ChatLogRefreshDetour(nint log, ushort eventId, AtkValue* value)
     {
-        if (eventId != 0x31 || value == null || value->UInt is not (0x05 or 0x0C))
+        try
+        {
+            if (eventId != 0x31 || value == null || value->UInt is not (0x05 or 0x0C))
+            {
+                return chatLogRefreshHook!.Original(log, eventId, value);
+            }
+
+            var str = value + 2;
+            if (str != null && ((int)str->Type & 0xF) == (int)AtkValueType.String && str->String.HasValue)
+            {
+                var text = str->String.ToString();
+                if (!string.IsNullOrEmpty(text))
+                {
+                    TextToInsert?.Invoke(text);
+                }
+            }
+
+            return 1;
+        }
+        catch (Exception)
         {
             return chatLogRefreshHook!.Original(log, eventId, value);
         }
-
-        var str = value + 2;
-        if (str != null && ((int)str->Type & 0xF) == (int)AtkValueType.String && str->String.HasValue)
-        {
-            var text = str->String.ToString();
-            if (!string.IsNullOrEmpty(text))
-            {
-                TextToInsert?.Invoke(text);
-            }
-        }
-
-        return 1;
     }
 
     public void Dispose() => chatLogRefreshHook?.Dispose();

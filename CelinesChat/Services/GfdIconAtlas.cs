@@ -52,6 +52,15 @@ internal static class GfdIconAtlas
             }
 
             var header = *(GfdHeader*)ptr;
+
+            // The entry count comes straight from the file - never read past the actual data even
+            // if it's unexpected (that would be an out-of-bounds native memory read).
+            var maxEntries = (bytes.Length - sizeof(GfdHeader)) / sizeof(GfdEntry);
+            if (header.Count < 0 || header.Count > maxEntries)
+            {
+                return false;
+            }
+
             var entries = new ReadOnlySpan<GfdEntry>(ptr + sizeof(GfdHeader), header.Count);
             return TryFind(entries, iconId, out entry);
         }

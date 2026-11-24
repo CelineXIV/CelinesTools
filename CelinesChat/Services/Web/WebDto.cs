@@ -53,6 +53,26 @@ internal sealed class WebViewDto
     public string ActiveWhisperTarget { get; set; } = string.Empty;
 
     public string Channel { get; set; } = string.Empty;
+
+    public int LinkshellNumber { get; set; }
+
+    public int CrossWorldLinkshellNumber { get; set; }
+}
+
+internal sealed class WebNumberedChannelDto
+{
+    public int Number { get; set; }
+
+    public string Name { get; set; } = string.Empty;
+}
+
+internal sealed class WebChannelOptionsDto
+{
+    public List<WebNumberedChannelDto> Linkshells { get; set; } = new();
+
+    public List<WebNumberedChannelDto> CrossWorldLinkshells { get; set; } = new();
+
+    public List<string> PartyMembers { get; set; } = new();
 }
 
 internal sealed class WebAuthRequest

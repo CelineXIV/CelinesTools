@@ -30,7 +30,13 @@ internal sealed class ChatLogService : IDisposable
     private readonly IPluginLog log;
     private readonly IPlayerState playerState;
     private readonly WhisperFailureDetector whisperFailureDetector;
+    private readonly ChatLogFileWriter fileWriter;
     private readonly List<ChatLogEntry> entries = new();
+
+    // Kept in step with `entries` on every add/remove, so eviction can find the largest category
+    // without recounting the whole buffer - that used to run (with a fresh dictionary and a LINQ
+    // sort) for every single incoming message once the buffer was full.
+    private readonly Dictionary<ChatCategory, int> entryCountByCategory = new();
     private readonly Hook<RaptureLogModule.Delegates.AddMsgSourceEntry>? contentIdHook;
     private long nextSequence = 1;
 
@@ -49,6 +55,7 @@ internal sealed class ChatLogService : IDisposable
         this.log = log;
         this.playerState = playerState;
         this.whisperFailureDetector = whisperFailureDetector;
+        fileWriter = new ChatLogFileWriter(log);
 
         LogsFolderPath = Path.Combine(pluginInterface.GetPluginConfigDirectory(), "Logs");
         try
@@ -111,7 +118,7 @@ internal sealed class ChatLogService : IDisposable
                 foreach (var entry in loaded)
                 {
                     entry.Sequence = nextSequence++;
-                    entries.Add(entry);
+                    AddEntryLocked(entry);
                 }
             }
         }
@@ -126,6 +133,7 @@ internal sealed class ChatLogService : IDisposable
         lock (entriesLock)
         {
             entries.Clear();
+            entryCountByCategory.Clear();
         }
     }
 
@@ -134,6 +142,20 @@ internal sealed class ChatLogService : IDisposable
         lock (entriesLock)
         {
             return new List<ChatLogEntry>(entries);
+        }
+    }
+
+    /// <summary>
+    /// Same as <see cref="Snapshot"/>, but into a caller-owned list that's reused frame after frame -
+    /// the chat windows need a copy every frame, and a fresh list of up to MaxEntries references
+    /// each time was steady garbage for the GC to clean up (felt as periodic micro-stutters).
+    /// </summary>
+    internal void CopyEntriesTo(List<ChatLogEntry> target)
+    {
+        lock (entriesLock)
+        {
+            target.Clear();
+            target.AddRange(entries);
         }
     }
 
@@ -161,6 +183,18 @@ internal sealed class ChatLogService : IDisposable
             return;
         }
 
+        try
+        {
+            ProcessChatMessage(message);
+        }
+        catch (Exception ex)
+        {
+            log.Warning(ex, "[CelinesChat] Konnte Chatnachricht nicht verarbeiten.");
+        }
+    }
+
+    private void ProcessChatMessage(IHandleableChatMessage message)
+    {
         var playerPayload = message.Sender.Payloads.OfType<PlayerPayload>().FirstOrDefault();
 
         var entry = new ChatLogEntry
@@ -175,12 +209,9 @@ internal sealed class ChatLogService : IDisposable
             SenderPayloads = message.Sender.Payloads.ToList(),
         };
 
-        // TEMP-DIAG: reported bug - a message with an item link ("Fantasia") rendered entirely in
-        // one flat colour (white) instead of the normal per-word colouring. ColoredTextRenderer.
-        // BuildRuns pushes/pops a foreground colour stack from UIForegroundPayload.IsEnabled, which
-        // should be exactly symmetric for a real item link - dumping the raw payload sequence the
-        // next time an item gets linked will show directly whether that's actually true, instead of
-        // guessing. Remove once the real cause is confirmed.
+        // Diagnostic for a reported item-link colouring bug (a whole message rendered in one flat
+        // colour) - dumps the raw payload sequence of any message with an item link. Verbose level,
+        // so it no longer fills the normal log; enable verbose logging in Dalamud to see it.
         if (entry.Payloads?.Any(p => p is ItemPayload) == true)
         {
             var dump = string.Join(" | ", entry.Payloads.Select(p => p switch
@@ -192,7 +223,7 @@ internal sealed class ChatLogService : IDisposable
                 _ => p.GetType().Name,
             }));
 
-            log.Info($"[CelinesChat][ColorDiag] item-link message payloads: {dump}");
+            log.Verbose("[CelinesChat][ColorDiag] item-link message payloads: {Dump}", dump);
         }
 
         if (message.LogKind == XivChatType.NoviceNetworkSystem)
@@ -216,7 +247,7 @@ internal sealed class ChatLogService : IDisposable
 
         lock (entriesLock)
         {
-            entries.Add(entry);
+            AddEntryLocked(entry);
             while (entries.Count > MaxEntries)
             {
                 RemoveOldestFromLargestCategory();
@@ -232,34 +263,59 @@ internal sealed class ChatLogService : IDisposable
 
     internal event Action<ChatLogEntry>? EntryAdded;
 
+    private void AddEntryLocked(ChatLogEntry entry)
+    {
+        entries.Add(entry);
+        if (ChannelDisplay.CategoryOf(entry.ChatType) is { } category)
+        {
+            entryCountByCategory[category] = entryCountByCategory.GetValueOrDefault(category) + 1;
+        }
+    }
+
+    private void RemoveEntryAtLocked(int index)
+    {
+        if (ChannelDisplay.CategoryOf(entries[index].ChatType) is { } category
+            && entryCountByCategory.TryGetValue(category, out var count))
+        {
+            if (count <= 1)
+            {
+                entryCountByCategory.Remove(category);
+            }
+            else
+            {
+                entryCountByCategory[category] = count - 1;
+            }
+        }
+
+        entries.RemoveAt(index);
+    }
+
     private void RemoveOldestFromLargestCategory()
     {
-        var countsByCategory = new Dictionary<ChatCategory, int>();
-        foreach (var existing in entries)
+        ChatCategory? largestCategory = null;
+        var largestCount = 0;
+        foreach (var (category, count) in entryCountByCategory)
         {
-            if (ChannelDisplay.CategoryOf(existing.ChatType) is { } category)
+            if (count > largestCount)
             {
-                countsByCategory[category] = countsByCategory.GetValueOrDefault(category) + 1;
+                largestCategory = category;
+                largestCount = count;
             }
         }
 
-        if (countsByCategory.Count == 0)
+        if (largestCategory is { } largest)
         {
-            entries.RemoveAt(0);
-            return;
-        }
-
-        var largestCategory = countsByCategory.OrderByDescending(kv => kv.Value).First().Key;
-        for (var i = 0; i < entries.Count; i++)
-        {
-            if (ChannelDisplay.CategoryOf(entries[i].ChatType) == largestCategory)
+            for (var i = 0; i < entries.Count; i++)
             {
-                entries.RemoveAt(i);
-                return;
+                if (ChannelDisplay.CategoryOf(entries[i].ChatType) == largest)
+                {
+                    RemoveEntryAtLocked(i);
+                    return;
+                }
             }
         }
 
-        entries.RemoveAt(0);
+        RemoveEntryAtLocked(0);
     }
 
     private unsafe void PlaySoundIfNeeded(ChatLogEntry entry)
@@ -348,30 +404,37 @@ internal sealed class ChatLogService : IDisposable
         }
     }
 
+    // Queued for ChatLogFileWriter's background flush instead of written right here - this runs on
+    // the game's main thread for every single logged message, and opening/appending/closing the file
+    // each time was a steady source of frame-time spikes in busy channels.
     private void AppendToFile(ChatLogEntry entry)
     {
-        try
-        {
-            var fileName = entry.Timestamp.ToString("yyyy-MM-dd") + ".txt";
-            var path = Path.Combine(LogsFolderPath, fileName);
-            var senderPart = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
-            var line = $"[{entry.Timestamp:HH:mm:ss}] {ChannelDisplay.Tag(entry.ChatType)} {senderPart}: {entry.Text}{Environment.NewLine}";
-            File.AppendAllText(path, line);
-        }
-        catch (Exception ex)
-        {
-            log.Warning(ex, "Konnte Chatnachricht nicht in Logdatei schreiben.");
-        }
+        var fileName = entry.Timestamp.ToString("yyyy-MM-dd") + ".txt";
+        var path = Path.Combine(LogsFolderPath, fileName);
+        var senderPart = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
+        fileWriter.Enqueue(path, $"[{entry.Timestamp:HH:mm:ss}] {ChannelDisplay.Tag(entry.ChatType)} {senderPart}: {SingleLine(entry.Text)}");
     }
+
+    // One message per line - a stray line break would cut the entry in half when reading it back.
+    private static string SingleLine(string text) =>
+        text.Contains('\n') || text.Contains('\r') ? text.Replace("\r", " ").Replace("\n", " ") : text;
 
     private static readonly char[] InvalidFileNameChars = Path.GetInvalidFileNameChars();
     private const string WhispersSubfolder = "Whispers";
 
-    private string GetWhisperLogPath(string target)
+    // The folder itself is created by ChatLogFileWriter right before it writes.
+    private string GetWhisperLogPath(string target) =>
+        Path.Combine(LogsFolderPath, WhispersSubfolder, SanitizeForFileName(target) + ".txt");
+
+    // FileShare.ReadWrite: the background writer may be appending to the same file at that moment.
+    private static IEnumerable<string> ReadLinesShared(string path)
     {
-        var folder = Path.Combine(LogsFolderPath, WhispersSubfolder);
-        Directory.CreateDirectory(folder);
-        return Path.Combine(folder, SanitizeForFileName(target) + ".txt");
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var reader = new StreamReader(stream);
+        while (reader.ReadLine() is { } line)
+        {
+            yield return line;
+        }
     }
 
     private static string SanitizeForFileName(string name)
@@ -386,18 +449,9 @@ internal sealed class ChatLogService : IDisposable
 
     private void AppendToWhisperFile(ChatLogEntry entry)
     {
-        try
-        {
-            var senderPart = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
-            var path = GetWhisperLogPath(senderPart);
-
-            var line = $"[{entry.Timestamp:yyyy-MM-dd HH:mm:ss}] {ChannelDisplay.Tag(entry.ChatType)} {senderPart}: {entry.Text}{Environment.NewLine}";
-            File.AppendAllText(path, line);
-        }
-        catch (Exception ex)
-        {
-            log.Warning(ex, "Konnte Whisper-Nachricht nicht in eigene Logdatei schreiben.");
-        }
+        var senderPart = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
+        var path = GetWhisperLogPath(senderPart);
+        fileWriter.Enqueue(path, $"[{entry.Timestamp:yyyy-MM-dd HH:mm:ss}] {ChannelDisplay.Tag(entry.ChatType)} {senderPart}: {SingleLine(entry.Text)}");
     }
 
     public List<string> GetWhisperLogTargets()
@@ -444,10 +498,16 @@ internal sealed class ChatLogService : IDisposable
         return targets;
     }
 
+    // Also called from background tasks (see ChatWindow.PreloadWhisperHistoryForFirstView) - only
+    // touches the files and its own locals, plus the thread-safe writer flush.
     public List<ChatLogEntry> LoadWhisperHistory(string target)
     {
         var result = new List<ChatLogEntry>();
         var folder = Path.Combine(LogsFolderPath, WhispersSubfolder);
+
+        // The newest messages may still be waiting in the writer's queue.
+        fileWriter.Flush();
+
         if (!Directory.Exists(folder))
         {
             return result;
@@ -484,7 +544,7 @@ internal sealed class ChatLogService : IDisposable
 
             try
             {
-                foreach (var line in File.ReadAllLines(file))
+                foreach (var line in ReadLinesShared(file))
                 {
                     var entry = ParseWhisperLine(line);
                     if (entry != null)
@@ -511,6 +571,9 @@ internal sealed class ChatLogService : IDisposable
     {
         try
         {
+            // Otherwise lines still queued for the old file would recreate it after the move.
+            fileWriter.Flush();
+
             var oldPath = GetWhisperLogPath(oldTarget);
             if (!File.Exists(oldPath))
             {
@@ -597,12 +660,14 @@ internal sealed class ChatLogService : IDisposable
 
         try
         {
+            fileWriter.Flush();
+
             if (!File.Exists(path))
             {
                 return result;
             }
 
-            foreach (var line in File.ReadAllLines(path))
+            foreach (var line in ReadLinesShared(path))
             {
                 var entry = ParseLine(dateName, line);
                 if (entry != null)
@@ -746,5 +811,6 @@ internal sealed class ChatLogService : IDisposable
     {
         chatGui.ChatMessage -= OnChatMessage;
         contentIdHook?.Dispose();
+        fileWriter.Dispose();
     }
 }

@@ -7,10 +7,14 @@ internal sealed class WebSseClient
 {
     public Guid Id { get; } = Guid.NewGuid();
 
-    public Channel<string> Outbound { get; } = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
+    // Bounded: a client that stops reading without its connection dropping (a phone with the browser
+    // in the background, say) would otherwise make this queue - and the plugin's memory - grow for as
+    // long as chat keeps coming in. When it's full the oldest frames go; a reconnect catches up anyway.
+    public Channel<string> Outbound { get; } = Channel.CreateBounded<string>(new BoundedChannelOptions(1000)
     {
         SingleReader = true,
         SingleWriter = false,
+        FullMode = BoundedChannelFullMode.DropOldest,
     });
 }
 

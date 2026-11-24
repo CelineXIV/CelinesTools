@@ -1,17 +1,13 @@
-using System.Collections.Generic;
-using System.Linq;
-using System.Numerics;
 using Dalamud.Bindings.ImGui;
-using Dalamud.Game.Text.SeStringHandling;
-using Dalamud.Game.Text.SeStringHandling.Payloads;
+using CelinesChat.Services;
 
 namespace CelinesChat.Windows;
 
 internal static class StatusIconRenderer
 {
-    public static float Draw(Plugin plugin, List<Payload>? senderPayloads)
+    public static float Draw(Plugin plugin, ChatLogEntry entry)
     {
-        var iconPayload = senderPayloads?.OfType<IconPayload>().FirstOrDefault();
+        var iconPayload = entry.SenderIcon;
         if (iconPayload == null)
         {
             return 0f;

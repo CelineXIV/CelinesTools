@@ -5,7 +5,42 @@ namespace CelinesChat.Services;
 
 internal static class NativeChannels
 {
-    public static unsafe List<(int Number, string Name)> GetExistingLinkshells()
+    // The footer's channel label asks for these on every frame while a (CW)LS is the active
+    // channel - re-reading every slot's name out of game memory (and allocating fresh lists and
+    // strings) 60 times a second for something that changes maybe once a session isn't needed.
+    // Only ever used from the framework thread. Callers must treat the returned lists as read-only.
+    private const long CacheLifetimeMs = 1000;
+
+    private static List<(int Number, string Name)>? cachedLinkshells;
+    private static long cachedLinkshellsTick;
+    private static List<(int Number, string Name)>? cachedCrossWorldLinkshells;
+    private static long cachedCrossWorldLinkshellsTick;
+
+    public static List<(int Number, string Name)> GetExistingLinkshells()
+    {
+        var now = Environment.TickCount64;
+        if (cachedLinkshells == null || now - cachedLinkshellsTick >= CacheLifetimeMs)
+        {
+            cachedLinkshells = ReadExistingLinkshells();
+            cachedLinkshellsTick = now;
+        }
+
+        return cachedLinkshells;
+    }
+
+    public static List<(int Number, string Name)> GetExistingCrossWorldLinkshells()
+    {
+        var now = Environment.TickCount64;
+        if (cachedCrossWorldLinkshells == null || now - cachedCrossWorldLinkshellsTick >= CacheLifetimeMs)
+        {
+            cachedCrossWorldLinkshells = ReadExistingCrossWorldLinkshells();
+            cachedCrossWorldLinkshellsTick = now;
+        }
+
+        return cachedCrossWorldLinkshells;
+    }
+
+    private static unsafe List<(int Number, string Name)> ReadExistingLinkshells()
     {
         var result = new List<(int, string)>();
         try
@@ -38,7 +73,7 @@ internal static class NativeChannels
         return result;
     }
 
-    public static unsafe List<(int Number, string Name)> GetExistingCrossWorldLinkshells()
+    private static unsafe List<(int Number, string Name)> ReadExistingCrossWorldLinkshells()
     {
         var result = new List<(int, string)>();
         try

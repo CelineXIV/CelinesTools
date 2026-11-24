@@ -10,6 +10,12 @@ namespace CelinesChat.Windows.SettingsPages;
 internal sealed class WebClientPage
 {
     private readonly Plugin plugin;
+    private string customCodeInput = string.Empty;
+
+    // Masked by default now that this can be a real, freely-typed password rather than just a
+    // short throwaway numeric code - a settings window is exactly the kind of thing that ends up
+    // visible in a screenshot or stream without anyone thinking twice about it.
+    private bool showCode;
 
     public WebClientPage(Plugin plugin)
     {
@@ -65,7 +71,18 @@ internal sealed class WebClientPage
         ImGui.TextUnformatted(Loc.T("WebClient.AuthCodeLabel"));
         using (ImRaii.PushFont(UiBuilder.MonoFont))
         {
-            ImGui.TextColored(new Vector4(1f, 0.85f, 0.2f, 1f), config.WebClientAuthCode);
+            ImGui.TextColored(new Vector4(1f, 0.85f, 0.2f, 1f), showCode ? config.WebClientAuthCode : new string('*', config.WebClientAuthCode.Length));
+        }
+
+        ImGui.SameLine();
+        if (ImGuiComponents.IconButton(showCode ? FontAwesomeIcon.EyeSlash : FontAwesomeIcon.Eye))
+        {
+            showCode = !showCode;
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T(showCode ? "WebClient.HideCode" : "WebClient.ShowCode"));
         }
 
         ImGui.SameLine();
@@ -88,6 +105,34 @@ internal sealed class WebClientPage
         if (ImGui.IsItemHovered())
         {
             ImGui.SetTooltip(Loc.T("WebClient.RegenerateCode"));
+        }
+
+        // No length/character restriction beyond the input buffer itself - the login page's own
+        // field no longer caps at 5 numeric digits either (see index.html), so this can be a short
+        // numeric code for quick phone-keypad entry or a full free-form password, whichever is
+        // wanted. Masked (Password flag) since this field is as sensitive as the value it sets, and
+        // may be visible on a shared/streamed screen.
+        ImGui.SetNextItemWidth(220);
+        var codeReady = customCodeInput.Length > 0;
+        if (ImGui.InputTextWithHint("##customWebCode", Loc.T("WebClient.CustomCodeHint"), ref customCodeInput, 100, ImGuiInputTextFlags.Password | ImGuiInputTextFlags.EnterReturnsTrue) && codeReady)
+        {
+            plugin.SetWebClientAuthCode(customCodeInput);
+            customCodeInput = string.Empty;
+        }
+
+        ImGui.SameLine();
+        using (ImRaii.Disabled(!codeReady))
+        {
+            if (ImGui.Button(Loc.T("WebClient.ApplyCode")))
+            {
+                plugin.SetWebClientAuthCode(customCodeInput);
+                customCodeInput = string.Empty;
+            }
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("WebClient.ApplyCodeTooltip"));
         }
 
         ImGui.Spacing();

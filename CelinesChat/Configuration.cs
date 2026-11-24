@@ -7,12 +7,28 @@ using CelinesChat.Services;
 
 namespace CelinesChat;
 
+// Persisted as numbers - new values only ever at the end.
 public enum ChatFontChoice
 {
     Default,
     NotoSansCjkRegular,
     NotoSansCjkMedium,
     InconsolataRegular,
+
+    // Ships with the plugin (Fonts folder, SIL OFL) - the C4T design's font, same as SpotifySync.
+    Rajdhani,
+}
+
+/// <summary>Overall look of the chat windows. Standard is the plugin's original design. Persisted as numbers - append only.</summary>
+public enum ChatDesign
+{
+    Standard,
+
+    // Blue ("Ozean" in the ActivityChecker, SpotifySync's colours).
+    C4T,
+
+    // Purple/pink - the original C4T colours ("Lila" in the ActivityChecker).
+    C4TPurple,
 }
 
 public enum ToolbarIconPack
@@ -267,6 +283,14 @@ public class Configuration : IPluginConfiguration
     public bool ScrollToBottomOnTabSwitch { get; set; } = true;
 
     public bool PreloadRecentHistoryOnStartup { get; set; } = true;
+
+    public ChatDesign Design { get; set; } = ChatDesign.Standard;
+
+    /// <summary>C4T designs only: small logo at the start of the tab row.</summary>
+    public bool ShowC4tLogo { get; set; } = true;
+
+    /// <summary>C4T designs only: faint logo centred behind the chat log.</summary>
+    public bool ShowC4tWatermark { get; set; } = true;
 
     public ToolbarIconPack ToolbarIconPack { get; set; } = ToolbarIconPack.Classic;
 

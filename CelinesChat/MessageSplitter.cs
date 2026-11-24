@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using CelinesChat.Services;
 
 namespace CelinesChat;
 
@@ -106,6 +107,9 @@ internal sealed class ChunkBuilder
     }
 
     public int Length => text.Length;
+
+    public int ByteLength => Encoding.UTF8.GetByteCount(text.ToString());
+
     public int SegmentCount => segments.Count;
 
     public void AppendVerbatim(string s, int sourceStart)
@@ -205,26 +209,47 @@ internal sealed class ChunkBuilder
 
 internal static class MessageSplitter
 {
-    private const int ReservedSuffixLength = 8;
+    /// <summary>
+    /// The game refuses chat lines longer than this many UTF-8 bytes, counted over the whole line
+    /// including the channel command in front ("/tell Jane Doe@Shiva "). A character limit alone
+    /// isn't enough: umlauts take 2 bytes, typographic quotes 3 and emoji 4.
+    /// </summary>
+    public const int MaxChatLineBytes = 500;
 
-    public static List<string> BuildMessages(string fullText, int maxLength)
-        => BuildMappedMessages(fullText, maxLength).Select(c => c.Text).ToList();
+    /// <param name="prefixBytes">UTF-8 length of the channel command each message will be sent with.</param>
+    public static List<string> BuildMessages(string fullText, int maxLength, int prefixBytes = 0)
+        => BuildMappedMessages(fullText, maxLength, prefixBytes).Select(c => c.Text).ToList();
 
     /// Same output as BuildMessages, but each chunk also carries a MapToSource lookup back into
     /// fullText - see MappedChunk's own remarks. Kept as the single real implementation (BuildMessages
     /// just projects .Text out of it) so the two can never drift apart.
-    public static List<MappedChunk> BuildMappedMessages(string fullText, int maxLength)
+    public static List<MappedChunk> BuildMappedMessages(string fullText, int maxLength, int prefixBytes = 0)
     {
-        maxLength = Math.Max(10, maxLength);
+        var text = Sanitize(fullText);
+        var limit = new Limit(Math.Max(10, maxLength), Math.Max(10, MaxChatLineBytes - prefixBytes));
 
-        var builders = SplitParagraphs(fullText, maxLength);
+        var builders = SplitParagraphs(text, limit);
         if (builders.Count <= 1)
         {
             return builders.Select(b => b.Build()).ToList();
         }
 
-        var reservedMax = Math.Max(1, maxLength - ReservedSuffixLength);
-        builders = SplitParagraphs(fullText, reservedMax);
+        // Every part gets a " (i/n)" suffix, so split again with room reserved for it. Reserving
+        // can itself push n over the next power of ten (9 -> 10 parts), so repeat until the reserved
+        // room is enough for the part count it produces - the old fixed 8 characters only covered
+        // up to 99 parts.
+        var suffixLength = SuffixLength(builders.Count);
+        while (true)
+        {
+            builders = SplitParagraphs(text, limit.Shrink(suffixLength));
+            var needed = SuffixLength(builders.Count);
+            if (needed <= suffixLength)
+            {
+                break;
+            }
+
+            suffixLength = needed;
+        }
 
         var result = new List<MappedChunk>(builders.Count);
         for (var i = 0; i < builders.Count; i++)
@@ -236,7 +261,35 @@ internal static class MessageSplitter
         return result;
     }
 
-    private static List<ChunkBuilder> SplitParagraphs(string fullText, int maxLength)
+    // " (" + i + "/" + n + ")" for any i <= n.
+    private static int SuffixLength(int count) => 4 + (2 * count.ToString().Length);
+
+    /// <summary>
+    /// Tabs and other control characters can't go into a chat line - turned into plain spaces (so
+    /// they also split words) rather than removed, which keeps every character at its original index
+    /// for the preview's click-to-cursor mapping. Line breaks are left for SplitLinesWithOffsets,
+    /// except a lone '\r' (not part of "\r\n"), which would otherwise end up inside a word.
+    /// </summary>
+    private static string Sanitize(string text)
+    {
+        char[]? chars = null;
+        for (var i = 0; i < text.Length; i++)
+        {
+            var c = text[i];
+            var isLineBreak = c == '\n' || (c == '\r' && i + 1 < text.Length && text[i + 1] == '\n');
+            if (isLineBreak || !char.IsControl(c))
+            {
+                continue;
+            }
+
+            chars ??= text.ToCharArray();
+            chars[i] = ' ';
+        }
+
+        return chars != null ? new string(chars) : text;
+    }
+
+    private static List<ChunkBuilder> SplitParagraphs(string fullText, Limit limit)
     {
         var result = new List<ChunkBuilder>();
 
@@ -249,7 +302,7 @@ internal static class MessageSplitter
                 continue;
             }
 
-            result.AddRange(SplitParagraph(trimmed, lineStart + leadingTrim, maxLength));
+            result.AddRange(SplitParagraph(trimmed, lineStart + leadingTrim, limit));
         }
 
         return result;
@@ -280,10 +333,10 @@ internal static class MessageSplitter
         return result;
     }
 
-    private static List<ChunkBuilder> SplitParagraph(string paragraph, int paragraphSourceStart, int maxLength)
+    private static List<ChunkBuilder> SplitParagraph(string paragraph, int paragraphSourceStart, Limit limit)
     {
         var result = new List<ChunkBuilder>();
-        if (paragraph.Length <= maxLength)
+        if (limit.Fits(paragraph))
         {
             var single = new ChunkBuilder();
             single.AppendVerbatim(paragraph, paragraphSourceStart);
@@ -291,45 +344,60 @@ internal static class MessageSplitter
             return result;
         }
 
-        var effectiveMax = Math.Max(1, maxLength - 2);
+        // Reserve 2 characters of headroom on every chunk: a chunk in the middle of a long
+        // "*emote*" span can need a synthetic "*" appended (to close it for its left boundary) AND a
+        // synthetic "*" prepended (to reopen it for its right boundary) at the same time - this
+        // guarantees FixEmoteBoundary's close/reopen fallback always fits. "*" is 1 char and 1 byte.
+        var packLimit = limit.Shrink(2);
         var words = SplitWordsWithOffsets(paragraph);
         var current = new ChunkBuilder();
+        var currentBytes = 0;
 
         foreach (var (word, wordOffset) in words)
         {
-            var wordSourceStart = paragraphSourceStart + wordOffset;
             var remainingWord = word;
-            var remainingSourceStart = wordSourceStart;
+            var remainingSourceStart = paragraphSourceStart + wordOffset;
+            var remainingBytes = Encoding.UTF8.GetByteCount(remainingWord);
 
-            while (remainingWord.Length > effectiveMax)
+            while (!packLimit.Fits(remainingWord.Length, remainingBytes))
             {
                 if (current.Length > 0)
                 {
                     result.Add(current);
                     current = new ChunkBuilder();
+                    currentBytes = 0;
                 }
 
+                var cutLength = LongestFittingPrefix(remainingWord, packLimit);
                 var cut = new ChunkBuilder();
-                cut.AppendVerbatim(remainingWord[..effectiveMax], remainingSourceStart);
+                cut.AppendVerbatim(remainingWord[..cutLength], remainingSourceStart);
                 result.Add(cut);
 
-                remainingWord = remainingWord[effectiveMax..];
-                remainingSourceStart += effectiveMax;
+                remainingWord = remainingWord[cutLength..];
+                remainingSourceStart += cutLength;
+                remainingBytes = Encoding.UTF8.GetByteCount(remainingWord);
             }
 
-            var candidateLength = current.Length == 0 ? remainingWord.Length : current.Length + 1 + remainingWord.Length;
-            if (candidateLength > effectiveMax && current.Length > 0)
+            if (remainingWord.Length == 0)
+            {
+                continue;
+            }
+
+            if (current.Length > 0 && !packLimit.Fits(current.Length + 1 + remainingWord.Length, currentBytes + 1 + remainingBytes))
             {
                 result.Add(current);
                 current = new ChunkBuilder();
+                currentBytes = 0;
             }
 
             if (current.Length > 0)
             {
                 current.AppendSynthetic(" ");
+                currentBytes++;
             }
 
             current.AppendVerbatim(remainingWord, remainingSourceStart);
+            currentBytes += remainingBytes;
         }
 
         if (current.Length > 0)
@@ -341,13 +409,15 @@ internal static class MessageSplitter
         {
             for (var i = 0; i < result.Count - 1; i++)
             {
-                FixEmoteBoundary(result, i, maxLength);
+                FixEmoteBoundary(result, i, limit);
             }
         }
 
         return result;
     }
 
+    /// Words split on spaces - except inside an auto-translate marker ("[[Nice to meet you#4.12]]"),
+    /// which stays one word even though its phrase contains spaces (see MessageMarkerEncoder).
     private static List<(string Word, int Offset)> SplitWordsWithOffsets(string text)
     {
         var result = new List<(string, int)>();
@@ -367,6 +437,12 @@ internal static class MessageSplitter
             var start = i;
             while (i < text.Length && text[i] != ' ')
             {
+                if (text[i] == '[' && MessageMarkerEncoder.TryGetMarkerEnd(text, i, out var markerEnd))
+                {
+                    i = markerEnd;
+                    continue;
+                }
+
                 i++;
             }
 
@@ -376,22 +452,86 @@ internal static class MessageSplitter
         return result;
     }
 
-    private static void FixEmoteBoundary(List<ChunkBuilder> chunks, int i, int maxLength)
+    /// <summary>
+    /// How many chars of a too-long word fit into one chunk. Never cuts a surrogate pair (emoji and
+    /// other characters outside the BMP) in half - that would send a broken character - and never
+    /// cuts into an auto-translate marker, unless the marker alone is too long to fit anywhere.
+    /// </summary>
+    private static int LongestFittingPrefix(string word, Limit limit)
+    {
+        // A marker that's longer than the (user-chosen) character limit but still fits the game's
+        // byte limit goes out whole and slightly over the character limit - cutting it apart would
+        // send broken literal text instead of the auto-translate phrase.
+        if (MessageMarkerEncoder.TryGetMarkerEnd(word, 0, out var leadingMarkerEnd))
+        {
+            var markerBytes = Encoding.UTF8.GetByteCount(word.AsSpan(0, leadingMarkerEnd));
+            if (!limit.Fits(leadingMarkerEnd, markerBytes) && markerBytes <= limit.MaxBytes)
+            {
+                return leadingMarkerEnd;
+            }
+        }
+
+        var chars = 0;
+        var bytes = 0;
+        while (chars < word.Length)
+        {
+            var isPair = char.IsHighSurrogate(word[chars]) && chars + 1 < word.Length && char.IsLowSurrogate(word[chars + 1]);
+            var unitChars = isPair ? 2 : 1;
+            var unitBytes = isPair ? 4 : Utf8Length(word[chars]);
+            if (!limit.Fits(chars + unitChars, bytes + unitBytes))
+            {
+                break;
+            }
+
+            chars += unitChars;
+            bytes += unitBytes;
+        }
+
+        // Back off to the start of a marker the cut would otherwise land inside of.
+        for (var i = 0; i < chars; i++)
+        {
+            if (word[i] != '[' || !MessageMarkerEncoder.TryGetMarkerEnd(word, i, out var markerEnd))
+            {
+                continue;
+            }
+
+            if (markerEnd > chars && i > 0)
+            {
+                chars = i;
+                break;
+            }
+
+            i = markerEnd - 1;
+        }
+
+        // Always make progress, even if not a single character fits a degenerate limit.
+        if (chars == 0)
+        {
+            chars = char.IsHighSurrogate(word[0]) && word.Length > 1 && char.IsLowSurrogate(word[1]) ? 2 : 1;
+        }
+
+        return chars;
+    }
+
+    // Lone surrogates are encoded as U+FFFD (3 bytes), same as Encoding.UTF8 does.
+    private static int Utf8Length(char c) => c < 0x80 ? 1 : c < 0x800 ? 2 : 3;
+
+    private static void FixEmoteBoundary(List<ChunkBuilder> chunks, int i, Limit limit)
     {
         if (!EndsInsideEmote(chunks[i]))
         {
             return;
         }
 
-        if (TryMoveTrailingEmoteWords(chunks, i, maxLength))
+        if (TryMoveTrailingEmoteWords(chunks, i, limit))
         {
             return;
         }
 
-        TryCloseAndReopenEmote(chunks, i, maxLength);
+        TryCloseAndReopenEmote(chunks, i, limit);
     }
 
-    private static bool TryMoveTrailingEmoteWords(List<ChunkBuilder> chunks, int i, int maxLength)
+    private static bool TryMoveTrailingEmoteWords(List<ChunkBuilder> chunks, int i, Limit limit)
     {
         var builder = chunks[i];
         var count = builder.SegmentCount;
@@ -416,9 +556,13 @@ internal static class MessageSplitter
             return false;
         }
 
+        // The next chunk keeps 1 character of headroom: it may still need a closing "*" of its own
+        // at the following boundary (its start is now a real emote opening, so it never needs the
+        // reopening one).
         var trailingPreview = builder.PeekTrailingText(lastBalancedIndex + 1);
-        var candidateLength = trailingPreview.Length + 1 + chunks[i + 1].Length;
-        if (candidateLength > maxLength)
+        var candidateChars = trailingPreview.Length + 1 + chunks[i + 1].Length;
+        var candidateBytes = Encoding.UTF8.GetByteCount(trailingPreview) + 1 + chunks[i + 1].ByteLength;
+        if (!limit.Shrink(1).Fits(candidateChars, candidateBytes))
         {
             return false;
         }
@@ -428,9 +572,10 @@ internal static class MessageSplitter
         return true;
     }
 
-    private static bool TryCloseAndReopenEmote(List<ChunkBuilder> chunks, int i, int maxLength)
+    private static bool TryCloseAndReopenEmote(List<ChunkBuilder> chunks, int i, Limit limit)
     {
-        if (chunks[i].Length + 1 > maxLength || chunks[i + 1].Length + 1 > maxLength)
+        if (!limit.Fits(chunks[i].Length + 1, chunks[i].ByteLength + 1)
+            || !limit.Fits(chunks[i + 1].Length + 1, chunks[i + 1].ByteLength + 1))
         {
             return false;
         }
@@ -466,5 +611,15 @@ internal static class MessageSplitter
         }
 
         return count;
+    }
+
+    /// <summary>A chunk must stay within both the character and the UTF-8 byte budget.</summary>
+    private readonly record struct Limit(int MaxChars, int MaxBytes)
+    {
+        public bool Fits(string text) => Fits(text.Length, Encoding.UTF8.GetByteCount(text));
+
+        public bool Fits(int chars, int bytes) => chars <= MaxChars && bytes <= MaxBytes;
+
+        public Limit Shrink(int amount) => new(Math.Max(1, MaxChars - amount), Math.Max(1, MaxBytes - amount));
     }
 }

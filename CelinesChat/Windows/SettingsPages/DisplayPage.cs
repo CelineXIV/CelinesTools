@@ -19,6 +19,39 @@ internal sealed class DisplayPage
     {
         var config = plugin.Configuration;
 
+        ImGui.SetNextItemWidth(180);
+        var designIndex = (int)config.Design;
+        if (ImGui.Combo(Loc.T("Settings.Design"), ref designIndex, DesignLabels, DesignLabels.Length))
+        {
+            config.Design = (ChatDesign)designIndex;
+            plugin.SaveConfiguration();
+        }
+
+        using (ImRaii.PushColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]))
+        {
+            ImGui.TextWrapped(Loc.T("Settings.DesignHint"));
+        }
+
+        using (ImRaii.Disabled(!C4tTheme.IsActive(config)))
+        using (ImRaii.PushIndent())
+        {
+            var showLogo = config.ShowC4tLogo;
+            if (ImGui.Checkbox(Loc.T("Settings.C4tLogo"), ref showLogo))
+            {
+                config.ShowC4tLogo = showLogo;
+                plugin.SaveConfiguration();
+            }
+
+            var showWatermark = config.ShowC4tWatermark;
+            if (ImGui.Checkbox(Loc.T("Settings.C4tWatermark"), ref showWatermark))
+            {
+                config.ShowC4tWatermark = showWatermark;
+                plugin.SaveConfiguration();
+            }
+        }
+
+        ImGui.Separator();
+
         ImGui.SetNextItemWidth(150);
         var opacity = config.WindowOpacity;
         if (ImGui.SliderFloat(Loc.T("Settings.WindowOpacity"), ref opacity, 0.2f, 1.0f))
@@ -141,6 +174,13 @@ internal sealed class DisplayPage
             GlassIconButton.Draw(FontAwesomeIcon.Users, config.ToolbarIconPack, iconBgColor, previewIconColor, "##preview3");
         }
     }
+
+    private static readonly string[] DesignLabels =
+    {
+        Loc.T("Settings.Design.Standard"),
+        Loc.T("Settings.Design.C4T"),
+        Loc.T("Settings.Design.C4TPurple"),
+    };
 
     private static readonly string[] PreviewPositionLabels =
     {

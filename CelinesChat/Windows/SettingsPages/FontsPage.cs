@@ -49,5 +49,6 @@ internal sealed class FontsPage
         "Dalamud: NotoSansCjkRegular",
         "Dalamud: NotoSansCjkMedium",
         "Dalamud: InconsolataRegular (monospace)",
+        "Rajdhani (C4T)",
     };
 }

@@ -95,9 +95,16 @@ internal static class ColoredTextRenderer
         Action<LinkTarget>? onLinkHovered = null,
         bool allowRpFormatting = true)
     {
-        entry.CachedRuns ??= entry.Payloads is { } payloads
-            ? BuildRuns(payloads, mentionTerm, allowRpFormatting).ToList()
-            : BuildPlainRuns(entry.Text, mentionTerm, allowRpFormatting).ToList();
+        if (entry.CachedRuns == null
+            || entry.CachedRunsMentionTerm != mentionTerm
+            || entry.CachedRunsRpFormatting != allowRpFormatting)
+        {
+            entry.CachedRuns = entry.Payloads is { } payloads
+                ? BuildRuns(payloads, mentionTerm, allowRpFormatting).ToList()
+                : BuildPlainRuns(entry.Text, mentionTerm, allowRpFormatting).ToList();
+            entry.CachedRunsMentionTerm = mentionTerm;
+            entry.CachedRunsRpFormatting = allowRpFormatting;
+        }
 
         DrawSequence(
             entry.CachedRuns,
