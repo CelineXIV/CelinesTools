@@ -96,6 +96,36 @@ internal sealed class DisplayPage
             plugin.SaveConfiguration();
         }
 
+        var showDivider = config.ShowNewMessagesDivider;
+        if (ImGui.Checkbox(Loc.T("Settings.ShowNewMessagesDivider"), ref showDivider))
+        {
+            config.ShowNewMessagesDivider = showDivider;
+            plugin.SaveConfiguration();
+        }
+
+        var group = config.GroupConsecutiveMessages;
+        if (ImGui.Checkbox(Loc.T("Settings.GroupConsecutive"), ref group))
+        {
+            config.GroupConsecutiveMessages = group;
+            plugin.SaveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Settings.GroupConsecutiveTooltip"));
+        }
+
+        DrawSpacingSlider(Loc.T("Settings.LineSpacing"), config.LineSpacing, 0f, 10f, v => config.LineSpacing = v);
+        DrawSpacingSlider(Loc.T("Settings.MessageSpacing"), config.MessageSpacing, 0f, 16f, v => config.MessageSpacing = v);
+
+        var showDates = config.ShowDateSeparators;
+        if (ImGui.Checkbox(Loc.T("Settings.ShowDateSeparators"), ref showDates))
+        {
+            config.ShowDateSeparators = showDates;
+            plugin.InvalidateChatLayout();
+            plugin.SaveConfiguration();
+        }
+
         ImGui.Spacing();
         ImGui.SetNextItemWidth(220);
         var previewPositionIndex = (int)config.PreviewPosition;
@@ -194,4 +224,34 @@ internal sealed class DisplayPage
         Loc.T("Settings.ToolbarIconPack.AeroGlass"),
         Loc.T("Settings.ToolbarIconPack.FrostedGlass"),
     };
+
+    // -1 = "normal" (ImGui's own spacing); the slider shows the current value, the button returns to normal.
+    private void DrawSpacingSlider(string label, float value, float min, float max, System.Action<float> set)
+    {
+        using var id = ImRaii.PushId(label);
+        var shown = value < 0f ? ImGui.GetStyle().ItemSpacing.Y : value;
+        ImGui.SetNextItemWidth(160);
+        if (ImGui.SliderFloat(label, ref shown, min, max, value < 0f ? Loc.T("Settings.SpacingNormal") : "%.0f px"))
+        {
+            set(MathF.Round(shown));
+            plugin.InvalidateChatLayout();
+            plugin.SaveConfiguration();
+        }
+
+        if (value >= 0f)
+        {
+            ImGui.SameLine();
+            if (ImGuiComponents.IconButton(FontAwesomeIcon.UndoAlt))
+            {
+                set(-1f);
+                plugin.InvalidateChatLayout();
+                plugin.SaveConfiguration();
+            }
+
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(Loc.T("Settings.SpacingReset"));
+            }
+        }
+    }
 }

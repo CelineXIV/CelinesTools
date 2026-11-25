@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.Text;
@@ -35,6 +36,9 @@ internal sealed class SecondaryChatWindow : Window
     // reasoning (skip the real per-word ImGui work for an entry outside the visible area).
     private readonly Dictionary<long, float> entryHeightCache = new();
     private readonly HashSet<long> provisionalHeightSequences = new();
+
+    // See ChatWindow.entryVariantCache.
+    private readonly Dictionary<long, byte> entryVariantCache = new();
     private bool lastKnownFontAvailable = true;
 
     // See ChatWindow.viewMatchingLiveEntriesBuffer's own remarks - reused every frame to avoid
@@ -45,6 +49,14 @@ internal sealed class SecondaryChatWindow : Window
     private readonly List<ChatLogEntry> liveEntriesBuffer = new();
 
     private const long BoundsSaveDebounceMs = 400;
+
+    // Layout version last seen - see Plugin.InvalidateChatLayout.
+    private int seenLayoutVersion = -1;
+
+    // Compose box at the bottom of this window.
+    private string composeText = string.Empty;
+    private string? composeError;
+    private bool refocusCompose;
 
     public SecondaryChatWindow(Plugin plugin, Action onEmpty)
         : base(Loc.T("SecondaryChat.Title") + "##secondaryChat")
@@ -72,6 +84,8 @@ internal sealed class SecondaryChatWindow : Window
 
     public override void OnClose()
     {
+        plugin.IsSecondaryChatInputActive = false;
+
         // Only a close the user actually triggered (right-clicking a tab back to the main window,
         // which empties this one) should return its remaining tabs and tear this window down. A
         // close that happens to fire while the plugin itself is unloading/reloading (Plugin.
@@ -133,6 +147,15 @@ internal sealed class SecondaryChatWindow : Window
 
         var config = plugin.Configuration;
 
+        // Something changed every message's height (e.g. a tab's timestamps toggled) - re-measure.
+        if (plugin.LayoutVersion != seenLayoutVersion)
+        {
+            seenLayoutVersion = plugin.LayoutVersion;
+            entryHeightCache.Clear();
+            entryVariantCache.Clear();
+            provisionalHeightSequences.Clear();
+        }
+
         using var style = ImRaii.PushStyle(ImGuiStyleVar.WindowRounding, 0f)
             .Push(ImGuiStyleVar.FrameRounding, 4f)
             .Push(ImGuiStyleVar.FramePadding, new Vector2(6f, 4f))
@@ -146,16 +169,27 @@ internal sealed class SecondaryChatWindow : Window
 
         DrawTabBar(config, state);
 
+        if (!IsOpen)
+        {
+            plugin.IsSecondaryChatInputActive = false;
+            return;
+        }
+
         var availableWidth = ImGui.GetContentRegionAvail().X;
+        var composeHeight = ImGui.GetFrameHeightWithSpacing() + (composeError != null ? ImGui.GetTextLineHeightWithSpacing() : 0f);
         using (ImRaii.PushColor(ImGuiCol.ChildBg, C4tTheme.LogBackground(config)))
-        using (ImRaii.Child("##secondaryChatLog", new Vector2(-1, -1), true, ImGuiWindowFlags.AlwaysVerticalScrollbar))
+        using (ImRaii.Child("##secondaryChatLog", new Vector2(-1, -composeHeight), true, ImGuiWindowFlags.AlwaysVerticalScrollbar))
         {
             ImGui.SetScrollX(0f);
             C4tTheme.DrawWatermark(plugin);
 
-            DrawFilteredEntries(config, availableWidth);
+            using (ImRaii.PushStyle(ImGuiStyleVar.ItemSpacing, new Vector2(ImGui.GetStyle().ItemSpacing.X, config.LineSpacing), config.LineSpacing >= 0f))
+            {
+                DrawFilteredEntries(config, availableWidth);
+            }
         }
 
+        DrawCompose(config);
         TrackWindowBounds();
     }
 
@@ -410,7 +444,7 @@ internal sealed class SecondaryChatWindow : Window
         for (var i = liveEntries.Count - 1; i >= 0 && viewMatchingLiveEntriesBuffer.Count < maxLiveEntriesConsidered; i--)
         {
             var entry = liveEntries[i];
-            if (showingWhisper ? MatchesWhisper(entry, activeWhisperTarget) : tab!.Matches(entry.ChatType))
+            if ((showingWhisper ? MatchesWhisper(entry, activeWhisperTarget) : tab!.Matches(entry.ChatType)) && !plugin.IsFilteredOut(entry))
             {
                 viewMatchingLiveEntriesBuffer.Add(entry);
             }
@@ -418,27 +452,67 @@ internal sealed class SecondaryChatWindow : Window
 
         viewMatchingLiveEntriesBuffer.Reverse();
         var entries = viewMatchingLiveEntriesBuffer;
+        var showTimestamps = tab?.ShowTimestamps ?? true;
+        DateTime? previousDate = null;
 
-        foreach (var entry in entries)
+        ChatLogEntry? lastShownEntry = null;
+
+        for (var i = 0; i < entries.Count; i++)
         {
-            if (entry.Sequence > viewSeenMax)
+            // See ChatWindow.DrawChatLogEntries - repeats drawn once with "×N", same-sender blocks grouped.
+            var last = i;
+            if (config.CollapseRepeatedMessages)
             {
-                viewSeenMax = entry.Sequence;
-            }
-
-            if (entry.Sequence > viewSeenBefore)
-            {
-                hasNewEntries = true;
-
-                if (IsSelfAuthored(entry))
+                while (last + 1 < entries.Count && MessageGrouping.IsRepeat(entries[last], entries[last + 1]))
                 {
-                    hasNewOwnMessageInView = true;
+                    last++;
                 }
             }
 
+            for (var k = i; k <= last; k++)
+            {
+                var tracked = entries[k];
+                if (tracked.Sequence > viewSeenMax)
+                {
+                    viewSeenMax = tracked.Sequence;
+                }
+
+                if (tracked.Sequence > viewSeenBefore)
+                {
+                    hasNewEntries = true;
+
+                    if (IsSelfAuthored(tracked))
+                    {
+                        hasNewOwnMessageInView = true;
+                    }
+                }
+            }
+
+            var runFirst = entries[i];
+            var entry = entries[last];
+            var repeatCount = last - i + 1;
+            var trailingSpacing = !(config.GroupConsecutiveMessages && last + 1 < entries.Count && MessageGrouping.Continues(entry, entries[last + 1]));
+            i = last;
+
+            var markerDrawn = false;
+            var date = entry.Timestamp.Date;
+            if (config.ShowDateSeparators && (previousDate is { } previous ? previous != date : date != DateTime.Today))
+            {
+                ChatWindow.DrawCenteredMarker(date.ToString(Loc.T("ChatLog.DateSeparatorFormat"), Loc.Culture), ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled], availableWidth);
+                markerDrawn = true;
+            }
+
+            previousDate = date;
+
+            var continuation = config.GroupConsecutiveMessages && !markerDrawn && lastShownEntry != null && MessageGrouping.Continues(lastShownEntry, runFirst);
+            lastShownEntry = entry;
+            var variant = MessageGrouping.Variant(continuation, trailingSpacing, repeatCount);
+
             // See ChatWindow.DrawChatLogEntries' matching remarks - ImGui.IsItemVisible() against a
             // Dummy of the cached height, not a hand-rolled scrollY/viewHeight comparison.
-            var hadCache = entryHeightCache.TryGetValue(entry.Sequence, out var cachedHeight);
+            var hadCache = entryHeightCache.TryGetValue(entry.Sequence, out var cachedHeight)
+                && entryVariantCache.TryGetValue(entry.Sequence, out var cachedVariant)
+                && cachedVariant == variant;
             if (hadCache)
             {
                 var beforeDummy = ImGui.GetCursorPos();
@@ -453,7 +527,7 @@ internal sealed class SecondaryChatWindow : Window
             }
 
             var entryTop = ImGui.GetCursorPosY();
-            DrawEntry(entry, config, availableWidth, showingWhisper);
+            DrawEntry(entry, config, availableWidth, showingWhisper, showTimestamps, repeatCount, continuation, trailingSpacing);
             var newHeight = ImGui.GetCursorPosY() - entryTop;
 
             // See ChatWindow.DrawChatLogEntries' matching remarks - only skip caching if an entry
@@ -471,6 +545,12 @@ internal sealed class SecondaryChatWindow : Window
             }
 
             entryHeightCache[entry.Sequence] = newHeight;
+            entryVariantCache[entry.Sequence] = variant;
+        }
+
+        if (entryVariantCache.Count > 20000)
+        {
+            entryVariantCache.Clear();
         }
 
         if (viewChanged)
@@ -494,7 +574,7 @@ internal sealed class SecondaryChatWindow : Window
         entry.ChatType == XivChatType.TellOutgoing
         || string.Equals(entry.Sender, plugin.OwnCharacterName, StringComparison.OrdinalIgnoreCase);
 
-    private void DrawEntry(ChatLogEntry entry, Configuration config, float availableWidth, bool showingWhisper)
+    private void DrawEntry(ChatLogEntry entry, Configuration config, float availableWidth, bool showingWhisper, bool showTimestamp, int repeatCount, bool continuation, bool trailingSpacing)
     {
         using var id = ImRaii.PushId((int)entry.Sequence);
         using var group = ImRaii.Group();
@@ -503,33 +583,74 @@ internal sealed class SecondaryChatWindow : Window
         var allowRpFormatting = config.AllowsRpFormatting(entry.ChatType);
         var prefixSize = Vector2.Zero;
 
-        var timestamp = entry.Timestamp.ToString("HH:mm") + " ";
-        ImGui.TextColored(config.TimestampColor, timestamp);
-        ImGui.SameLine(0, 0);
-        prefixSize += ImGui.CalcTextSize(timestamp);
+        if (showTimestamp)
+        {
+            var timestamp = entry.Timestamp.ToString("HH:mm") + " ";
+            ImGui.TextColored(config.TimestampColor, timestamp);
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(entry.Timestamp.ToString(Loc.T("ChatLog.TimestampTooltipFormat"), Loc.Culture));
+            }
 
-        var tag = ChannelDisplay.DisplayTag(entry.ChatType) + " ";
-        ImGui.TextColored(channelColor, tag);
-        ImGui.SameLine(0, 0);
-        prefixSize += ImGui.CalcTextSize(tag);
+            ImGui.SameLine(0, 0);
+            prefixSize += ImGui.CalcTextSize(timestamp);
+        }
 
         var isOutgoingTell = entry.ChatType == XivChatType.TellOutgoing;
-        if (!isOutgoingTell && config.ShowSenderStatusIcons)
+        if (continuation)
         {
-            prefixSize.X += StatusIconRenderer.Draw(plugin, entry);
+            var indent = ImGui.GetFontSize() * 1.2f;
+            ImGui.Dummy(new Vector2(indent, 1f));
+            ImGui.SameLine(0, 0);
+            prefixSize.X += indent;
+        }
+        else
+        {
+            var tag = ChannelDisplay.DisplayTag(entry.ChatType) + " ";
+            ImGui.TextColored(channelColor, tag);
+            ImGui.SameLine(0, 0);
+            prefixSize += ImGui.CalcTextSize(tag);
+
+            if (!isOutgoingTell && config.ShowSenderStatusIcons)
+            {
+                prefixSize.X += StatusIconRenderer.Draw(plugin, entry);
+            }
+        }
+
+        if (repeatCount > 1)
+        {
+            var badge = "\u00d7" + repeatCount + " ";
+            ImGui.TextColored(ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled], badge);
+            ImGui.SameLine(0, 0);
+            prefixSize += ImGui.CalcTextSize(badge);
         }
 
         var displayName = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
 
         var rawName = isOutgoingTell && showingWhisper ? plugin.OwnCharacterName : displayName;
-        var namePart = rawName + ": ";
+        var namePart = continuation || string.IsNullOrEmpty(rawName) ? string.Empty : rawName + ": ";
 
+        var relation = namePart.Length > 0 ? plugin.GetRelation(entry) : 0;
         var senderColor = isOutgoingTell
             ? config.SendAccentColor
-            : entry.ChatType == XivChatType.TellIncoming
-                ? ChannelDisplay.WhisperColor(displayName, config)
-                : channelColor;
-        ImGui.TextColored(senderColor, namePart);
+            : ChatWindow.RelationNameColor(relation, entry, displayName, config)
+                ?? (entry.ChatType == XivChatType.TellIncoming
+                    ? ChannelDisplay.WhisperColor(displayName, config)
+                    : channelColor);
+        if (relation != 0 && config.ShowRelationIcons)
+        {
+            prefixSize.X += ChatWindow.DrawRelationIcon(relation, config);
+        }
+
+        if (namePart.Length > 0)
+        {
+            ImGui.TextColored(senderColor, namePart);
+            if (ImGui.IsItemHovered() && plugin.GetPlayerNote(entry) is { } note)
+            {
+                ImGui.SetTooltip(note);
+            }
+        }
+
         var namePartSize = ImGui.CalcTextSize(namePart);
 
         ImGui.SameLine(0, 0);
@@ -541,7 +662,7 @@ internal sealed class SecondaryChatWindow : Window
             config.MentionColor,
             LinkColor,
             availableWidth,
-            plugin.MentionFirstName,
+            plugin.MentionTerms,
             prefixSize.X + namePartSize.X,
             string.Empty,
             null,
@@ -565,7 +686,160 @@ internal sealed class SecondaryChatWindow : Window
             },
             allowRpFormatting: allowRpFormatting);
 
-        ImGui.Spacing();
+        if (trailingSpacing)
+        {
+            ChatWindow.AddMessageGap(config);
+        }
+    }
+
+    /// <summary>
+    /// One-line compose box: whisper views send to their partner, fixed tabs to the channel picked
+    /// with the button on the left (remembered per tab).
+    /// </summary>
+    private void DrawCompose(Configuration config)
+    {
+        var showingWhisper = activeWhisperTarget.Length > 0;
+        var tab = showingWhisper ? null : config.ChatTabs.Find(t => t.Id == activeTabId);
+
+        string channelLabel;
+        if (showingWhisper)
+        {
+            channelLabel = Loc.T("Channel.WhisperWithTarget", ChatWindow.FirstName(activeWhisperTarget));
+        }
+        else if (tab != null)
+        {
+            channelLabel = ChannelLabel(tab.LastChannel, tab.LinkshellNumber, tab.CrossWorldLinkshellNumber);
+        }
+        else
+        {
+            plugin.IsSecondaryChatInputActive = false;
+            return;
+        }
+
+        if (showingWhisper)
+        {
+            ImGui.TextColored(config.SendAccentColor, channelLabel);
+            ImGui.SameLine();
+        }
+        else
+        {
+            if (ImGui.Button(channelLabel + "##secCompChannel"))
+            {
+                ImGui.OpenPopup("##secComposeChannelPicker");
+            }
+
+            ImGui.SameLine();
+            DrawChannelPicker(tab!);
+        }
+
+        if (refocusCompose)
+        {
+            ImGui.SetKeyboardFocusHere();
+            refocusCompose = false;
+        }
+
+        ImGui.SetNextItemWidth(-1);
+        var submitted = ImGui.InputTextWithHint("##secondaryCompose", Loc.T("SecondaryChat.ComposeHint"), ref composeText, 2000, ImGuiInputTextFlags.EnterReturnsTrue);
+        plugin.IsSecondaryChatInputActive = ImGui.IsItemActive();
+
+        if (submitted)
+        {
+            var text = composeText;
+            var error = showingWhisper
+                ? plugin.SendToChannel(ChatChannel.Whisper, 1, 1, activeWhisperTarget, text)
+                : plugin.SendToChannel(tab!.LastChannel == ChatChannel.Whisper ? ChatChannel.Say : tab.LastChannel, tab.LinkshellNumber, tab.CrossWorldLinkshellNumber, string.Empty, text);
+            composeError = error;
+            if (error == null)
+            {
+                composeText = string.Empty;
+            }
+
+            refocusCompose = true;
+        }
+
+        if (composeError != null)
+        {
+            ImGui.TextColored(new Vector4(1f, 0.45f, 0.45f, 1f), composeError);
+        }
+    }
+
+    private static readonly (ChatChannel Channel, string LocKey)[] PickableChannels =
+    {
+        (ChatChannel.Say, "Channel.Say"),
+        (ChatChannel.Party, "Channel.Party"),
+        (ChatChannel.Alliance, "Channel.Alliance"),
+        (ChatChannel.FreeCompany, "Channel.FreeCompany"),
+        (ChatChannel.Yell, "Channel.Yell"),
+        (ChatChannel.Shout, "Channel.Shout"),
+        (ChatChannel.PvpTeam, "Channel.PvpTeam"),
+        (ChatChannel.NoviceNetwork, "Channel.NoviceNetwork"),
+    };
+
+    private void DrawChannelPicker(ChatTab tab)
+    {
+        using var popup = ImRaii.Popup("##secComposeChannelPicker");
+        if (!popup.Success)
+        {
+            return;
+        }
+
+        foreach (var (channel, key) in PickableChannels)
+        {
+            if (ImGui.Selectable(Loc.T(key) + "##secPick" + channel, tab.LastChannel == channel))
+            {
+                tab.LastChannel = channel;
+                plugin.SaveConfiguration();
+            }
+        }
+
+        ImGui.Separator();
+        for (var number = 1; number <= 8; number++)
+        {
+            var label = ChannelLabel(ChatChannel.Linkshell, number, 1);
+            if (ImGui.Selectable(label + "##secPickLs" + number, tab.LastChannel == ChatChannel.Linkshell && tab.LinkshellNumber == number))
+            {
+                tab.LastChannel = ChatChannel.Linkshell;
+                tab.LinkshellNumber = number;
+                plugin.SaveConfiguration();
+            }
+        }
+
+        ImGui.Separator();
+        for (var number = 1; number <= 8; number++)
+        {
+            var label = ChannelLabel(ChatChannel.CrossWorldLinkshell, 1, number);
+            if (ImGui.Selectable(label + "##secPickCwls" + number, tab.LastChannel == ChatChannel.CrossWorldLinkshell && tab.CrossWorldLinkshellNumber == number))
+            {
+                tab.LastChannel = ChatChannel.CrossWorldLinkshell;
+                tab.CrossWorldLinkshellNumber = number;
+                plugin.SaveConfiguration();
+            }
+        }
+    }
+
+    private static string ChannelLabel(ChatChannel channel, int linkshellNumber, int crossWorldLinkshellNumber)
+    {
+        foreach (var (pickable, key) in PickableChannels)
+        {
+            if (pickable == channel)
+            {
+                return Loc.T(key);
+            }
+        }
+
+        return channel switch
+        {
+            ChatChannel.Linkshell => NumberedLabel(Loc.T("Channel.Linkshell"), linkshellNumber, NativeChannels.GetExistingLinkshells()),
+            ChatChannel.CrossWorldLinkshell => NumberedLabel(Loc.T("Channel.CrossWorldLinkshell"), crossWorldLinkshellNumber, NativeChannels.GetExistingCrossWorldLinkshells()),
+            // Whisper without a target isn't possible from a fixed tab - fall back to Say.
+            _ => Loc.T("Channel.Say"),
+        };
+    }
+
+    private static string NumberedLabel(string baseName, int number, List<(int Number, string Name)> existing)
+    {
+        var match = existing.Find(e => e.Number == number);
+        return match.Name != null ? $"{baseName} [{number}]: {match.Name}" : $"{baseName} [{number}]";
     }
 
     // Same match as the main window's whisper tabs (minus their per-tab "clear" cutoff, which this

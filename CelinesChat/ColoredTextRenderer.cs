@@ -473,7 +473,9 @@ internal static class ColoredTextRenderer
     // Mentions stay recognized regardless - "your name got mentioned" isn't specific to roleplay.
     private static TextSegmentKind ClassifySegment(string word, string mentionTerm, TokenizeState state, bool allowRpFormatting = true)
     {
-        var isMention = !string.IsNullOrEmpty(mentionTerm) && string.Equals(StripPunctuation(word), mentionTerm, StringComparison.OrdinalIgnoreCase);
+        // mentionTerm may hold several newline-separated terms - first name plus the user's own
+        // keywords (see Services.MentionMatcher).
+        var isMention = !string.IsNullOrEmpty(mentionTerm) && Services.MentionMatcher.MatchesToken(StripPunctuation(word), mentionTerm);
         if (isMention)
         {
             return TextSegmentKind.Mention;

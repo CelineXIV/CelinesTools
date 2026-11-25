@@ -9,6 +9,8 @@
 <body>
   <div id="login-screen" class="screen">
     <form id="login-form" class="login-card">
+      <img class="c4t-logo c4t-logo-blue login-logo" src="/c4t-logo-blau.png" alt="C4T">
+      <img class="c4t-logo c4t-logo-purple login-logo" src="/c4t-logo-lila.png" alt="C4T">
       <h1>CelinesChat</h1>
       <p>Enter the code or password shown in the plugin's settings.</p>
       <input id="login-code" type="password" autocomplete="current-password" maxlength="100" autofocus>
@@ -19,13 +21,22 @@
 
   <div id="chat-screen" class="screen" hidden>
     <header id="chat-header">
+      <img class="c4t-logo c4t-logo-blue" src="/c4t-logo-blau.png" alt="C4T">
+      <img class="c4t-logo c4t-logo-purple" src="/c4t-logo-lila.png" alt="C4T">
       <div id="tab-strip" class="picker"></div>
       <button id="channel-button" type="button" class="channel-button">
         <span id="channel-label">...</span>
       </button>
+      <button id="bookmarks-button" type="button" class="theme-button" title="Bookmarks" aria-label="Bookmarks">&#128278;</button>
+      <button id="search-button" type="button" class="theme-button" title="Search" aria-label="Search">&#128269;</button>
       <button id="theme-button" type="button" class="theme-button" title="Design" aria-label="Design">&#127912;</button>
       <span id="connection-dot" class="dot" title="Connection status"></span>
     </header>
+
+    <div id="search-bar" hidden>
+      <input id="search-input" type="search" placeholder="Search messages..." autocomplete="off">
+      <span id="search-count"></span>
+    </div>
 
     <main id="message-list" aria-live="polite"></main>
 
@@ -54,6 +65,16 @@
         <button id="theme-sheet-close" type="button" class="sheet-close" aria-label="Close">&times;</button>
       </div>
       <div id="theme-sheet-content" class="sheet-content"></div>
+    </div>
+  </div>
+
+  <div id="action-sheet" class="sheet-overlay" hidden>
+    <div class="sheet" role="dialog" aria-modal="true">
+      <div class="sheet-header">
+        <h2 id="action-sheet-title"></h2>
+        <button id="action-sheet-close" type="button" class="sheet-close" aria-label="Close">&times;</button>
+      </div>
+      <div id="action-sheet-content" class="sheet-content"></div>
     </div>
   </div>
 

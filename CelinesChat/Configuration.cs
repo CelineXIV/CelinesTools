@@ -95,6 +95,9 @@ public class CharacterState
 
     public HashSet<string> MutedWhisperTargets { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>Players seen writing in this character's FC chat ("Name@World") - used to highlight FC members elsewhere.</summary>
+    public HashSet<string> KnownFcMembers { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
     public int LinkshellNumber { get; set; } = 1;
 
     public int CrossWorldLinkshellNumber { get; set; } = 1;
@@ -332,5 +335,125 @@ public class Configuration : IPluginConfiguration
 
     public string WebClientAuthCode { get; set; } = string.Empty;
 
+    /// <summary>Superseded by WebClientSessions (tokens with a last-used time, so they can expire) - only read once to migrate existing logins.</summary>
     public HashSet<string> WebClientAuthStore { get; set; } = new();
+
+    /// <summary>Web client login token -> when it was last used (UTC). Unused for WebClientSessionDays and it expires.</summary>
+    public Dictionary<string, DateTime> WebClientSessions { get; set; } = new();
+
+    public int WebClientSessionDays { get; set; } = 30;
+
+    /// <summary>Extra words/names (nicknames, RP names, FC name, ...) that count as a mention, on top of the character's first name.</summary>
+    public List<string> MentionKeywords { get; set; } = new();
+
+    /// <summary>Flash the game's taskbar button on an incoming whisper while the game isn't the active window.</summary>
+    public bool FlashTaskbarOnWhisper { get; set; } = true;
+
+    /// <summary>Same, for a mention (first name or MentionKeywords).</summary>
+    public bool FlashTaskbarOnMention { get; set; } = true;
+
+    /// <summary>Players hidden from this plugin's chat only ("Name@World", or "Name" for entries without a known world) - unlike the game's blacklist, nothing is sent to the server.</summary>
+    public HashSet<string> HiddenPlayers { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>A "new messages" line where a tab's unread messages begin, when switching back to it.</summary>
+    public bool ShowNewMessagesDivider { get; set; } = true;
+
+    /// <summary>A date line wherever the day changes between two messages in the log.</summary>
+    public bool ShowDateSeparators { get; set; } = true;
+
+    /// <summary>Messages containing one of these words are hidden (per rule: all channels or only some).</summary>
+    public List<WordFilterRule> WordFilters { get; set; } = new();
+
+    /// <summary>The same message from the same sender several times in a row is shown once, with "×N".</summary>
+    public bool CollapseRepeatedMessages { get; set; } = true;
+
+    /// <summary>Consecutive messages from the same sender (within a few minutes) show the name only once.</summary>
+    public bool GroupConsecutiveMessages { get; set; } = true;
+
+    /// <summary>Gap between wrapped lines of one message in px; -1 = the normal ImGui spacing.</summary>
+    public float LineSpacing { get; set; } = -1f;
+
+    /// <summary>Extra gap between two messages in px; -1 = the normal spacing.</summary>
+    public float MessageSpacing { get; set; } = -1f;
+
+    /// <summary>Private notes about players, keyed like HiddenPlayers ("Name@World" or "Name"). Shown when hovering the name.</summary>
+    public Dictionary<string, string> PlayerNotes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Messages the user bookmarked (a copy of the text - they outlive the chat log).</summary>
+    public List<ChatBookmark> Bookmarks { get; set; } = new();
+
+    /// <summary>After being away (game in the background or /afk), a summary of whispers/mentions that came in meanwhile.</summary>
+    public bool AwaySummaryEnabled { get; set; } = true;
+
+    /// <summary>How long away counts as "away" for the summary.</summary>
+    public int AwaySummaryMinutes { get; set; } = 2;
+
+    /// <summary>Friends' names in their own colour.</summary>
+    public bool HighlightFriends { get; set; } = true;
+
+    public Vector4 FriendNameColor { get; set; } = new(0.55f, 0.78f, 1f, 1f);
+
+    /// <summary>FC members' names in their own colour (recognised once they've written in the FC chat).</summary>
+    public bool HighlightFcMembers { get; set; } = true;
+
+    public Vector4 FcMemberNameColor { get; set; } = new(0.55f, 0.88f, 0.6f, 1f);
+
+    /// <summary>A small symbol in front of the name: heart (favourite), people (friend), shield (FC member).</summary>
+    public bool ShowRelationIcons { get; set; } = true;
+
+    /// <summary>Players the user marked as favourite ("Name@World" or "Name") - shown with a heart.</summary>
+    public HashSet<string> FavoritePlayers { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public bool HighlightFavorites { get; set; } = true;
+
+    public Vector4 FavoriteNameColor { get; set; } = new(1f, 0.55f, 0.78f, 1f);
+
+    /// <summary>
+    /// After an import (JsonConvert.PopulateObject with ObjectCreationHandling.Replace) the sets and
+    /// dictionaries come back with the default, case-sensitive comparer - put the intended one back.
+    /// </summary>
+    internal void RestoreComparers()
+    {
+        WhisperColours = new Dictionary<string, Vector4>(WhisperColours, StringComparer.OrdinalIgnoreCase);
+        SecondaryChatWhisperTargets = new HashSet<string>(SecondaryChatWhisperTargets, StringComparer.OrdinalIgnoreCase);
+        WhisperTabBackgroundColours = new Dictionary<string, Vector4>(WhisperTabBackgroundColours, StringComparer.OrdinalIgnoreCase);
+        HiddenPlayers = new HashSet<string>(HiddenPlayers, StringComparer.OrdinalIgnoreCase);
+        PlayerNotes = new Dictionary<string, string>(PlayerNotes, StringComparer.OrdinalIgnoreCase);
+        FavoritePlayers = new HashSet<string>(FavoritePlayers, StringComparer.OrdinalIgnoreCase);
+        foreach (var character in Characters.Values)
+        {
+            character.LockedWhisperTargets = new HashSet<string>(character.LockedWhisperTargets, StringComparer.OrdinalIgnoreCase);
+            character.MutedWhisperTargets = new HashSet<string>(character.MutedWhisperTargets, StringComparer.OrdinalIgnoreCase);
+            character.KnownFcMembers = new HashSet<string>(character.KnownFcMembers, StringComparer.OrdinalIgnoreCase);
+        }
+    }
+}
+
+public class WordFilterRule
+{
+    public string Text { get; set; } = string.Empty;
+
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>Only these channels; empty = every channel.</summary>
+    public HashSet<ChatCategory> Categories { get; set; } = new();
+}
+
+public class ChatBookmark
+{
+    public DateTime Timestamp { get; set; }
+
+    public XivChatType ChatType { get; set; }
+
+    public string Sender { get; set; } = string.Empty;
+
+    public string? SenderWorld { get; set; }
+
+    public string Text { get; set; } = string.Empty;
+
+    /// <summary>Identifies the message in the live log / history files (second precision - log files have no milliseconds).</summary>
+    internal string Key => KeyOf(Timestamp, Sender, Text);
+
+    internal static string KeyOf(DateTime timestamp, string sender, string text) =>
+        timestamp.ToString("yyyyMMddHHmmss") + "|" + sender + "|" + text;
 }

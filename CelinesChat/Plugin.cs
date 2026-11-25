@@ -77,6 +77,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly WebServerService webServerService;
     private readonly ChatWindow chatWindow;
     private readonly SettingsWindow settingsWindow;
+    private readonly BookmarksWindow bookmarksWindow;
     private readonly PreviewWindow previewWindow;
     private readonly CommandInfo openCommandInfo;
     private readonly CommandInfo openLogCommandInfo;
@@ -176,6 +177,18 @@ public sealed class Plugin : IDalamudPlugin
 
         Configuration = this.pluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
 
+        // Web logins used to be a plain token set without any expiry - carry them over once, as if
+        // just used, so nobody gets logged out by the update itself.
+        if (Configuration.WebClientAuthStore.Count > 0)
+        {
+            foreach (var token in Configuration.WebClientAuthStore)
+            {
+                Configuration.WebClientSessions.TryAdd(token, DateTime.UtcNow);
+            }
+
+            Configuration.WebClientAuthStore.Clear();
+        }
+
         // TabStripBackgroundOpacity split off ChromeBackgroundOpacity as its own adjustable slider -
         // -1 is a sentinel meaning "never migrated yet" (distinct from a user explicitly choosing
         // 0/off), so this only ever copies the old combined value across once, the first time an
@@ -245,7 +258,9 @@ public sealed class Plugin : IDalamudPlugin
         chatWindow = new ChatWindow(this);
         settingsWindow = new SettingsWindow(this);
         previewWindow = new PreviewWindow(this);
+        bookmarksWindow = new BookmarksWindow(this);
         windowSystem.AddWindow(settingsWindow);
+        windowSystem.AddWindow(bookmarksWindow);
         windowSystem.AddWindow(previewWindow);
 
         // ChatWindow is registered (and therefore drawn) last on purpose - a click inside
@@ -291,6 +306,7 @@ public sealed class Plugin : IDalamudPlugin
         this.pluginInterface.LanguageChanged += OnLanguageChanged;
 
         this.framework.Update += OnFrameworkUpdate;
+        ChatLog.EntryAdded += OnEntryAddedForPlugin;
     }
 
     /// <summary>
@@ -339,6 +355,140 @@ public sealed class Plugin : IDalamudPlugin
 
     public void ToggleSettingsWindow() => settingsWindow.Toggle();
 
+    internal void ToggleBookmarksWindow() => bookmarksWindow.Toggle();
+
+    internal string ConfigDirectory => pluginInterface.GetPluginConfigDirectory();
+
+    internal AwayTracker Away { get; } = new();
+
+    private long nextAwayCheckTicks;
+    private long nextRelationRefreshTicks;
+    private int relationVersion;
+
+    // OnlineStatus sheet row for "Away from Keyboard" (/afk).
+    private const uint AfkOnlineStatusId = 17;
+
+    // Away/back detection and the periodic refresh of friend/FC highlighting - a couple of cheap
+    // checks, done a few times per second rather than every frame.
+    private void UpdateAwayAndRelations()
+    {
+        var now = Environment.TickCount64;
+        if (now >= nextAwayCheckTicks)
+        {
+            nextAwayCheckTicks = now + 500;
+            var afk = objectTable.LocalPlayer is { } player && player.OnlineStatus.RowId == AfkOnlineStatusId;
+            var awayNow = Configuration.AwaySummaryEnabled && playerState.IsLoaded && (afk || !TaskbarFlasher.IsGameInForeground());
+            Away.Update(awayNow, Configuration.AwaySummaryMinutes);
+        }
+
+        // The friend list can change at any time - re-check every message's highlight now and then.
+        if (now >= nextRelationRefreshTicks)
+        {
+            nextRelationRefreshTicks = now + 30_000;
+            relationVersion++;
+        }
+    }
+
+    private void OnEntryAddedForPlugin(ChatLogEntry entry)
+    {
+        Away.OnEntry(entry);
+
+        // Anyone writing in the FC chat is an FC member - remembered per character for highlighting.
+        if (entry.ChatType == XivChatType.FreeCompany
+            && !string.IsNullOrEmpty(entry.Sender)
+            && !string.Equals(entry.Sender, OwnCharacterName, StringComparison.OrdinalIgnoreCase)
+            && playerState.IsLoaded)
+        {
+            var state = GetCharacterState();
+            if (state.KnownFcMembers.Count < 2000 && state.KnownFcMembers.Add(entry.SenderKey))
+            {
+                relationVersion++;
+                SaveConfiguration();
+            }
+        }
+    }
+
+    internal const int RelationFriend = 1;
+    internal const int RelationFcMember = 2;
+    internal const int RelationFavorite = 3;
+
+    internal bool IsFavorite(ChatLogEntry entry) =>
+        !string.IsNullOrEmpty(entry.Sender)
+        && (Configuration.FavoritePlayers.Contains(entry.SenderKey) || Configuration.FavoritePlayers.Contains(entry.Sender));
+
+    internal void ToggleFavorite(ChatLogEntry entry)
+    {
+        if (IsFavorite(entry))
+        {
+            Configuration.FavoritePlayers.Remove(entry.SenderKey);
+            Configuration.FavoritePlayers.Remove(entry.Sender);
+        }
+        else
+        {
+            Configuration.FavoritePlayers.Add(entry.SenderKey);
+        }
+
+        OnRelationSettingsChanged();
+    }
+
+    internal void RemoveFavorite(string key)
+    {
+        if (Configuration.FavoritePlayers.Remove(key))
+        {
+            OnRelationSettingsChanged();
+        }
+    }
+
+    /// <summary>0 = nobody special, 1 = on the friend list, 2 = known FC member, 3 = favourite (wins over the others). Cached per message.</summary>
+    internal int GetRelation(ChatLogEntry entry)
+    {
+        if (entry.RelationVersion == relationVersion)
+        {
+            return entry.Relation;
+        }
+
+        var relation = 0;
+        if (!string.IsNullOrEmpty(entry.Sender)
+            && entry.ChatType != XivChatType.TellOutgoing
+            && !string.Equals(entry.Sender, OwnCharacterName, StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                if (Configuration.HighlightFavorites && IsFavorite(entry))
+                {
+                    relation = RelationFavorite;
+                }
+                else if (Configuration.HighlightFriends && IsFriend(entry.Sender, entry.SenderWorld))
+                {
+                    relation = RelationFriend;
+                }
+                else if (Configuration.HighlightFcMembers && playerState.IsLoaded)
+                {
+                    var fc = GetCharacterState().KnownFcMembers;
+                    if (fc.Contains(entry.SenderKey) || fc.Contains(entry.Sender))
+                    {
+                        relation = RelationFcMember;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Verbose(ex, "[CelinesChat] Freund/FC-Erkennung fehlgeschlagen.");
+            }
+        }
+
+        entry.Relation = relation;
+        entry.RelationVersion = relationVersion;
+        return relation;
+    }
+
+    /// <summary>Call after changing the friend/FC highlight settings.</summary>
+    internal void OnRelationSettingsChanged()
+    {
+        relationVersion++;
+        SaveConfiguration();
+    }
+
     internal WebServerService WebServer => webServerService;
 
     internal void SetWebClientEnabled(bool enabled)
@@ -364,14 +514,14 @@ public sealed class Plugin : IDalamudPlugin
     internal void RegenerateWebClientAuthCode() => SetWebClientAuthCode(WebAuth.GenerateAuthCode());
 
     // Shared by the "generate a random one" and "type your own" paths (WebClientPage) - clearing
-    // WebClientAuthStore on any code change (not just a random regeneration) is deliberate: a
+    // WebClientSessions on any code change (not just a random regeneration) is deliberate: a
     // session token is independent of the code itself, but treating "the code changed" as "log
     // everyone out" consistently, regardless of *why* it changed, is simpler to reason about than a
     // rule that only applies to one of the two ways of changing it.
     internal void SetWebClientAuthCode(string code)
     {
         Configuration.WebClientAuthCode = code;
-        Configuration.WebClientAuthStore.Clear();
+        Configuration.WebClientSessions.Clear();
         SaveConfiguration();
     }
 
@@ -550,6 +700,185 @@ public sealed class Plugin : IDalamudPlugin
 
             var spaceIndex = playerState.CharacterName.IndexOf(' ');
             return spaceIndex > 0 ? playerState.CharacterName[..spaceIndex] : playerState.CharacterName;
+        }
+    }
+
+    private string mentionTermsCache = string.Empty;
+    private string? mentionTermsFirstName;
+    private int mentionTermsKeywordsVersion = -1;
+    private int mentionKeywordsVersion;
+
+    /// <summary>
+    /// First name plus Configuration.MentionKeywords, newline-separated (see MentionMatcher) - what the
+    /// renderer highlights as a mention. Cached, since it's asked for on every frame.
+    /// </summary>
+    internal string MentionTerms
+    {
+        get
+        {
+            var firstName = MentionFirstName;
+            if (firstName != mentionTermsFirstName || mentionKeywordsVersion != mentionTermsKeywordsVersion)
+            {
+                mentionTermsCache = MentionMatcher.BuildTerms(firstName, Configuration.MentionKeywords);
+                mentionTermsFirstName = firstName;
+                mentionTermsKeywordsVersion = mentionKeywordsVersion;
+            }
+
+            return mentionTermsCache;
+        }
+    }
+
+    /// <summary>Call after editing Configuration.MentionKeywords.</summary>
+    internal void OnMentionKeywordsChanged()
+    {
+        mentionKeywordsVersion++;
+        SaveConfiguration();
+    }
+
+    private int filterVersion;
+
+    /// <summary>Hidden player or word filter - cached per entry until a filter changes (see OnFiltersChanged).</summary>
+    internal bool IsFilteredOut(ChatLogEntry entry)
+    {
+        var version = filterVersion;
+        if (entry.FilterVersion == version)
+        {
+            return entry.FilteredOut;
+        }
+
+        var result = MessageFilter.IsFilteredOut(entry, Configuration, OwnCharacterName);
+        entry.FilteredOut = result;
+        entry.FilterVersion = version;
+        return result;
+    }
+
+    /// <summary>Call after editing Configuration.WordFilters or HiddenPlayers.</summary>
+    internal void OnFiltersChanged()
+    {
+        filterVersion++;
+        SaveConfiguration();
+    }
+
+    /// <summary>The note saved for this message's sender ("Name@World" first, then plain "Name"), or null.</summary>
+    internal string? GetPlayerNote(ChatLogEntry entry)
+    {
+        var notes = Configuration.PlayerNotes;
+        if (notes.Count == 0 || string.IsNullOrEmpty(entry.Sender))
+        {
+            return null;
+        }
+
+        return notes.TryGetValue(entry.SenderKey, out var note) || notes.TryGetValue(entry.Sender, out note) ? note : null;
+    }
+
+    internal void SetPlayerNote(string key, string note)
+    {
+        if (string.IsNullOrWhiteSpace(note))
+        {
+            Configuration.PlayerNotes.Remove(key);
+        }
+        else
+        {
+            // Not trimmed - the settings page saves while typing, and trimming there ate every space
+            // typed at the end of the note.
+            Configuration.PlayerNotes[key] = note;
+        }
+
+        SaveConfiguration();
+    }
+
+    private HashSet<string>? bookmarkKeys;
+
+    internal bool IsBookmarked(ChatLogEntry entry)
+    {
+        if (Configuration.Bookmarks.Count == 0)
+        {
+            return false;
+        }
+
+        // Also called from the web client's threads - build into a local and only then publish it,
+        // and treat a list changed mid-copy as "not bookmarked" for that one call.
+        var keys = bookmarkKeys;
+        if (keys == null)
+        {
+            try
+            {
+                keys = new HashSet<string>(Configuration.Bookmarks.Select(b => b.Key));
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+
+            bookmarkKeys = keys;
+        }
+
+        return keys.Contains(entry.BookmarkKey);
+    }
+
+    internal void ToggleBookmark(ChatLogEntry entry)
+    {
+        var key = entry.BookmarkKey;
+        var index = Configuration.Bookmarks.FindIndex(b => b.Key == key);
+        if (index >= 0)
+        {
+            Configuration.Bookmarks.RemoveAt(index);
+        }
+        else
+        {
+            Configuration.Bookmarks.Add(new ChatBookmark
+            {
+                Timestamp = entry.Timestamp,
+                ChatType = entry.ChatType,
+                Sender = entry.Sender,
+                SenderWorld = entry.SenderWorld,
+                Text = entry.Text,
+            });
+        }
+
+        bookmarkKeys = null;
+        SaveConfiguration();
+    }
+
+    internal void RemoveBookmark(ChatBookmark bookmark)
+    {
+        if (Configuration.Bookmarks.Remove(bookmark))
+        {
+            bookmarkKeys = null;
+            SaveConfiguration();
+        }
+    }
+
+    /// <summary>After Configuration was replaced from a backup file - drop every cache built from the old one.</summary>
+    internal void OnConfigurationImported()
+    {
+        Configuration.RestoreComparers();
+        bookmarkKeys = null;
+        filterVersion++;
+        relationVersion++;
+        mentionKeywordsVersion++;
+        LayoutVersion++;
+        SaveConfiguration();
+    }
+
+    /// <summary>Bumped whenever every message's rendered height changes (e.g. a tab's timestamps toggled), so the chat windows drop their cached heights.</summary>
+    internal int LayoutVersion { get; private set; }
+
+    internal void InvalidateChatLayout() => LayoutVersion++;
+
+    internal void HidePlayer(ChatLogEntry entry)
+    {
+        if (!string.IsNullOrEmpty(entry.Sender) && Configuration.HiddenPlayers.Add(entry.SenderKey))
+        {
+            OnFiltersChanged();
+        }
+    }
+
+    internal void UnhidePlayer(string key)
+    {
+        if (Configuration.HiddenPlayers.Remove(key))
+        {
+            OnFiltersChanged();
         }
     }
 
@@ -1013,6 +1342,47 @@ public sealed class Plugin : IDalamudPlugin
         return true;
     }
 
+    /// <summary>
+    /// Sends text to an explicit channel without touching the main compose box's channel selection -
+    /// used by the torn-off window's own input. Returns an error text, or null when it was queued.
+    /// </summary>
+    internal string? SendToChannel(ChatChannel channel, int linkshellNumber, int crossWorldLinkshellNumber, string whisperTarget, string text)
+    {
+        var trimmed = text.Trim();
+        if (trimmed.Length == 0)
+        {
+            return null;
+        }
+
+        if (!IsLoggedIn)
+        {
+            return Loc.T("Compose.NotLoggedIn");
+        }
+
+        if (trimmed.StartsWith('/'))
+        {
+            return SendRawCommand(trimmed) ? null : Loc.T("Compose.CommandTooLong", MessageSplitter.MaxChatLineBytes);
+        }
+
+        if (channel == ChatChannel.Whisper && (string.IsNullOrWhiteSpace(whisperTarget) || IsOwnCharacterTarget(whisperTarget)))
+        {
+            return Loc.T("Compose.WhisperTargetMissing");
+        }
+
+        var prefix = GetChannelPrefix(channel, linkshellNumber, crossWorldLinkshellNumber, whisperTarget);
+        var chunks = MessageSplitter.BuildMessages(text, Configuration.MaxMessageLength, System.Text.Encoding.UTF8.GetByteCount(prefix));
+        var commands = new List<byte[]>(chunks.Count);
+        foreach (var chunk in chunks)
+        {
+            commands.Add(MessageMarkerEncoder.Encode(prefix + chunk));
+        }
+
+        var delayMs = channel == ChatChannel.Whisper ? Math.Max(Configuration.DelayMs, MinWhisperDelayMs) : Configuration.DelayMs;
+        sender.Enqueue(commands, delayMs);
+        RecordSentHistory(text);
+        return null;
+    }
+
     public void SendChunks(List<string> chunks, string originalDraft)
     {
         var state = GetCharacterState();
@@ -1134,27 +1504,42 @@ public sealed class Plugin : IDalamudPlugin
     /// <summary>UTF-8 size of the channel command each message goes out with - MessageSplitter needs it to keep every whole line within the game's limit.</summary>
     internal int GetChannelPrefixBytes(CharacterState state) => System.Text.Encoding.UTF8.GetByteCount(GetChannelPrefix(state));
 
-    internal string GetChannelPrefix(CharacterState state) => state.LastChannel switch
+    internal string GetChannelPrefix(CharacterState state) =>
+        GetChannelPrefix(state.LastChannel, state.LinkshellNumber, state.CrossWorldLinkshellNumber, state.LastWhisperTarget);
+
+    internal static string GetChannelPrefix(ChatChannel channel, int linkshellNumber, int crossWorldLinkshellNumber, string whisperTarget) => channel switch
     {
         ChatChannel.Say => "/say ",
         ChatChannel.Party => "/p ",
-        ChatChannel.Whisper => $"/tell {state.LastWhisperTarget.Trim()} ",
+        ChatChannel.Whisper => $"/tell {whisperTarget.Trim()} ",
         ChatChannel.Yell => "/yell ",
         ChatChannel.Shout => "/shout ",
         ChatChannel.FreeCompany => "/fc ",
-        ChatChannel.Linkshell => $"/linkshell{Math.Clamp(state.LinkshellNumber, 1, 8)} ",
+        ChatChannel.Linkshell => $"/linkshell{Math.Clamp(linkshellNumber, 1, 8)} ",
         ChatChannel.Alliance => "/alliance ",
         ChatChannel.PvpTeam => "/pvpteam ",
         ChatChannel.NoviceNetwork => "/novice ",
-        ChatChannel.CrossWorldLinkshell => $"/cwlinkshell{Math.Clamp(state.CrossWorldLinkshellNumber, 1, 8)} ",
+        ChatChannel.CrossWorldLinkshell => $"/cwlinkshell{Math.Clamp(crossWorldLinkshellNumber, 1, 8)} ",
         _ => "/say ",
     };
 
-    internal bool IsChatInputActive { private get; set; }
+    private bool mainChatInputActive;
+
+    // Set by the main window's compose box (setter) - the torn-off window's own input reports via
+    // IsSecondaryChatInputActive. Either one being focused means Enter belongs to that input, not to
+    // "open the chat" (see OnFrameworkUpdate).
+    internal bool IsChatInputActive
+    {
+        private get => mainChatInputActive || IsSecondaryChatInputActive;
+        set => mainChatInputActive = value;
+    }
+
+    internal bool IsSecondaryChatInputActive { private get; set; }
 
     private unsafe void OnFrameworkUpdate(IFramework _)
     {
         FlushConfigurationIfDue();
+        UpdateAwayAndRelations();
         SetNativeChatVisible(!Configuration.HideNativeChat);
         ApplyGameStateVisibility();
 
@@ -1309,6 +1694,7 @@ public sealed class Plugin : IDalamudPlugin
         pluginInterface.UiBuilder.OpenConfigUi -= ToggleSettingsWindow;
         pluginInterface.LanguageChanged -= OnLanguageChanged;
         framework.Update -= OnFrameworkUpdate;
+        ChatLog.EntryAdded -= OnEntryAddedForPlugin;
         SetNativeChatVisible(true);
 
         windowSystem.RemoveAllWindows();

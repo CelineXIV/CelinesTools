@@ -94,6 +94,18 @@ internal sealed class HttpResponse
         ResponseSent = true;
     }
 
+    public async Task SendBytes(byte[] bytes)
+    {
+        await WriteHeaders(bytes.LongLength).ConfigureAwait(false);
+        if (bytes.Length > 0)
+        {
+            await stream.WriteAsync(bytes).ConfigureAwait(false);
+        }
+
+        await stream.FlushAsync().ConfigureAwait(false);
+        ResponseSent = true;
+    }
+
     public async Task<bool> SendChunk(byte[] chunk, bool isFinal, CancellationToken token)
     {
         try

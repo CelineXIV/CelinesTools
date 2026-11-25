@@ -73,6 +73,26 @@ internal sealed class ChatLogEntry
 
     internal bool CachedRunsRpFormatting { get; set; }
 
+    // Result of Plugin.IsFilteredOut (hidden player / word filter), valid while FilterVersion matches
+    // Plugin's own - the filters run once per message, not once per message per frame.
+    internal int FilterVersion { get; set; } = -1;
+
+    internal bool FilteredOut { get; set; }
+
+    // Plugin.GetRelation's cached result (0 = none, 1 = friend, 2 = FC member), valid while
+    // RelationVersion matches Plugin's own.
+    internal int RelationVersion { get; set; } = -1;
+
+    internal int Relation { get; set; }
+
+    // ChatBookmark.KeyOf for this entry - built only once bookmarks exist at all.
+    private string? bookmarkKey;
+
+    internal string BookmarkKey => bookmarkKey ??= ChatBookmark.KeyOf(Timestamp, Sender, Text);
+
+    /// <summary>Set by ChatLogService when this message is an incoming whisper (1) or mentions the player (2) - for the web client's notifications.</summary>
+    internal int NotifyKind { get; set; }
+
     // Same reasoning as CachedRuns, for per-frame lookups that never change for a given entry.
     private bool senderIconResolved;
     private Dalamud.Game.Text.SeStringHandling.Payloads.IconPayload? senderIcon;
@@ -90,6 +110,11 @@ internal sealed class ChatLogEntry
             return senderIcon;
         }
     }
+
+    private string? senderKey;
+
+    /// <summary>"Name@World" (or just "Name"), built once - checked against the hidden-players list on every frame.</summary>
+    internal string SenderKey => senderKey ??= HiddenPlayers.KeyOf(this);
 
     private string? searchTimestamp;
 

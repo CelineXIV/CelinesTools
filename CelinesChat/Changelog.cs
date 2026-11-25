@@ -21,5 +21,6 @@ internal static class Changelog
         ("1.0.19", "Small features and possible FPS fix"),
         ("1.1.0", "Performance, Bugfixes & C4T Design"),
         ("1.1.1", "Hotfix"),
+        ("1.2.0", "New Big Update"),
     };
 }

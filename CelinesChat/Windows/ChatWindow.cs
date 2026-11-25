@@ -17,6 +17,8 @@ namespace CelinesChat.Windows;
 internal sealed class ChatWindow : Window
 {
     private const string GenericDraftKey = "*generic*";
+    private const string NoviceNetworkDraftKey = "*nn*";
+    private const string TabDraftKeyPrefix = "*tab*";
     private const float SplitterHeight = 6f;
     private const float MaxComposeAreaHeight = 400f;
 
@@ -136,6 +138,27 @@ internal sealed class ChatWindow : Window
     private readonly Dictionary<long, float> entryHeightCache = new();
     private readonly HashSet<long> provisionalHeightSequences = new();
 
+    // How each cached height was drawn (MessageGrouping.Variant: grouped under the previous message,
+    // spacing below, "×N" badge) - the same message can be drawn differently in another tab or with
+    // another filter, and then its cached height doesn't apply.
+    private readonly Dictionary<long, byte> entryVariantCache = new();
+
+    // Messages of the current view that passed the filters, in display order - reused every frame.
+    private readonly List<ChatLogEntry> visibleEntriesBuffer = new();
+
+    // Player-note editor (opened from a message's context menu).
+    private string? noteEditorKey;
+    private string noteEditorText = string.Empty;
+    private bool openNoteEditor;
+
+    // A bookmark opened from the bookmarks window: scroll to that message once its day is shown.
+    private string? pendingScrollBookmarkKey;
+
+    // A message picked in the "while you were away" summary: scroll to it once its view is shown.
+    private long? pendingScrollSequence;
+    private int pendingScrollFramesLeft;
+    private bool awaySummaryExpanded;
+
     internal Guid ActiveTabId => activeTabId;
 
     internal string ActiveWhisperTabTarget => activeWhisperTabTarget;
@@ -206,6 +229,28 @@ internal sealed class ChatWindow : Window
     // See C4tTheme - colours pushed in PreDraw, popped in PostDraw.
     private int c4tColorsPushed;
     private float currentOpacity = 1f;
+
+    // "New messages" line: drawn above the first message that arrived while the current view wasn't
+    // shown. Set when the view is switched to, kept until the next switch.
+    private long? newMessagesDividerSequence;
+
+    // "Jump to bottom" button: per view, the newest message already seen at the bottom of the log -
+    // anything newer that arrived while scrolled up is counted on the button.
+    private readonly Dictionary<string, long> bottomSeenSequenceByView = new();
+    private int newBelowCountLastFrame;
+    private bool showJumpButtonLastFrame;
+
+    // Every entry the current view drew this frame (after its filters) - what "export" writes out.
+    private readonly List<ChatLogEntry> currentViewEntries = new();
+    private string currentViewLabel = string.Empty;
+
+    // Full-text search across every log file, run in the background (see StartFullTextSearch).
+    private string fullTextSearchInput = string.Empty;
+    private Task<List<ChatLogEntry>>? fullTextSearchTask;
+    private string fullTextSearchTerm = string.Empty;
+    private string? exportMessage;
+
+    private int seenLayoutVersion = -1;
 
     public ChatWindow(Plugin plugin) : base(WindowTitles.Chat)
     {
@@ -280,7 +325,17 @@ internal sealed class ChatWindow : Window
     {
         C4tTheme.DrawDecorations(plugin.Configuration, currentOpacity);
 
+        // Something changed every message's height (e.g. a tab's timestamps toggled) - re-measure.
+        if (plugin.LayoutVersion != seenLayoutVersion)
+        {
+            seenLayoutVersion = plugin.LayoutVersion;
+            entryHeightCache.Clear();
+            entryVariantCache.Clear();
+            provisionalHeightSequences.Clear();
+        }
+
         ApplyCompletedWhisperHistoryLoads();
+        ApplyCompletedFullTextSearch();
 
         var justActivatedThisFrame = plugin.ConsumePendingChatActivation();
         if (justActivatedThisFrame)
@@ -408,14 +463,21 @@ internal sealed class ChatWindow : Window
         var composeAreaHeight = Math.Clamp(config.ComposeAreaHeight, minComposeAreaHeight, MathF.Max(minComposeAreaHeight, MaxComposeAreaHeight));
         var inputBoxHeight = Math.Max(minInputBoxHeight, composeAreaHeight - measuredFooterHeight - previewReserve);
 
+        DrawAwaySummary(config);
+
         using (ImRaii.PushColor(ImGuiCol.ChildBg, C4tTheme.LogBackground(config)))
         using (ImRaii.Child("##chatLogScroll", new Vector2(-1, -(composeAreaHeight + SplitterHeight)), true, ImGuiWindowFlags.AlwaysVerticalScrollbar))
         {
             ImGui.SetScrollX(0f);
             C4tTheme.DrawWatermark(plugin);
 
-            DrawChatLogEntries(config, state, composeAreaHeight, inputBoxHeight);
+            using (ImRaii.PushStyle(ImGuiStyleVar.ItemSpacing, new Vector2(ImGui.GetStyle().ItemSpacing.X, config.LineSpacing), config.LineSpacing >= 0f))
+            {
+                DrawChatLogEntries(config, state, composeAreaHeight, inputBoxHeight);
+            }
         }
+
+        DrawPlayerNoteEditor();
 
         DrawSplitter(config, minComposeAreaHeight);
 
@@ -774,6 +836,7 @@ internal sealed class ChatWindow : Window
             {
                 ImGui.SetNextItemWidth(200);
                 ImGui.InputTextWithHint("##chatLogSearch", Loc.T("ChatLog.SearchHint"), ref logSearchFilter, 200);
+                DrawFullTextSearchAndExport();
             }
         }
 
@@ -800,6 +863,17 @@ internal sealed class ChatWindow : Window
         }
 
         DrawHistoryDatesPopup();
+
+        ImGui.SameLine();
+        if (DrawToolbarIconButton(FontAwesomeIcon.Bookmark))
+        {
+            plugin.ToggleBookmarksWindow();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Bookmarks.Title"));
+        }
 
         ImGui.SameLine();
         if (DrawToolbarIconButton(FontAwesomeIcon.FolderOpen))
@@ -954,6 +1028,122 @@ internal sealed class ChatWindow : Window
             {
                 ImGui.SetTooltip(Loc.T("ChatLog.BackToLive"));
             }
+        }
+    }
+
+    /// <summary>
+    /// Second half of the search popup: search every log file (not just what's loaded) and export
+    /// the current view as a text file.
+    /// </summary>
+    private void DrawFullTextSearchAndExport()
+    {
+        ImGui.Separator();
+        ImGui.TextDisabled(Loc.T("ChatLog.FullTextSearchHeader"));
+        ImGui.SetNextItemWidth(200);
+        var submitted = ImGui.InputTextWithHint("##fullTextSearch", Loc.T("ChatLog.FullTextSearchHint"), ref fullTextSearchInput, 100, ImGuiInputTextFlags.EnterReturnsTrue);
+        ImGui.SameLine();
+        var searching = fullTextSearchTask != null;
+        using (ImRaii.Disabled(searching || fullTextSearchInput.Trim().Length < 2))
+        {
+            if (ImGui.Button(Loc.T("ChatLog.FullTextSearchButton")) || (submitted && !searching && fullTextSearchInput.Trim().Length >= 2))
+            {
+                StartFullTextSearch(fullTextSearchInput.Trim());
+            }
+        }
+
+        if (searching)
+        {
+            ImGui.TextDisabled(Loc.T("ChatLog.FullTextSearchRunning"));
+        }
+
+        ImGui.Separator();
+        if (ImGui.Button(Loc.T("ChatLog.ExportView")))
+        {
+            exportMessage = ExportCurrentView();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("ChatLog.ExportViewTooltip"));
+        }
+
+        if (exportMessage != null)
+        {
+            ImGui.TextDisabled(exportMessage);
+        }
+    }
+
+    private void StartFullTextSearch(string term)
+    {
+        fullTextSearchTerm = term;
+        fullTextSearchTask = Task.Run(() => plugin.ChatLog.SearchAllLogs(term));
+    }
+
+    // Polled once per Draw(), like ApplyCompletedWhisperHistoryLoads - the search reads every log
+    // file, so it runs in the background and its result is shown like a loaded history day.
+    private void ApplyCompletedFullTextSearch()
+    {
+        if (fullTextSearchTask is not { IsCompleted: true } task)
+        {
+            return;
+        }
+
+        fullTextSearchTask = null;
+        if (!task.IsCompletedSuccessfully)
+        {
+            plugin.Log.Warning(task.Exception, "[CelinesChat] Suche in den Log-Dateien fehlgeschlagen.");
+            return;
+        }
+
+        foreach (var entry in task.Result)
+        {
+            entry.Sequence = nextPreloadSequence--;
+        }
+
+        loadedHistoryEntries = task.Result;
+        loadedHistoryLabel = Loc.T("ChatLog.FullTextSearchLabel", fullTextSearchTerm, task.Result.Count);
+    }
+
+    /// <summary>Writes the current view (with its filters) to Logs/Exports and shows it in Explorer. Returns a status line.</summary>
+    private string ExportCurrentView()
+    {
+        try
+        {
+            if (currentViewEntries.Count == 0)
+            {
+                return Loc.T("ChatLog.ExportEmpty");
+            }
+
+            var folder = System.IO.Path.Combine(plugin.ChatLog.LogsFolderPath, "Exports");
+            System.IO.Directory.CreateDirectory(folder);
+
+            var safeLabel = currentViewLabel;
+            foreach (var invalid in System.IO.Path.GetInvalidFileNameChars())
+            {
+                safeLabel = safeLabel.Replace(invalid, '_');
+            }
+
+            var path = System.IO.Path.Combine(folder, $"{safeLabel}_{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.txt");
+            var builder = new StringBuilder();
+            foreach (var entry in currentViewEntries)
+            {
+                var sender = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
+                var direction = entry.ChatType == XivChatType.TellOutgoing ? ">> " : string.Empty;
+                builder.Append('[').Append(entry.Timestamp.ToString("yyyy-MM-dd HH:mm:ss")).Append("] ")
+                    .Append(ChannelDisplay.Tag(entry.ChatType)).Append(' ')
+                    .Append(direction).Append(sender).Append(": ")
+                    .Append(entry.Text.Replace('\r', ' ').Replace('\n', ' '))
+                    .AppendLine();
+            }
+
+            System.IO.File.WriteAllText(path, builder.ToString());
+            Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{path}\"") { UseShellExecute = true });
+            return Loc.T("ChatLog.ExportDone", currentViewEntries.Count);
+        }
+        catch (Exception ex)
+        {
+            plugin.Log.Warning(ex, "[CelinesChat] Export fehlgeschlagen.");
+            return Loc.T("ChatLog.ExportFailed");
         }
     }
 
@@ -1118,6 +1308,27 @@ internal sealed class ChatWindow : Window
 
         lastViewKey = viewKey;
 
+        if (viewChanged)
+        {
+            newMessagesDividerSequence = config.ShowNewMessagesDivider && !viewingHistory
+                ? lastSeenSequenceByView.GetValueOrDefault(viewKey, initialSeenSequence)
+                : null;
+            showJumpButtonLastFrame = false;
+            newBelowCountLastFrame = 0;
+        }
+
+        if (pendingScrollSequence != null && --pendingScrollFramesLeft <= 0)
+        {
+            pendingScrollSequence = null;
+        }
+
+        currentViewEntries.Clear();
+        currentViewLabel = viewingHistory
+            ? loadedHistoryLabel ?? "history"
+            : !string.IsNullOrEmpty(activeWhisperTabTarget)
+                ? activeWhisperTabTarget
+                : noviceNetworkTabActive ? "NoviceNetwork" : GetActiveFixedTab(config)?.Name ?? "chat";
+
         // Chat2's own condition for this, verified against its actual source (ChatLog.Window.cs) -
         // was exact equality with no tolerance window at all for a while, on the theory that once
         // GetScrollY() equals GetScrollMaxY() both advance together every frame content grows, so
@@ -1131,7 +1342,7 @@ internal sealed class ChatWindow : Window
         // scroll gesture passing through a several-line-tall "near enough" zone getting yanked the
         // rest of the way regardless of whether anything new had happened).
         var nearBottomBeforeDraw = ImGui.GetScrollMaxY() - ImGui.GetScrollY() <= BottomToleranceForNewMessagePx;
-        var mentionTerm = plugin.MentionFirstName;
+        var mentionTerm = plugin.MentionTerms;
 
         var availableWidth = ImGui.GetContentRegionAvail().X;
 
@@ -1147,6 +1358,11 @@ internal sealed class ChatWindow : Window
 
         bool MatchesActiveView(ChatLogEntry entry)
         {
+            if (plugin.IsFilteredOut(entry))
+            {
+                return false;
+            }
+
             if (showingWhisper)
             {
                 return MatchesWhisperTarget(entry, activeWhisperTabTarget);
@@ -1284,14 +1500,60 @@ internal sealed class ChatWindow : Window
 
         IReadOnlyList<ChatLogEntry> entries = loadedHistoryEntries ?? viewMatchingLiveEntriesBuffer;
 
-        void ProcessEntry(ChatLogEntry entry)
+        var showTimestamps = activeTab?.ShowTimestamps ?? true;
+        var bottomSeen = bottomSeenSequenceByView.GetValueOrDefault(viewKey, viewSeenBefore);
+        var newBelowCount = 0;
+        var dividerDrawn = false;
+        DateTime? previousDate = null;
+
+        // "Jump to bottom" button - submitted before the entries so it gets the click when it sits on
+        // top of a message (ImGui hands a click to the first item submitted at that spot). Shown when
+        // scrolled up by more than a few lines; decided from last frame's state, like the scroll itself.
+        var jumpButtonClicked = false;
+        var jumpButtonMin = Vector2.Zero;
+        var jumpButtonMax = Vector2.Zero;
+        var jumpButtonLabel = string.Empty;
+        if (showJumpButtonLastFrame)
         {
-            if (logSearchFilter.Length > 0
-                && entry.Text.IndexOf(logSearchFilter, StringComparison.OrdinalIgnoreCase) < 0
-                && entry.Sender.IndexOf(logSearchFilter, StringComparison.OrdinalIgnoreCase) < 0
-                && entry.SearchTimestamp.IndexOf(logSearchFilter, StringComparison.OrdinalIgnoreCase) < 0)
+            jumpButtonLabel = newBelowCountLastFrame > 0
+                ? Loc.T("ChatLog.JumpToNewMessages", newBelowCountLastFrame)
+                : Loc.T("ChatLog.JumpToBottom");
+            var labelSize = ImGui.CalcTextSize(jumpButtonLabel);
+            var buttonSize = labelSize + new Vector2(24f, 10f);
+            var windowPos = ImGui.GetWindowPos();
+            var windowSize = ImGui.GetWindowSize();
+            jumpButtonMin = new Vector2(windowPos.X + ((windowSize.X - buttonSize.X) / 2f), windowPos.Y + windowSize.Y - buttonSize.Y - 10f);
+            jumpButtonMax = jumpButtonMin + buttonSize;
+
+            var restore = ImGui.GetCursorPos();
+            ImGui.SetCursorScreenPos(jumpButtonMin);
+            jumpButtonClicked = ImGui.InvisibleButton("##jumpToBottom", buttonSize);
+            ImGui.SetCursorPos(restore);
+        }
+
+        ChatLogEntry? lastShownEntry = null;
+
+        bool PassesFilters(ChatLogEntry entry)
+        {
+            if (plugin.IsFilteredOut(entry))
             {
-                return;
+                return false;
+            }
+
+            return logSearchFilter.Length == 0
+                || entry.Text.IndexOf(logSearchFilter, StringComparison.OrdinalIgnoreCase) >= 0
+                || entry.Sender.IndexOf(logSearchFilter, StringComparison.OrdinalIgnoreCase) >= 0
+                || entry.SearchTimestamp.IndexOf(logSearchFilter, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        // Unread/scroll bookkeeping - also for repeats folded into a later "×N" message.
+        void TrackEntry(ChatLogEntry entry)
+        {
+            currentViewEntries.Add(entry);
+
+            if (!viewingHistory && entry.Sequence > bottomSeen)
+            {
+                newBelowCount++;
             }
 
             if (!viewingHistory && entry.Sequence > viewSeenMax)
@@ -1308,6 +1570,54 @@ internal sealed class ChatWindow : Window
                     hasNewOwnMessageInView = true;
                 }
             }
+        }
+
+        // runFirst: the first message of a run of repeats that `entry` (the run's last) stands for.
+        void ProcessEntry(ChatLogEntry entry, ChatLogEntry runFirst, int repeatCount, bool trailingSpacing)
+        {
+            TrackEntry(entry);
+
+            var markerDrawn = false;
+
+            // Date line wherever the day changes (and above the first message, unless that's today).
+            var date = entry.Timestamp.Date;
+            if (config.ShowDateSeparators && (previousDate is { } previous ? previous != date : date != DateTime.Today))
+            {
+                DrawCenteredMarker(date.ToString(Loc.T("ChatLog.DateSeparatorFormat"), Loc.Culture), ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled], availableWidth);
+                markerDrawn = true;
+            }
+
+            previousDate = date;
+
+            if (!dividerDrawn && newMessagesDividerSequence is { } dividerSeq && entry.Sequence > dividerSeq && entry.Sequence > 0 && !IsSelfAuthored(entry))
+            {
+                DrawCenteredMarker(Loc.T("ChatLog.NewMessagesDivider"), C4tTheme.Active(config)?.Second ?? new Vector4(1f, 0.4f, 0.4f, 1f), availableWidth);
+                dividerDrawn = true;
+                markerDrawn = true;
+            }
+
+            var continuation = config.GroupConsecutiveMessages
+                && !markerDrawn
+                && lastShownEntry != null
+                && MessageGrouping.Continues(lastShownEntry, runFirst);
+            lastShownEntry = entry;
+            var variant = MessageGrouping.Variant(continuation, trailingSpacing, repeatCount);
+
+            // The view's own scroll handling (below) wins on the frame the view changes - so wait for
+            // the next frame, then put the bookmarked message in the upper part of the log.
+            if (pendingScrollSequence == entry.Sequence && !viewChanged)
+            {
+                ImGui.SetScrollHereY(0.3f);
+                pendingScrollSequence = null;
+                pinToBottomFramesRemaining = 0;
+            }
+
+            if (pendingScrollBookmarkKey != null && !viewChanged && entry.BookmarkKey == pendingScrollBookmarkKey)
+            {
+                ImGui.SetScrollHereY(0.3f);
+                pendingScrollBookmarkKey = null;
+                pinToBottomFramesRemaining = 0;
+            }
 
             // Same technique as Chat2's own DrawMessages (verified against its actual source) -
             // ImGui.IsItemVisible() is ImGui's own authoritative visibility check against its real,
@@ -1315,7 +1625,9 @@ internal sealed class ChatWindow : Window
             // entryTop against a scrollY/viewHeight/cullMarginPx captured once at the top of this
             // whole method - close enough most of the time, but never exactly what ImGui itself
             // considers visible, and that gap was a real, ongoing source of position drift.
-            var hadCache = entryHeightCache.TryGetValue(entry.Sequence, out var cachedHeight);
+            var hadCache = entryHeightCache.TryGetValue(entry.Sequence, out var cachedHeight)
+                && entryVariantCache.TryGetValue(entry.Sequence, out var cachedVariant)
+                && cachedVariant == variant;
             if (hadCache)
             {
                 var beforeDummy = ImGui.GetCursorPos();
@@ -1330,7 +1642,7 @@ internal sealed class ChatWindow : Window
             }
 
             var entryTop = ImGui.GetCursorPosY();
-            DrawLogEntry(entry, config, mentionTerm, availableWidth, showingWhisper);
+            DrawLogEntry(entry, config, mentionTerm, availableWidth, showingWhisper, showTimestamps, repeatCount, continuation, trailingSpacing);
             var newHeight = ImGui.GetCursorPosY() - entryTop;
 
             if (hadCache && MathF.Abs(newHeight - cachedHeight) > 0.5f)
@@ -1370,6 +1682,7 @@ internal sealed class ChatWindow : Window
             }
 
             entryHeightCache[entry.Sequence] = newHeight;
+            entryVariantCache[entry.Sequence] = variant;
         }
 
         // whisperPreload (per-whisper-target file history, loaded once) used to always draw entirely
@@ -1381,19 +1694,73 @@ internal sealed class ChatWindow : Window
         // Both lists are individually sorted ascending by Timestamp already (LoadWhisperHistory's own
         // stable sort; entries built ascending above), so a proper merge - not two sequential loops -
         // is what actually produces correct chronological order either way.
+        visibleEntriesBuffer.Clear();
         if (whisperPreload != null)
         {
             foreach (var entry in MergeByTimestamp(whisperPreload, entries))
             {
-                ProcessEntry(entry);
+                if (PassesFilters(entry))
+                {
+                    visibleEntriesBuffer.Add(entry);
+                }
             }
         }
         else
         {
             foreach (var entry in entries)
             {
-                ProcessEntry(entry);
+                if (PassesFilters(entry))
+                {
+                    visibleEntriesBuffer.Add(entry);
+                }
             }
+        }
+
+        // Runs of identical messages are drawn once (the newest, with "×N"); a sender's consecutive
+        // messages are grouped under one name - both decided here, where the neighbours are known.
+        var visibleCount = visibleEntriesBuffer.Count;
+        for (var i = 0; i < visibleCount; i++)
+        {
+            var last = i;
+            if (config.CollapseRepeatedMessages)
+            {
+                while (last + 1 < visibleCount && MessageGrouping.IsRepeat(visibleEntriesBuffer[last], visibleEntriesBuffer[last + 1]))
+                {
+                    last++;
+                }
+            }
+
+            for (var k = i; k < last; k++)
+            {
+                TrackEntry(visibleEntriesBuffer[k]);
+            }
+
+            var shown = visibleEntriesBuffer[last];
+
+            // The message to jump to may be folded into this "×N" run - then the run is the target.
+            if (pendingScrollSequence is { } wanted && !viewChanged)
+            {
+                for (var k = i; k <= last; k++)
+                {
+                    if (visibleEntriesBuffer[k].Sequence == wanted)
+                    {
+                        pendingScrollSequence = shown.Sequence;
+                        break;
+                    }
+                }
+            }
+
+            var groupsWithNext = config.GroupConsecutiveMessages
+                && last + 1 < visibleCount
+                && MessageGrouping.Continues(shown, visibleEntriesBuffer[last + 1]);
+            ProcessEntry(shown, visibleEntriesBuffer[i], last - i + 1, !groupsWithNext);
+            i = last;
+        }
+
+        // Cached variants of messages long gone from the log - cheap to rebuild, so just start over.
+        if (entryVariantCache.Count > 20000)
+        {
+            entryVariantCache.Clear();
         }
 
         if (viewChanged)
@@ -1453,6 +1820,337 @@ internal sealed class ChatWindow : Window
         {
             lastSeenSequenceByView[viewKey] = viewSeenMax;
         }
+
+        // Back at the bottom: everything up to here counts as seen for the jump button's counter.
+        var distanceFromBottom = ImGui.GetScrollMaxY() - ImGui.GetScrollY();
+        if (viewingHistory || nearBottomBeforeDraw)
+        {
+            bottomSeenSequenceByView[viewKey] = viewSeenMax;
+            newBelowCount = 0;
+        }
+
+        if (jumpButtonClicked)
+        {
+            ImGui.SetScrollY(ImGui.GetScrollMaxY());
+            pinToBottomFramesRemaining = 3;
+        }
+
+        if (showJumpButtonLastFrame)
+        {
+            DrawJumpButton(jumpButtonMin, jumpButtonMax, jumpButtonLabel, config);
+        }
+
+        showJumpButtonLastFrame = !jumpButtonClicked && distanceFromBottom > ImGui.GetTextLineHeightWithSpacing() * 4f;
+        newBelowCountLastFrame = newBelowCount;
+    }
+
+    private static void DrawJumpButton(Vector2 min, Vector2 max, string label, Configuration config)
+    {
+        var accent = C4tTheme.Active(config)?.Accent ?? ImGui.GetStyle().Colors[(int)ImGuiCol.ButtonActive];
+        var hovered = ImGui.IsMouseHoveringRect(min, max);
+        var drawList = ImGui.GetWindowDrawList();
+        drawList.PushClipRect(ImGui.GetWindowPos(), ImGui.GetWindowPos() + ImGui.GetWindowSize(), false);
+        drawList.AddRectFilled(min, max, ImGui.GetColorU32(new Vector4(accent.X, accent.Y, accent.Z, hovered ? 1f : 0.85f)), (max.Y - min.Y) / 2f);
+        var textSize = ImGui.CalcTextSize(label);
+        drawList.AddText(min + ((max - min - textSize) / 2f), ImGui.GetColorU32(new Vector4(1f, 1f, 1f, 1f)), label);
+        drawList.PopClipRect();
+
+        if (hovered)
+        {
+            ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
+        }
+    }
+
+    /// <summary>
+    /// Shows the day a bookmark is from (like picking it in the history popup) and scrolls to the
+    /// message. False if that day's log file has no such message (e.g. file logging was off).
+    /// </summary>
+    internal bool OpenBookmark(ChatBookmark bookmark)
+    {
+        var date = bookmark.Timestamp.ToString("yyyy-MM-dd");
+        var dayEntries = plugin.ChatLog.LoadHistoryFile(date);
+        var key = bookmark.Key;
+        if (!dayEntries.Exists(e => e.BookmarkKey == key))
+        {
+            return false;
+        }
+
+        foreach (var dayEntry in dayEntries)
+        {
+            dayEntry.Sequence = nextPreloadSequence--;
+        }
+
+        loadedHistoryEntries = dayEntries;
+        loadedHistoryLabel = date;
+        logSearchFilter = string.Empty;
+        pendingScrollBookmarkKey = key;
+        IsOpen = true;
+        return true;
+    }
+
+    /// <summary>
+    /// Name colour for a friend / FC member, or null for the normal colour. A colour the user picked
+    /// for one specific whisper partner still wins over it.
+    /// </summary>
+    internal static Vector4? RelationNameColor(int relation, ChatLogEntry entry, string displayName, Configuration config)
+    {
+        if (relation == 0 || (entry.ChatType == XivChatType.TellIncoming && config.WhisperColours.ContainsKey(displayName)))
+        {
+            return null;
+        }
+
+        return RelationColor(relation, config);
+    }
+
+    private static Vector4 RelationColor(int relation, Configuration config) => relation switch
+    {
+        Plugin.RelationFavorite => config.FavoriteNameColor,
+        Plugin.RelationFriend => config.FriendNameColor,
+        _ => config.FcMemberNameColor,
+    };
+
+    /// <summary>
+    /// Small symbol before the name - heart (favourite), people (friend), shield (FC member) - drawn
+    /// at about two thirds of the text size, centred on the line. Returns the width it took.
+    /// </summary>
+    internal static float DrawRelationIcon(int relation, Configuration config)
+    {
+        var icon = relation switch
+        {
+            Plugin.RelationFavorite => FontAwesomeIcon.Heart,
+            Plugin.RelationFriend => FontAwesomeIcon.UserFriends,
+            _ => FontAwesomeIcon.ShieldAlt,
+        };
+        var text = icon.ToIconString();
+        var lineHeight = ImGui.GetTextLineHeight();
+        var iconSize = MathF.Round(lineHeight * 0.65f);
+
+        Vector2 measured;
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            measured = ImGui.CalcTextSize(text) * (iconSize / ImGui.GetFontSize());
+        }
+
+        var pos = ImGui.GetCursorScreenPos();
+        var boxSize = new Vector2(measured.X, lineHeight);
+        ImGui.Dummy(boxSize);
+        var hovered = ImGui.IsItemHovered();
+        ImGui.GetWindowDrawList().AddText(
+            UiBuilder.IconFont,
+            iconSize,
+            new Vector2(pos.X, pos.Y + ((lineHeight - measured.Y) / 2f)),
+            ImGui.GetColorU32(RelationColor(relation, config)),
+            text);
+
+        if (hovered)
+        {
+            ImGui.SetTooltip(Loc.T(relation switch
+            {
+                Plugin.RelationFavorite => "Relation.Favorite",
+                Plugin.RelationFriend => "Relation.Friend",
+                _ => "Relation.FcMember",
+            }));
+        }
+
+        ImGui.SameLine(0, 4f);
+        return boxSize.X + 4f;
+    }
+
+    // "» Mira: "first words..."" into the compose box, so a reply can refer to that message.
+    private void QuoteMessage(ChatLogEntry entry)
+    {
+        var name = string.IsNullOrEmpty(entry.Sender) ? string.Empty : FirstName(entry.Sender) + ": ";
+        InsertTextAtCursor($"\u00bb {name}\"{PreviewLine(entry.Text, 60)}\" ");
+    }
+
+    /// <summary>Opens the view a message belongs to (its whisper tab, or the first tab showing its channel) and scrolls to it.</summary>
+    internal void JumpToEntry(ChatLogEntry entry)
+    {
+        var config = plugin.Configuration;
+        var state = plugin.GetCharacterState();
+        loadedHistoryEntries = null;
+        loadedHistoryLabel = null;
+        logSearchFilter = string.Empty;
+        IsOpen = true;
+
+        if (entry.ChatType is XivChatType.TellIncoming or XivChatType.TellOutgoing)
+        {
+            OpenWhisperTabWithHistory(entry.SenderKey);
+        }
+        else
+        {
+            var tab = config.ChatTabs.Find(t => !plugin.IsTabInSecondaryWindow(t.Id) && t.Matches(entry.ChatType));
+            if (tab == null)
+            {
+                return;
+            }
+
+            if (!string.IsNullOrEmpty(activeWhisperTabTarget) || noviceNetworkTabActive || activeTabId != tab.Id)
+            {
+                SwitchToFixedTab(config, state, tab);
+            }
+        }
+
+        pendingScrollSequence = entry.Sequence;
+        pendingScrollFramesLeft = 30;
+    }
+
+    // "While you were away" - above the log, until dismissed.
+    private void DrawAwaySummary(Configuration config)
+    {
+        if (plugin.Away.Summary is not { } summary)
+        {
+            return;
+        }
+
+        var whispers = 0;
+        var mentions = 0;
+        foreach (var entry in summary.Entries)
+        {
+            if (entry.NotifyKind == 1)
+            {
+                whispers++;
+            }
+            else
+            {
+                mentions++;
+            }
+        }
+
+        var accent = C4tTheme.Active(config)?.Second ?? new Vector4(1f, 0.8f, 0.3f, 1f);
+        var minutes = Math.Max(1, (int)Math.Round((summary.End - summary.Start).TotalMinutes));
+
+        using var id = ImRaii.PushId("awaySummary");
+        if (ImGuiComponents.IconButton(awaySummaryExpanded ? FontAwesomeIcon.ChevronUp : FontAwesomeIcon.ChevronDown))
+        {
+            awaySummaryExpanded = !awaySummaryExpanded;
+        }
+
+        ImGui.SameLine();
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextColored(accent, Loc.T("Away.Summary", minutes, whispers, mentions));
+        if (ImGui.IsItemClicked())
+        {
+            awaySummaryExpanded = !awaySummaryExpanded;
+        }
+
+        ImGui.SameLine(MathF.Max(ImGui.GetCursorPosX(), ImGui.GetContentRegionMax().X - ImGui.GetFrameHeight()));
+        if (ImGuiComponents.IconButton(FontAwesomeIcon.Times))
+        {
+            plugin.Away.Dismiss();
+            awaySummaryExpanded = false;
+            return;
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Away.Dismiss"));
+        }
+
+        if (!awaySummaryExpanded)
+        {
+            return;
+        }
+
+        // Whispers one line per person (newest message), mentions one line each.
+        var listHeight = MathF.Min(summary.Entries.Count, 8) * ImGui.GetTextLineHeightWithSpacing() + ImGui.GetStyle().WindowPadding.Y * 2f;
+        using var child = ImRaii.Child("##awayList", new Vector2(-1, listHeight), true);
+        if (!child.Success)
+        {
+            return;
+        }
+
+        var seenWhisperSenders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (var i = summary.Entries.Count - 1; i >= 0; i--)
+        {
+            var entry = summary.Entries[i];
+            string label;
+            if (entry.NotifyKind == 1)
+            {
+                if (!seenWhisperSenders.Add(entry.SenderKey))
+                {
+                    continue;
+                }
+
+                var count = summary.Entries.FindAll(e => e.NotifyKind == 1 && string.Equals(e.SenderKey, entry.SenderKey, StringComparison.OrdinalIgnoreCase)).Count;
+                label = Loc.T("Away.WhisperLine", entry.Timestamp.ToString("HH:mm"), FirstName(entry.Sender), count, PreviewLine(entry.Text, 50));
+            }
+            else
+            {
+                label = Loc.T("Away.MentionLine", entry.Timestamp.ToString("HH:mm"), ChannelDisplay.DisplayTag(entry.ChatType), FirstName(entry.Sender), PreviewLine(entry.Text, 50));
+            }
+
+            if (ImGui.Selectable(SafeLabel(label) + "##away" + i))
+            {
+                JumpToEntry(entry);
+            }
+        }
+    }
+
+    /// <summary>The space below a message - normal ImGui spacing, or the user's own (Display settings).</summary>
+    internal static void AddMessageGap(Configuration config)
+    {
+        if (config.MessageSpacing < 0f)
+        {
+            ImGui.Spacing();
+        }
+        else if (config.MessageSpacing > 0f)
+        {
+            ImGui.Dummy(new Vector2(0f, config.MessageSpacing));
+        }
+    }
+
+    private void DrawPlayerNoteEditor()
+    {
+        if (openNoteEditor)
+        {
+            ImGui.OpenPopup("##playerNoteEditor");
+            openNoteEditor = false;
+        }
+
+        using var popup = ImRaii.Popup("##playerNoteEditor");
+        if (!popup.Success || noteEditorKey == null)
+        {
+            return;
+        }
+
+        ImGui.TextUnformatted(Loc.T("ChatLog.NoteFor", noteEditorKey));
+        ImGui.InputTextMultiline("##playerNoteText", ref noteEditorText, 500, new Vector2(320f, 90f));
+
+        if (ImGui.Button(Loc.T("Common.Save")))
+        {
+            plugin.SetPlayerNote(noteEditorKey, noteEditorText);
+            ImGui.CloseCurrentPopup();
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button(Loc.T("ChatLog.DeleteNote")))
+        {
+            plugin.SetPlayerNote(noteEditorKey, string.Empty);
+            ImGui.CloseCurrentPopup();
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button(Loc.T("Common.Cancel")))
+        {
+            ImGui.CloseCurrentPopup();
+        }
+    }
+
+    /// <summary>A centred label with a line on either side, e.g. a date or "new messages" marker.</summary>
+    internal static void DrawCenteredMarker(string text, Vector4 color, float availableWidth)
+    {
+        var textSize = ImGui.CalcTextSize(text);
+        var pos = ImGui.GetCursorScreenPos();
+        var width = MathF.Max(textSize.X, availableWidth - ImGui.GetStyle().ScrollbarSize - 6f);
+        var y = pos.Y + (textSize.Y / 2f);
+        var textX = pos.X + ((width - textSize.X) / 2f);
+        var drawList = ImGui.GetWindowDrawList();
+        var lineColor = ImGui.GetColorU32(new Vector4(color.X, color.Y, color.Z, color.W * 0.5f));
+        drawList.AddLine(new Vector2(pos.X, y), new Vector2(textX - 8f, y), lineColor);
+        drawList.AddLine(new Vector2(textX + textSize.X + 8f, y), new Vector2(pos.X + width, y), lineColor);
+        drawList.AddText(new Vector2(textX, pos.Y), ImGui.GetColorU32(color), text);
+        ImGui.Dummy(new Vector2(width, textSize.Y));
     }
 
     private bool IsSelfAuthored(ChatLogEntry entry) =>
@@ -1461,7 +2159,7 @@ internal sealed class ChatWindow : Window
 
     private void TrackUnreadForNewEntry(Configuration config, CharacterState state, ChatLogEntry entry, bool showingWhisper, bool showingNoviceNetwork, Guid? activeFixedTabId)
     {
-        if (IsSelfAuthored(entry))
+        if (IsSelfAuthored(entry) || plugin.IsFilteredOut(entry))
         {
             return;
         }
@@ -1499,6 +2197,11 @@ internal sealed class ChatWindow : Window
     {
         var senderIdentity = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
 
+        if (plugin.IsFilteredOut(entry))
+        {
+            return;
+        }
+
         var tabKey = plugin.RememberWhisperTarget(state, senderIdentity);
 
         if (!IsViewingWhisperTarget(tabKey, entry.Sender) && !state.MutedWhisperTargets.Contains(tabKey))
@@ -1522,7 +2225,7 @@ internal sealed class ChatWindow : Window
         return string.Equals(activeWhisperTabTarget.Split('@')[0], senderNameOnly, StringComparison.OrdinalIgnoreCase);
     }
 
-    private void DrawLogEntry(ChatLogEntry entry, Configuration config, string mentionTerm, float availableWidth, bool showingWhisper)
+    private void DrawLogEntry(ChatLogEntry entry, Configuration config, string mentionTerm, float availableWidth, bool showingWhisper, bool showTimestamp = true, int repeatCount = 1, bool continuation = false, bool trailingSpacing = true)
     {
         using var id = ImRaii.PushId((int)entry.Sequence);
 
@@ -1538,37 +2241,79 @@ internal sealed class ChatWindow : Window
 
         using (ImRaii.Group())
         {
-            var timestamp = entry.Timestamp.ToString("HH:mm") + " ";
-            ImGui.TextColored(config.TimestampColor, timestamp);
-            ImGui.SameLine(0, 0);
-            prefixSize += ImGui.CalcTextSize(timestamp);
-
-            var tag = ChannelDisplay.DisplayTag(entry.ChatType) + " ";
-            ImGui.TextColored(channelColor, tag);
-            ImGui.SameLine(0, 0);
-            prefixSize += ImGui.CalcTextSize(tag);
-
-            if (!isOutgoingTell && config.ShowSenderStatusIcons)
+            if (showTimestamp)
             {
-                prefixSize.X += StatusIconRenderer.Draw(plugin, entry);
+                var timestamp = entry.Timestamp.ToString("HH:mm") + " ";
+                ImGui.TextColored(config.TimestampColor, timestamp);
+                if (ImGui.IsItemHovered())
+                {
+                    ImGui.SetTooltip(entry.Timestamp.ToString(Loc.T("ChatLog.TimestampTooltipFormat"), Loc.Culture));
+                }
+
+                ImGui.SameLine(0, 0);
+                prefixSize += ImGui.CalcTextSize(timestamp);
             }
 
             var displayName = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
 
+            if (continuation)
+            {
+                // Same sender as the message above - no tag/name again, just indented under it.
+                var indent = ImGui.GetFontSize() * 1.2f;
+                ImGui.Dummy(new Vector2(indent, 1f));
+                ImGui.SameLine(0, 0);
+                prefixSize.X += indent;
+            }
+            else
+            {
+                var tag = ChannelDisplay.DisplayTag(entry.ChatType) + " ";
+                ImGui.TextColored(channelColor, tag);
+                ImGui.SameLine(0, 0);
+                prefixSize += ImGui.CalcTextSize(tag);
+
+                if (!isOutgoingTell && config.ShowSenderStatusIcons)
+                {
+                    prefixSize.X += StatusIconRenderer.Draw(plugin, entry);
+                }
+            }
+
+            if (repeatCount > 1)
+            {
+                var badge = "\u00d7" + repeatCount + " ";
+                ImGui.TextColored(ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled], badge);
+                if (ImGui.IsItemHovered())
+                {
+                    ImGui.SetTooltip(Loc.T("ChatLog.RepeatedTooltip", repeatCount));
+                }
+
+                ImGui.SameLine(0, 0);
+                prefixSize += ImGui.CalcTextSize(badge);
+            }
+
             var rawName = isOutgoingTell && showingWhisper ? plugin.OwnCharacterName : displayName;
 
-            var namePart = string.IsNullOrEmpty(rawName) ? string.Empty : rawName + ": ";
+            var namePart = continuation || string.IsNullOrEmpty(rawName) ? string.Empty : rawName + ": ";
 
+            var relation = namePart.Length > 0 ? plugin.GetRelation(entry) : 0;
             senderColor = isOutgoingTell
                 ? config.SendAccentColor
                 : logSearchFilter.Length > 0 && entry.Sender.Contains(logSearchFilter, StringComparison.OrdinalIgnoreCase)
                     ? SearchHighlightColor
-                    : entry.ChatType == XivChatType.TellIncoming
-                        ? ChannelDisplay.WhisperColor(displayName, config)
-                        : channelColor;
-            ImGui.TextColored(senderColor, namePart);
+                    : RelationNameColor(relation, entry, displayName, config)
+                        ?? (entry.ChatType == XivChatType.TellIncoming
+                            ? ChannelDisplay.WhisperColor(displayName, config)
+                            : channelColor);
+            if (relation != 0 && config.ShowRelationIcons)
+            {
+                prefixSize.X += DrawRelationIcon(relation, config);
+            }
 
-            if (!IsSelfAuthored(entry) && entry.IsRealPlayer)
+            if (namePart.Length > 0)
+            {
+                ImGui.TextColored(senderColor, namePart);
+            }
+
+            if (!IsSelfAuthored(entry) && entry.IsRealPlayer && namePart.Length > 0)
             {
                 nameHovered = ImGui.IsItemHovered();
                 var nameClicked = ImGui.IsItemClicked();
@@ -1617,7 +2362,19 @@ internal sealed class ChatWindow : Window
                 },
                 allowRpFormatting: allowRpFormatting);
 
-            ImGui.Spacing();
+            if (trailingSpacing)
+            {
+                AddMessageGap(config);
+            }
+        }
+
+        if (plugin.IsBookmarked(entry))
+        {
+            // Bookmarked: a small accent bar at the left edge of the message.
+            var min = ImGui.GetItemRectMin();
+            var max = ImGui.GetItemRectMax();
+            var accent = C4tTheme.Active(config)?.Second ?? new Vector4(1f, 0.8f, 0.25f, 1f);
+            ImGui.GetWindowDrawList().AddRectFilled(new Vector2(min.X - 5f, min.Y), new Vector2(min.X - 2f, max.Y), ImGui.GetColorU32(accent), 1.5f);
         }
 
         if (ImGui.IsItemHovered())
@@ -1629,8 +2386,16 @@ internal sealed class ChatWindow : Window
 
         if (ImGui.IsItemHovered() && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
         {
-            rightClickedOnName = nameHovered;
+            // A grouped message has no name of its own - right-clicking it anywhere offers the
+            // player actions of the name above it.
+            rightClickedOnName = nameHovered || (continuation && !IsSelfAuthored(entry) && entry.IsRealPlayer);
+            if (continuation)
+            {
+                whisperTarget = displayNameForMenu(entry);
+            }
         }
+
+        static string displayNameForMenu(ChatLogEntry e) => e.SenderWorld != null ? $"{e.Sender}@{e.SenderWorld}" : e.Sender;
 
         using (var entryContextPopup = ImRaii.ContextPopupItem("##logEntryContext"))
         {
@@ -1663,6 +2428,16 @@ internal sealed class ChatWindow : Window
                 {
                     if (blockMenu.Success)
                     {
+                        if (ImGui.Selectable(Loc.T("ChatLog.HideInChatAction")))
+                        {
+                            plugin.HidePlayer(entry);
+                        }
+
+                        if (ImGui.IsItemHovered())
+                        {
+                            ImGui.SetTooltip(Loc.T("ChatLog.HideInChatTooltip"));
+                        }
+
                         if (ImGui.Selectable(Loc.T("ChatLog.AddToBlacklistAction")))
                         {
                             plugin.AddToBlacklist(entry.Sender, entry.SenderWorld);
@@ -1703,6 +2478,18 @@ internal sealed class ChatWindow : Window
                     plugin.OpenAdventurerPlate(entry.Sender, entry.SenderWorld, entry.ContentId);
                 }
 
+                if (ImGui.Selectable(Loc.T(plugin.IsFavorite(entry) ? "ChatLog.RemoveFavorite" : "ChatLog.AddFavorite")))
+                {
+                    plugin.ToggleFavorite(entry);
+                }
+
+                if (ImGui.Selectable(Loc.T(plugin.GetPlayerNote(entry) != null ? "ChatLog.EditNoteAction" : "ChatLog.AddNoteAction")))
+                {
+                    noteEditorKey = entry.SenderKey;
+                    noteEditorText = plugin.GetPlayerNote(entry) ?? string.Empty;
+                    openNoteEditor = true;
+                }
+
                 ImGui.Separator();
             }
 
@@ -1710,13 +2497,29 @@ internal sealed class ChatWindow : Window
             {
                 ImGui.SetClipboardText($"{entry.Sender}: {entry.Text}");
             }
+
+            if (!string.IsNullOrWhiteSpace(entry.Text) && ImGui.Selectable(Loc.T("ChatLog.QuoteAction")))
+            {
+                QuoteMessage(entry);
+            }
+
+            if (ImGui.Selectable(Loc.T(plugin.IsBookmarked(entry) ? "ChatLog.RemoveBookmark" : "ChatLog.AddBookmark")))
+            {
+                plugin.ToggleBookmark(entry);
+            }
+
+            if (ImGui.Selectable(Loc.T("ChatLog.ShowBookmarks")))
+            {
+                plugin.ToggleBookmarksWindow();
+            }
             }
         }
 
         if (nameHovered)
         {
             ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
-            ImGui.SetTooltip(Loc.T("ChatLog.ClickToWhisper"));
+            var note = plugin.GetPlayerNote(entry);
+            ImGui.SetTooltip(note != null ? note + "\n\n" + Loc.T("ChatLog.ClickToWhisper") : Loc.T("ChatLog.ClickToWhisper"));
 
             var underlineY = nameRectMax.Y - 1f;
             ImGui.GetWindowDrawList().AddLine(
@@ -1741,9 +2544,13 @@ internal sealed class ChatWindow : Window
 
     private void SyncDraft(CharacterState state)
     {
-        var key = state.LastChannel == ChatChannel.Whisper && !string.IsNullOrEmpty(activeWhisperTabTarget)
-            ? activeWhisperTabTarget
-            : GenericDraftKey;
+        // Whisper conversations keep their own draft (as before); so do fixed tabs and the Novice
+        // Network tab now - half-typed text stays in the tab it was typed in.
+        var key = !string.IsNullOrEmpty(activeWhisperTabTarget)
+            ? state.LastChannel == ChatChannel.Whisper ? activeWhisperTabTarget : GenericDraftKey
+            : noviceNetworkTabActive
+                ? NoviceNetworkDraftKey
+                : activeTabId != Guid.Empty ? TabDraftKeyPrefix + activeTabId : GenericDraftKey;
 
         if (key == currentDraftKey)
         {
@@ -3403,6 +4210,26 @@ internal sealed class ChatWindow : Window
         {
             tab.Muted = muted;
             plugin.SaveConfiguration();
+        }
+
+        var showTimestamps = tab.ShowTimestamps;
+        if (ImGui.Checkbox(Loc.T("Tabs.ShowTimestamps") + "##timestamps" + tab.Id, ref showTimestamps))
+        {
+            tab.ShowTimestamps = showTimestamps;
+            plugin.InvalidateChatLayout();
+            plugin.SaveConfiguration();
+        }
+
+        var group = plugin.Configuration.GroupConsecutiveMessages;
+        if (ImGui.Checkbox(Loc.T("Tabs.GroupMessages") + "##group" + tab.Id, ref group))
+        {
+            plugin.Configuration.GroupConsecutiveMessages = group;
+            plugin.SaveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Tabs.GroupMessagesTooltip"));
         }
 
         if (ImGui.IsItemHovered())

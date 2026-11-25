@@ -11,6 +11,8 @@ internal enum SettingsPage
 {
     General,
     Sounds,
+    Mentions,
+    Filter,
     Colors,
     Tabs,
     Rp,
@@ -19,6 +21,7 @@ internal enum SettingsPage
     FileLog,
     WhisperContacts,
     WebClient,
+    Backup,
     Info,
 }
 
@@ -27,6 +30,9 @@ internal sealed class SettingsWindow : Window
     private readonly Plugin plugin;
     private readonly GeneralPage generalPage;
     private readonly SoundsPage soundsPage;
+    private readonly MentionsPage mentionsPage;
+    private readonly FilterPage filterPage;
+    private readonly BackupPage backupPage;
     private readonly ColorsPage colorsPage;
     private readonly TabsPage tabsPage;
     private readonly RpPage rpPage;
@@ -52,6 +58,9 @@ internal sealed class SettingsWindow : Window
 
         generalPage = new GeneralPage(plugin);
         soundsPage = new SoundsPage(plugin);
+        mentionsPage = new MentionsPage(plugin);
+        filterPage = new FilterPage(plugin);
+        backupPage = new BackupPage(plugin);
         colorsPage = new ColorsPage(plugin);
         tabsPage = new TabsPage(plugin);
         rpPage = new RpPage(plugin);
@@ -93,6 +102,8 @@ internal sealed class SettingsWindow : Window
         {
             DrawNavEntry(Loc.T("Nav.General"), FontAwesomeIcon.SlidersH, SettingsPage.General);
             DrawNavEntry(Loc.T("Nav.Sounds"), FontAwesomeIcon.VolumeUp, SettingsPage.Sounds);
+            DrawNavEntry(Loc.T("Nav.Mentions"), FontAwesomeIcon.At, SettingsPage.Mentions);
+            DrawNavEntry(Loc.T("Nav.Filter"), FontAwesomeIcon.Filter, SettingsPage.Filter);
             DrawNavEntry(Loc.T("Nav.Colors"), FontAwesomeIcon.Palette, SettingsPage.Colors);
             DrawNavEntry(Loc.T("Nav.Tabs"), FontAwesomeIcon.FolderOpen, SettingsPage.Tabs);
             DrawNavEntry(Loc.T("Nav.Rp"), FontAwesomeIcon.TheaterMasks, SettingsPage.Rp);
@@ -101,6 +112,7 @@ internal sealed class SettingsWindow : Window
             DrawNavEntry(Loc.T("Nav.FileLog"), FontAwesomeIcon.Save, SettingsPage.FileLog);
             DrawNavEntry(Loc.T("Nav.WhisperContacts"), FontAwesomeIcon.UserEdit, SettingsPage.WhisperContacts);
             DrawNavEntry(Loc.T("Nav.WebClient"), FontAwesomeIcon.Wifi, SettingsPage.WebClient);
+            DrawNavEntry(Loc.T("Nav.Backup"), FontAwesomeIcon.Archive, SettingsPage.Backup);
             ImGui.Separator();
             DrawNavEntry(Loc.T("Nav.Info"), FontAwesomeIcon.InfoCircle, SettingsPage.Info);
         }
@@ -116,6 +128,15 @@ internal sealed class SettingsWindow : Window
                     break;
                 case SettingsPage.Sounds:
                     soundsPage.Draw();
+                    break;
+                case SettingsPage.Mentions:
+                    mentionsPage.Draw();
+                    break;
+                case SettingsPage.Filter:
+                    filterPage.Draw();
+                    break;
+                case SettingsPage.Backup:
+                    backupPage.Draw();
                     break;
                 case SettingsPage.Colors:
                     colorsPage.Draw();
@@ -146,6 +167,8 @@ internal sealed class SettingsWindow : Window
                     break;
             }
         }
+
+        backupPage.DrawDialogs();
     }
 
     private void DrawNavEntry(string label, FontAwesomeIcon icon, SettingsPage page)

@@ -26,6 +26,39 @@ internal sealed class WebMessageDto
     public List<WebTextSegmentDto> Segments { get; set; } = new();
 
     public string Time { get; set; } = string.Empty;
+
+    /// <summary>The user's private note about the sender, if any.</summary>
+    public string? Note { get; set; }
+
+    public bool Bookmarked { get; set; }
+
+    /// <summary>"friend", "fc" or null - only set while its icon is switched on in the plugin.</summary>
+    public string? RelationIcon { get; set; }
+}
+
+internal sealed class WebBookmarkRequest
+{
+    public long Sequence { get; set; }
+}
+
+internal sealed class WebBookmarkRemoveRequest
+{
+    public string Key { get; set; } = string.Empty;
+}
+
+internal sealed class WebBookmarkDto
+{
+    public string Key { get; set; } = string.Empty;
+
+    public string Time { get; set; } = string.Empty;
+
+    public string ChannelTag { get; set; } = string.Empty;
+
+    public string ChannelColorCss { get; set; } = string.Empty;
+
+    public string Sender { get; set; } = string.Empty;
+
+    public string Text { get; set; } = string.Empty;
 }
 
 internal sealed class WebTabDto

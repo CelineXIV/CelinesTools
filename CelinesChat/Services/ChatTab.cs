@@ -34,6 +34,9 @@ public sealed class ChatTab
 
     public bool Muted { get; set; }
 
+    /// <summary>Show each message's time in this tab.</summary>
+    public bool ShowTimestamps { get; set; } = true;
+
     public bool Matches(XivChatType type)
     {
         if (ChannelDisplay.CategoryOf(type) is not { } category || !IncludedChannels.Contains(category))

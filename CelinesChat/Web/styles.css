@@ -1,3 +1,10 @@
+@font-face {
+  font-family: "Rajdhani";
+  src: url("/fonts/rajdhani.ttf") format("truetype");
+  font-weight: 400 700;
+  font-display: swap;
+}
+
 /* Saved presets (see app.js's THEMES/applyTheme, persisted per-device in localStorage) - the
    bare :root values are the "dark" preset and also the fallback before app.js applies whichever
    theme was saved, so a first paint before JS runs still looks intentional rather than unstyled. */
@@ -604,4 +611,144 @@ html, body {
     max-height: 70vh;
     border-radius: 16px;
   }
+}
+
+
+/* C4T logo - only in the C4T designs, the colour matching the variant. */
+.c4t-logo {
+  display: none;
+  height: 26px;
+  width: auto;
+  flex: 0 0 auto;
+}
+
+.c4t-logo.login-logo {
+  height: 56px;
+  margin: 0 auto 8px;
+}
+
+html[data-theme="c4t"] .c4t-logo-blue,
+html[data-theme="c4t-lila"] .c4t-logo-purple {
+  display: block;
+}
+
+/* ----- Search bar ----- */
+#search-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+}
+
+#search-bar[hidden] {
+  display: none;
+}
+
+#search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+#search-count {
+  flex: 0 0 auto;
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.msg.search-hidden {
+  display: none;
+}
+
+.theme-button.active {
+  border-color: var(--accent, #4a90e2);
+}
+
+/* ----- Notification options (design sheet) ----- */
+.notify-options {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.notify-options label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 15px;
+}
+
+.notify-options input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+}
+
+/* ----- Bookmarks, notes, friend/FC icons ----- */
+.msg {
+  cursor: pointer;
+}
+
+.msg.bookmarked {
+  border-left: 3px solid var(--accent);
+  padding-left: 6px;
+}
+
+.relation-icon {
+  margin-right: 3px;
+  font-size: 0.75em;
+  vertical-align: 0.1em;
+}
+
+.note-mark {
+  opacity: 0.75;
+}
+
+.action-preview {
+  margin: 0 0 12px;
+  opacity: 0.85;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.action-note {
+  margin: 0 0 12px;
+  white-space: pre-wrap;
+}
+
+.bookmark-item {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.bookmark-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.bookmark-remove {
+  margin-left: auto;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 18px;
+  cursor: pointer;
+}
+
+.bookmark-text {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
 }

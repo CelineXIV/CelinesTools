@@ -74,7 +74,147 @@ const state = {
   sheetOpen: false,
   themeSheetOpen: false,
   sendErrorTimer: null,
+  unread: 0, // messages/whispers that arrived while the page was in the background
+  searchTerm: "",
 };
+
+// ----- Notifications: tab-title counter, sound, vibration -----
+
+const NOTIFY_SOUND_KEY = "celineschat-notify-sound";
+const NOTIFY_VIBRATE_KEY = "celineschat-notify-vibrate";
+const BASE_TITLE = document.title;
+let audioContext = null;
+
+function readFlag(key, fallback) {
+  try {
+    const value = localStorage.getItem(key);
+    return value === null ? fallback : value === "1";
+  } catch {
+    return fallback;
+  }
+}
+
+function writeFlag(key, value) {
+  try {
+    localStorage.setItem(key, value ? "1" : "0");
+  } catch {
+    // Private mode etc. - the setting just isn't remembered.
+  }
+}
+
+function pageInBackground() {
+  return document.hidden || !document.hasFocus();
+}
+
+function updateTitle() {
+  document.title = state.unread > 0 ? `(${state.unread}) ${BASE_TITLE}` : BASE_TITLE;
+}
+
+function countUnread() {
+  if (pageInBackground()) {
+    state.unread++;
+    updateTitle();
+  }
+}
+
+function resetUnread() {
+  if (!pageInBackground() && state.unread > 0) {
+    state.unread = 0;
+    updateTitle();
+  }
+}
+
+// Browsers only allow audio after the user interacted with the page - so the audio context is
+// created on the first tap/key press and reused afterwards.
+function unlockAudio() {
+  if (audioContext) {
+    if (audioContext.state === "suspended") {
+      audioContext.resume().catch(() => {});
+    }
+
+    return;
+  }
+
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (Ctx) {
+    audioContext = new Ctx();
+  }
+}
+
+function playNotifySound(kind) {
+  if (!audioContext || audioContext.state !== "running") {
+    return;
+  }
+
+  // Two short tones - higher for a whisper, lower for a mention.
+  const tones = kind === "whisper" ? [880, 1175] : [660, 880];
+  const start = audioContext.currentTime;
+  tones.forEach((frequency, index) => {
+    const osc = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+    osc.type = "sine";
+    osc.frequency.value = frequency;
+    const t = start + index * 0.13;
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(0.2, t + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.12);
+    osc.connect(gain).connect(audioContext.destination);
+    osc.start(t);
+    osc.stop(t + 0.13);
+  });
+}
+
+function onNotify(info) {
+  // Messages in the open view are already counted by the "message" event.
+  if (!info.inView) {
+    countUnread();
+  }
+
+  if (readFlag(NOTIFY_SOUND_KEY, true)) {
+    playNotifySound(info.kind);
+  }
+
+  if (readFlag(NOTIFY_VIBRATE_KEY, true) && navigator.vibrate) {
+    navigator.vibrate(info.kind === "whisper" ? [120, 80, 120] : [150]);
+  }
+}
+
+// ----- Search (filters the messages currently loaded) -----
+
+function messageMatchesSearch(row) {
+  return state.searchTerm === "" || row.textContent.toLowerCase().includes(state.searchTerm);
+}
+
+function applySearch() {
+  const list = el("message-list");
+  let shown = 0;
+  for (const row of list.children) {
+    const match = messageMatchesSearch(row);
+    row.classList.toggle("search-hidden", !match);
+    if (match) {
+      shown++;
+    }
+  }
+
+  el("search-count").textContent = state.searchTerm === "" ? "" : `${shown}`;
+  if (state.searchTerm === "") {
+    list.scrollTop = list.scrollHeight;
+  }
+}
+
+function toggleSearch() {
+  const bar = el("search-bar");
+  const open = bar.hidden;
+  bar.hidden = !open;
+  el("search-button").classList.toggle("active", open);
+  if (open) {
+    el("search-input").focus();
+  } else {
+    el("search-input").value = "";
+    state.searchTerm = "";
+    applySearch();
+  }
+}
 
 const el = (id) => document.getElementById(id);
 
@@ -108,6 +248,22 @@ async function main() {
   });
 
   el("theme-button").addEventListener("click", openThemeSheet);
+  el("search-button").addEventListener("click", toggleSearch);
+  el("bookmarks-button").addEventListener("click", openBookmarkList);
+  el("action-sheet-close").addEventListener("click", closeActionSheet);
+  el("action-sheet").addEventListener("click", (ev) => {
+    if (ev.target === el("action-sheet")) {
+      closeActionSheet();
+    }
+  });
+  el("search-input").addEventListener("input", () => {
+    state.searchTerm = el("search-input").value.trim().toLowerCase();
+    applySearch();
+  });
+  document.addEventListener("pointerdown", unlockAudio);
+  document.addEventListener("keydown", unlockAudio);
+  document.addEventListener("visibilitychange", resetUnread);
+  window.addEventListener("focus", resetUnread);
   el("theme-sheet-close").addEventListener("click", closeThemeSheet);
   el("theme-sheet").addEventListener("click", (ev) => {
     if (ev.target === el("theme-sheet")) {
@@ -234,6 +390,12 @@ function connectEvents() {
   source.addEventListener("message", (ev) => {
     markAlive();
     appendMessage(JSON.parse(ev.data));
+    countUnread();
+  });
+
+  source.addEventListener("notify", (ev) => {
+    markAlive();
+    onNotify(JSON.parse(ev.data));
   });
 
   source.addEventListener("view", (ev) => {
@@ -257,6 +419,7 @@ function connectEvents() {
       appendMessage(msg);
     }
 
+    applySearch();
     list.scrollTop = list.scrollHeight;
   });
 
@@ -301,7 +464,8 @@ function appendMessage(msg) {
   const wasAtBottom = list.scrollTop + list.clientHeight >= list.scrollHeight - 40;
 
   const row = document.createElement("div");
-  row.className = "msg";
+  row.className = "msg" + (msg.bookmarked ? " bookmarked" : "");
+  row.dataset.sequence = String(msg.sequence);
 
   const time = document.createElement("span");
   time.className = "time";
@@ -314,11 +478,30 @@ function appendMessage(msg) {
   tag.textContent = msg.channelTag;
   row.appendChild(tag);
 
+  if (msg.relationIcon) {
+    const icon = document.createElement("span");
+    icon.className = "relation-icon";
+    icon.style.color = msg.senderColorCss;
+    const icons = { favorite: ["\u2665", "Favourite"], friend: ["\u{1F465}", "Friend"], fc: ["\u{1F6E1}\uFE0F", "FC member"] };
+    const [symbol, label] = icons[msg.relationIcon] || icons.fc;
+    icon.textContent = symbol;
+    icon.title = label;
+    row.appendChild(icon);
+  }
+
   if (msg.sender) {
     const sender = document.createElement("span");
     sender.className = "sender";
     sender.style.color = msg.senderColorCss;
     sender.textContent = msg.sender + ":";
+    if (msg.note) {
+      sender.title = msg.note;
+      const noteMark = document.createElement("span");
+      noteMark.className = "note-mark";
+      noteMark.textContent = " \u270E";
+      sender.appendChild(noteMark);
+    }
+
     row.appendChild(sender);
   }
 
@@ -332,6 +515,19 @@ function appendMessage(msg) {
     }
 
     row.appendChild(span);
+  }
+
+  // Tap a message (anywhere but a link) for its actions: bookmark, copy, the note about the sender.
+  row.addEventListener("click", (ev) => {
+    if (ev.target.closest(".link")) {
+      return;
+    }
+
+    openMessageSheet(msg, row);
+  });
+
+  if (!messageMatchesSearch(row)) {
+    row.classList.add("search-hidden");
   }
 
   list.appendChild(row);
@@ -600,6 +796,33 @@ function renderThemeSheet() {
   }
 
   container.appendChild(list);
+
+  // Notification options for this device (remembered in the browser).
+  const options = document.createElement("div");
+  options.className = "notify-options";
+  options.appendChild(sheetSectionTitle("Notifications (whispers & mentions)"));
+  options.appendChild(makeToggle("Play a sound", NOTIFY_SOUND_KEY));
+  if (navigator.vibrate) {
+    options.appendChild(makeToggle("Vibrate", NOTIFY_VIBRATE_KEY));
+  }
+
+  container.appendChild(options);
+}
+
+function makeToggle(text, key) {
+  const label = document.createElement("label");
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.checked = readFlag(key, true);
+  input.addEventListener("change", () => {
+    writeFlag(key, input.checked);
+    if (input.checked) {
+      unlockAudio();
+    }
+  });
+  label.appendChild(input);
+  label.appendChild(document.createTextNode(text));
+  return label;
 }
 
 // ----- Actions -----
@@ -666,3 +889,151 @@ async function post(path, body, options) {
 }
 
 main();
+
+// ----- Message actions, bookmarks -----
+
+function openActionSheet(title) {
+  el("action-sheet-title").textContent = title;
+  const content = el("action-sheet-content");
+  content.textContent = "";
+  el("action-sheet").hidden = false;
+  return content;
+}
+
+function closeActionSheet() {
+  el("action-sheet").hidden = true;
+}
+
+function messagePlainText(msg) {
+  return msg.segments.map((segment) => segment.text).join(" ");
+}
+
+function actionButton(text, onClick) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "sheet-option";
+  btn.textContent = text;
+  btn.addEventListener("click", onClick);
+  return btn;
+}
+
+function openMessageSheet(msg, row) {
+  const content = openActionSheet(msg.sender || msg.channelTag);
+
+  const preview = document.createElement("p");
+  preview.className = "action-preview";
+  preview.textContent = messagePlainText(msg);
+  content.appendChild(preview);
+
+  if (msg.note) {
+    content.appendChild(sheetSectionTitle("Your note"));
+    const note = document.createElement("p");
+    note.className = "action-note";
+    note.textContent = msg.note;
+    content.appendChild(note);
+  }
+
+  const list = document.createElement("div");
+  list.className = "sheet-option-list";
+
+  const bookmarked = row.classList.contains("bookmarked");
+  list.appendChild(actionButton(bookmarked ? "Remove bookmark" : "Bookmark", async () => {
+    closeActionSheet();
+    try {
+      const res = await fetch("/api/bookmark", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sequence: msg.sequence }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showSendError(body.error || "Something went wrong.");
+        return;
+      }
+
+      msg.bookmarked = body.bookmarked;
+      row.classList.toggle("bookmarked", body.bookmarked);
+    } catch {
+      showSendError("No connection.");
+    }
+  }));
+
+  list.appendChild(actionButton("Copy text", () => {
+    const text = (msg.sender ? msg.sender + ": " : "") + messagePlainText(msg);
+    navigator.clipboard?.writeText(text).catch(() => {});
+    closeActionSheet();
+  }));
+
+  content.appendChild(list);
+}
+
+async function openBookmarkList() {
+  const content = openActionSheet("Bookmarks");
+  const loading = document.createElement("p");
+  loading.textContent = "...";
+  content.appendChild(loading);
+
+  let bookmarks = [];
+  try {
+    const res = await fetch("/api/bookmarks");
+    bookmarks = res.ok ? await res.json() : [];
+  } catch {
+    // Shown as an empty list.
+  }
+
+  content.textContent = "";
+  if (bookmarks.length === 0) {
+    const empty = document.createElement("p");
+    empty.textContent = "No bookmarks yet - tap a message to bookmark it.";
+    content.appendChild(empty);
+    return;
+  }
+
+  for (const bookmark of bookmarks) {
+    const item = document.createElement("div");
+    item.className = "bookmark-item";
+
+    const head = document.createElement("div");
+    head.className = "bookmark-head";
+    const time = document.createElement("span");
+    time.className = "time";
+    time.textContent = bookmark.time;
+    head.appendChild(time);
+    const tag = document.createElement("span");
+    tag.className = "tag";
+    tag.style.color = bookmark.channelColorCss;
+    tag.textContent = bookmark.channelTag;
+    head.appendChild(tag);
+    if (bookmark.sender) {
+      const sender = document.createElement("span");
+      sender.className = "sender";
+      sender.style.color = bookmark.channelColorCss;
+      sender.textContent = bookmark.sender + ":";
+      head.appendChild(sender);
+    }
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "bookmark-remove";
+    remove.textContent = "\u00D7";
+    remove.title = "Remove bookmark";
+    remove.addEventListener("click", async () => {
+      await post("/api/bookmark/remove", { key: bookmark.key });
+      item.remove();
+      for (const row of el("message-list").children) {
+        if (row.classList.contains("bookmarked") && row.textContent.includes(bookmark.text)) {
+          row.classList.remove("bookmarked");
+        }
+      }
+    });
+    head.appendChild(remove);
+    item.appendChild(head);
+
+    const text = document.createElement("p");
+    text.className = "bookmark-text";
+    text.textContent = bookmark.text;
+    item.appendChild(text);
+
+    content.appendChild(item);
+  }
+}

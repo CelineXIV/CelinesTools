@@ -38,6 +38,17 @@ internal sealed class WebRoutes : IDisposable
     private readonly string appJs;
     private readonly string stylesCss;
 
+    // Logo + font for the C4T look - read once, served from memory. Missing files just 404.
+    private readonly byte[]? logoBlue;
+    private readonly byte[]? logoPurple;
+    private readonly byte[]? rajdhaniFont;
+
+    // Hard cap on remembered logins - the oldest ones go first.
+    private const int MaxWebSessions = 20;
+
+    // How often a session's "last used" time is written back (and the config saved) at most.
+    private static readonly TimeSpan SessionTouchInterval = TimeSpan.FromHours(1);
+
     public WebRoutes(Plugin plugin, WebSseHub hub, MiniHttpServer host, string webRootDir)
     {
         this.plugin = plugin;
@@ -47,9 +58,17 @@ internal sealed class WebRoutes : IDisposable
         appJs = File.ReadAllText(Path.Combine(webRootDir, "app.js"));
         stylesCss = File.ReadAllText(Path.Combine(webRootDir, "styles.css"));
 
+        var pluginDir = Path.GetDirectoryName(webRootDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)) ?? webRootDir;
+        logoBlue = TryReadBytes(Path.Combine(pluginDir, "Assets", "c4t-logo-blau.png"));
+        logoPurple = TryReadBytes(Path.Combine(pluginDir, "Assets", "c4t-logo-lila.png"));
+        rajdhaniFont = TryReadBytes(Path.Combine(pluginDir, "Fonts", "Rajdhani-SemiBold.ttf"));
+
         host.Routes.PreAuthentication.Static.Add(HttpMethod.GET, "/", ServeIndex, OnException);
         host.Routes.PreAuthentication.Static.Add(HttpMethod.GET, "/app.js", ServeAppJs, OnException);
         host.Routes.PreAuthentication.Static.Add(HttpMethod.GET, "/styles.css", ServeStyles, OnException);
+        host.Routes.PreAuthentication.Static.Add(HttpMethod.GET, "/c4t-logo-blau.png", ctx => SendBinary(ctx, logoBlue, "image/png"), OnException);
+        host.Routes.PreAuthentication.Static.Add(HttpMethod.GET, "/c4t-logo-lila.png", ctx => SendBinary(ctx, logoPurple, "image/png"), OnException);
+        host.Routes.PreAuthentication.Static.Add(HttpMethod.GET, "/fonts/rajdhani.ttf", ctx => SendBinary(ctx, rajdhaniFont, "font/ttf"), OnException);
         host.Routes.PreAuthentication.Static.Add(HttpMethod.POST, "/api/auth", HandleAuth, OnException);
         host.Routes.PreAuthentication.Static.Add(HttpMethod.GET, "/api/session", HandleSession, OnException);
 
@@ -64,6 +83,9 @@ internal sealed class WebRoutes : IDisposable
         host.Routes.PostAuthentication.Static.Add(HttpMethod.POST, "/api/channel", HandleChannel, OnException);
         host.Routes.PostAuthentication.Static.Add(HttpMethod.GET, "/api/channels", HandleChannels, OnException);
         host.Routes.PostAuthentication.Static.Add(HttpMethod.POST, "/api/links/click", HandleLinkClick, OnException);
+        host.Routes.PostAuthentication.Static.Add(HttpMethod.POST, "/api/bookmark", HandleBookmarkToggle, OnException);
+        host.Routes.PostAuthentication.Static.Add(HttpMethod.GET, "/api/bookmarks", HandleBookmarkList, OnException);
+        host.Routes.PostAuthentication.Static.Add(HttpMethod.POST, "/api/bookmark/remove", HandleBookmarkRemove, OnException);
 
         plugin.ChatLog.EntryAdded += OnEntryAdded;
         plugin.ChatWindowInstance.ViewChanged += OnViewChanged;
@@ -82,6 +104,34 @@ internal sealed class WebRoutes : IDisposable
     private async Task ServeAppJs(HttpContext ctx) => await SendText(ctx, appJs, "text/javascript; charset=utf-8");
 
     private async Task ServeStyles(HttpContext ctx) => await SendText(ctx, stylesCss, "text/css; charset=utf-8");
+
+    private static byte[]? TryReadBytes(string path)
+    {
+        try
+        {
+            return File.Exists(path) ? File.ReadAllBytes(path) : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private static async Task SendBinary(HttpContext ctx, byte[]? bytes, string contentType)
+    {
+        if (bytes == null)
+        {
+            ctx.Response.StatusCode = 404;
+            ctx.Response.ContentType = "text/plain";
+            await ctx.Response.Send("Not found");
+            return;
+        }
+
+        ctx.Response.StatusCode = 200;
+        ctx.Response.ContentType = contentType;
+        ctx.Response.Headers.Add("Cache-Control", "public, max-age=86400");
+        await ctx.Response.SendBytes(bytes);
+    }
 
     private static async Task SendText(HttpContext ctx, string body, string contentType)
     {
@@ -116,11 +166,30 @@ internal sealed class WebRoutes : IDisposable
         var token = WebAuth.GenerateSessionToken();
         await plugin.Framework.RunOnFrameworkThread(() =>
         {
-            plugin.Configuration.WebClientAuthStore.Add(token);
+            var sessions = plugin.Configuration.WebClientSessions;
+            PruneSessions(sessions);
+            while (sessions.Count >= MaxWebSessions)
+            {
+                var oldest = string.Empty;
+                var oldestTime = DateTime.MaxValue;
+                foreach (var (key, lastUsed) in sessions)
+                {
+                    if (lastUsed < oldestTime)
+                    {
+                        oldest = key;
+                        oldestTime = lastUsed;
+                    }
+                }
+
+                sessions.Remove(oldest);
+            }
+
+            sessions[token] = DateTime.UtcNow;
             plugin.SaveConfiguration();
         });
 
-        ctx.Response.Headers.Add("Set-Cookie", $"{CookieName}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000");
+        var maxAgeSeconds = (long)TimeSpan.FromDays(Math.Max(1, plugin.Configuration.WebClientSessionDays)).TotalSeconds;
+        ctx.Response.Headers.Add("Set-Cookie", $"{CookieName}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={maxAgeSeconds}");
         await SendJson(ctx, 200, new { ok = true });
     }
 
@@ -137,7 +206,7 @@ internal sealed class WebRoutes : IDisposable
         {
             await plugin.Framework.RunOnFrameworkThread(() =>
             {
-                plugin.Configuration.WebClientAuthStore.Remove(token);
+                plugin.Configuration.WebClientSessions.Remove(token);
                 plugin.SaveConfiguration();
             });
         }
@@ -157,7 +226,7 @@ internal sealed class WebRoutes : IDisposable
     }
 
     // Checked on the framework thread - that's the only thread that ever changes
-    // WebClientAuthStore (login, logout, code change), and a plain HashSet read racing one of those
+    // WebClientSessions (login, logout, code change), and a plain HashSet read racing one of those
     // writes from this HTTP thread can throw or give a wrong answer.
     private async Task<bool> IsAuthenticatedAsync(HttpContext ctx)
     {
@@ -167,7 +236,52 @@ internal sealed class WebRoutes : IDisposable
             return false;
         }
 
-        return await plugin.Framework.RunOnFrameworkThread(() => plugin.Configuration.WebClientAuthStore.Contains(token));
+        return await plugin.Framework.RunOnFrameworkThread(() =>
+        {
+            var sessions = plugin.Configuration.WebClientSessions;
+            if (!sessions.TryGetValue(token, out var lastUsed))
+            {
+                return false;
+            }
+
+            var now = DateTime.UtcNow;
+            if (now - lastUsed > SessionLifetime)
+            {
+                // Unused for longer than the configured number of days - log in again.
+                sessions.Remove(token);
+                plugin.SaveConfiguration();
+                return false;
+            }
+
+            // Sliding expiry: in use = stays valid. Written back at most hourly (each write saves the config).
+            if (now - lastUsed > SessionTouchInterval)
+            {
+                sessions[token] = now;
+                plugin.SaveConfiguration();
+            }
+
+            return true;
+        });
+    }
+
+    private TimeSpan SessionLifetime => TimeSpan.FromDays(Math.Max(1, plugin.Configuration.WebClientSessionDays));
+
+    private void PruneSessions(Dictionary<string, DateTime> sessions)
+    {
+        var now = DateTime.UtcNow;
+        var expired = new List<string>();
+        foreach (var (key, lastUsed) in sessions)
+        {
+            if (now - lastUsed > SessionLifetime)
+            {
+                expired.Add(key);
+            }
+        }
+
+        foreach (var key in expired)
+        {
+            sessions.Remove(key);
+        }
     }
 
     private static string? GetCookieToken(HttpContext ctx)
@@ -383,6 +497,85 @@ internal sealed class WebRoutes : IDisposable
         await SendJson(ctx, 202, new { ok = true });
     }
 
+    // Bookmarks live in the plugin's config - read and changed only on the framework thread, like
+    // everything else the in-game UI also touches.
+    private async Task HandleBookmarkToggle(HttpContext ctx)
+    {
+        var body = TryDeserialize<WebBookmarkRequest>(ctx.Request.DataAsString);
+        if (body == null)
+        {
+            await SendJson(ctx, 400, new WebErrorResponse("Invalid request."));
+            return;
+        }
+
+        var result = await plugin.Framework.RunOnFrameworkThread(() =>
+        {
+            var entry = plugin.ChatLog.FindBySequence(body.Sequence);
+            if (entry == null)
+            {
+                return (bool?)null;
+            }
+
+            plugin.ToggleBookmark(entry);
+            return plugin.IsBookmarked(entry);
+        });
+
+        if (result == null)
+        {
+            await SendJson(ctx, 404, new WebErrorResponse("This message is no longer in memory."));
+            return;
+        }
+
+        await SendJson(ctx, 200, new { bookmarked = result.Value });
+    }
+
+    private async Task HandleBookmarkList(HttpContext ctx)
+    {
+        var list = await plugin.Framework.RunOnFrameworkThread(() =>
+        {
+            var config = plugin.Configuration;
+            var result = new List<WebBookmarkDto>(config.Bookmarks.Count);
+            for (var i = config.Bookmarks.Count - 1; i >= 0; i--)
+            {
+                var b = config.Bookmarks[i];
+                result.Add(new WebBookmarkDto
+                {
+                    Key = b.Key,
+                    Time = b.Timestamp.ToString("dd.MM.yyyy HH:mm"),
+                    ChannelTag = ChannelDisplay.DisplayTag(b.ChatType),
+                    ChannelColorCss = ToCssColor(ChannelDisplay.Color(b.ChatType, config)),
+                    Sender = b.SenderWorld != null ? $"{b.Sender}@{b.SenderWorld}" : b.Sender,
+                    Text = b.Text,
+                });
+            }
+
+            return result;
+        });
+
+        await SendJson(ctx, 200, list);
+    }
+
+    private async Task HandleBookmarkRemove(HttpContext ctx)
+    {
+        var body = TryDeserialize<WebBookmarkRemoveRequest>(ctx.Request.DataAsString);
+        if (body == null || string.IsNullOrEmpty(body.Key))
+        {
+            await SendJson(ctx, 400, new WebErrorResponse("Invalid request."));
+            return;
+        }
+
+        await plugin.Framework.RunOnFrameworkThread(() =>
+        {
+            var bookmark = plugin.Configuration.Bookmarks.Find(b => b.Key == body.Key);
+            if (bookmark != null)
+            {
+                plugin.RemoveBookmark(bookmark);
+            }
+        });
+
+        await SendJson(ctx, 200, new { ok = true });
+    }
+
     #endregion
 
     #region SSE
@@ -407,11 +600,17 @@ internal sealed class WebRoutes : IDisposable
                 ? await plugin.Framework.RunOnFrameworkThread(() => FilterToCurrentView(plugin.ChatLog.SnapshotSince(sinceSeq)))
                 : await BuildHistoryForCurrentViewAsync();
 
-            var (config, mentionTerm) = await plugin.Framework.RunOnFrameworkThread(() => (plugin.Configuration, plugin.MentionFirstName));
-
-            foreach (var entry in entries)
+            // Built on the framework thread - ToDto checks the friend list / notes / bookmarks.
+            var dtos = await plugin.Framework.RunOnFrameworkThread(() =>
             {
-                var frame = BuildFrame("message", entry.Sequence, ToDto(entry, config, mentionTerm));
+                var config = plugin.Configuration;
+                var mentionTerm = plugin.MentionTerms;
+                return entries.Select(entry => ToDto(entry, config, mentionTerm)).ToList();
+            });
+
+            foreach (var dto in dtos)
+            {
+                var frame = BuildFrame("message", dto.Sequence, dto);
                 if (!await ctx.Response.SendChunk(Encoding.UTF8.GetBytes(frame), false, ctx.Token))
                 {
                     return;
@@ -471,12 +670,26 @@ internal sealed class WebRoutes : IDisposable
     {
         // Runs on the game thread for every incoming chat message while the web client is enabled -
         // building and serializing the message is wasted work when no browser is connected at all.
-        if (hub.ConnectedCount == 0 || !MatchesCurrentView(entry))
+        if (hub.ConnectedCount == 0)
         {
             return;
         }
 
-        var dto = ToDto(entry, plugin.Configuration, plugin.MentionFirstName);
+        var inView = MatchesCurrentView(entry);
+
+        // Incoming whisper / mention (see ChatLogService.NotifyIfNeeded) - lets the browser play a
+        // sound, vibrate and count it in the tab title, also when it's for another tab.
+        if (entry.NotifyKind != 0)
+        {
+            hub.Broadcast(BuildFrame("notify", null, new { kind = entry.NotifyKind == 1 ? "whisper" : "mention", sender = entry.Sender, inView }));
+        }
+
+        if (!inView)
+        {
+            return;
+        }
+
+        var dto = ToDto(entry, plugin.Configuration, plugin.MentionTerms);
         hub.Broadcast(BuildFrame("message", entry.Sequence, dto));
     }
 
@@ -501,11 +714,13 @@ internal sealed class WebRoutes : IDisposable
         {
             hub.Broadcast(BuildFrame("view", null, BuildViewDto()));
 
-            var config = plugin.Configuration;
-            var mentionTerm = plugin.MentionFirstName;
-            var history = (await BuildHistoryForCurrentViewAsync())
-                .Select(entry => ToDto(entry, config, mentionTerm))
-                .ToList();
+            var historyEntries = await BuildHistoryForCurrentViewAsync();
+            var history = await plugin.Framework.RunOnFrameworkThread(() =>
+            {
+                var config = plugin.Configuration;
+                var mentionTerm = plugin.MentionTerms;
+                return historyEntries.Select(entry => ToDto(entry, config, mentionTerm)).ToList();
+            });
             hub.Broadcast(BuildFrame("history", null, history));
         }
         catch (Exception ex)
@@ -590,6 +805,11 @@ internal sealed class WebRoutes : IDisposable
 
     private bool MatchesCurrentView(ChatLogEntry entry)
     {
+        if (plugin.IsFilteredOut(entry))
+        {
+            return false;
+        }
+
         var chatWindow = plugin.ChatWindowInstance;
         if (!string.IsNullOrEmpty(chatWindow.ActiveWhisperTabTarget))
         {
@@ -645,17 +865,20 @@ internal sealed class WebRoutes : IDisposable
 
     #region Mapping
 
-    private static WebMessageDto ToDto(ChatLogEntry entry, Configuration config, string mentionTerm)
+    // Framework thread only (friend list, notes, bookmarks).
+    private WebMessageDto ToDto(ChatLogEntry entry, Configuration config, string mentionTerm)
     {
         var isOutgoingTell = entry.ChatType == XivChatType.TellOutgoing;
         var displayName = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
         var channelColor = ChannelDisplay.Color(entry.ChatType, config);
+        var relation = plugin.GetRelation(entry);
 
         var senderColor = isOutgoingTell
             ? config.SendAccentColor
-            : entry.ChatType == XivChatType.TellIncoming
-                ? ChannelDisplay.WhisperColor(displayName, config)
-                : channelColor;
+            : ChatWindow.RelationNameColor(relation, entry, displayName, config)
+                ?? (entry.ChatType == XivChatType.TellIncoming
+                    ? ChannelDisplay.WhisperColor(displayName, config)
+                    : channelColor);
 
         var allowRpFormatting = config.AllowsRpFormatting(entry.ChatType);
         var segments = entry.Payloads != null
@@ -671,6 +894,16 @@ internal sealed class WebRoutes : IDisposable
             ChannelColorCss = ToCssColor(channelColor),
             Segments = segments,
             Time = entry.Timestamp.ToString("HH:mm"),
+            Note = plugin.GetPlayerNote(entry),
+            Bookmarked = plugin.IsBookmarked(entry),
+            RelationIcon = relation == 0 || !config.ShowRelationIcons
+                ? null
+                : relation switch
+                {
+                    Plugin.RelationFavorite => "favorite",
+                    Plugin.RelationFriend => "friend",
+                    _ => "fc",
+                },
         };
     }
 

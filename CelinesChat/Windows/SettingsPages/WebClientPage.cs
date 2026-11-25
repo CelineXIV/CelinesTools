@@ -66,6 +66,20 @@ internal sealed class WebClientPage
         }
 
         ImGui.Spacing();
+        ImGui.SetNextItemWidth(120);
+        var sessionDays = config.WebClientSessionDays;
+        if (ImGui.InputInt(Loc.T("WebClient.SessionDays"), ref sessionDays))
+        {
+            config.WebClientSessionDays = Math.Clamp(sessionDays, 1, 365);
+            plugin.SaveConfiguration();
+        }
+
+        using (ImRaii.PushColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]))
+        {
+            ImGui.TextWrapped(Loc.T("WebClient.SessionDaysHint"));
+        }
+
+        ImGui.Spacing();
         ImGui.Separator();
 
         ImGui.TextUnformatted(Loc.T("WebClient.AuthCodeLabel"));

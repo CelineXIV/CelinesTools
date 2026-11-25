@@ -256,7 +256,7 @@ internal sealed class ChatLogService : IDisposable
 
         lastDispatchedEntry = entry;
 
-        PlaySoundIfNeeded(entry);
+        NotifyIfNeeded(entry);
 
         EntryAdded?.Invoke(entry);
     }
@@ -318,20 +318,36 @@ internal sealed class ChatLogService : IDisposable
         RemoveEntryAtLocked(0);
     }
 
-    private unsafe void PlaySoundIfNeeded(ChatLogEntry entry)
+    // Sound and taskbar flash for one incoming message. Nothing at all for a player hidden from the
+    // chat (see MessageFilter: hidden players, word filters) - hiding someone is meant to make them go quiet, not just invisible.
+    private unsafe void NotifyIfNeeded(ChatLogEntry entry)
     {
+        if (MessageFilter.IsFilteredOut(entry, configuration, playerState.IsLoaded ? playerState.CharacterName : null))
+        {
+            return;
+        }
+
+        var isIncomingWhisper = entry.ChatType == XivChatType.TellIncoming;
+        var isMention = !isIncomingWhisper && IsSelfMentioned(entry);
+        entry.NotifyKind = isIncomingWhisper ? 1 : isMention ? 2 : 0;
+
+        if ((isIncomingWhisper && configuration.FlashTaskbarOnWhisper) || (isMention && configuration.FlashTaskbarOnMention))
+        {
+            TaskbarFlasher.FlashIfInBackground();
+        }
+
         if (!configuration.PlaySounds)
         {
             return;
         }
 
-        if (configuration.WhisperSoundEnabled && entry.ChatType == XivChatType.TellIncoming)
+        if (configuration.WhisperSoundEnabled && isIncomingWhisper)
         {
             UIGlobals.PlayChatSoundEffect((uint)Math.Clamp(configuration.WhisperSoundEffect, 1, 16));
             return;
         }
 
-        if (configuration.MentionSoundEnabled && IsSelfMentioned(entry))
+        if (configuration.MentionSoundEnabled && isMention)
         {
             UIGlobals.PlayChatSoundEffect((uint)Math.Clamp(configuration.MentionSoundEffect, 1, 16));
             return;
@@ -356,34 +372,23 @@ internal sealed class ChatLogService : IDisposable
             && string.Equals(entry.Sender, playerState.CharacterName, StringComparison.OrdinalIgnoreCase);
     }
 
+    // First name plus the user's own keywords (Configuration.MentionKeywords).
     private bool IsSelfMentioned(ChatLogEntry entry)
     {
-        if (!playerState.IsLoaded || string.IsNullOrEmpty(playerState.CharacterName))
+        if (entry.ChatType == XivChatType.TellOutgoing || IsOwnMessage(entry))
         {
             return false;
         }
 
-        if (string.Equals(entry.Sender, playerState.CharacterName, StringComparison.OrdinalIgnoreCase))
+        var firstName = string.Empty;
+        if (playerState.IsLoaded && !string.IsNullOrEmpty(playerState.CharacterName))
         {
-            return false;
+            var spaceIndex = playerState.CharacterName.IndexOf(' ');
+            firstName = spaceIndex > 0 ? playerState.CharacterName[..spaceIndex] : playerState.CharacterName;
         }
 
-        var spaceIndex = playerState.CharacterName.IndexOf(' ');
-        var firstName = spaceIndex > 0 ? playerState.CharacterName[..spaceIndex] : playerState.CharacterName;
-
-        foreach (var word in entry.Text.Split(WordSeparators, StringSplitOptions.RemoveEmptyEntries))
-        {
-            if (string.Equals(word.Trim(PunctuationTrim), firstName, StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-        }
-
-        return false;
+        return MentionMatcher.TextMentions(entry.Text, MentionMatcher.BuildTerms(firstName, configuration.MentionKeywords));
     }
-
-    private static readonly char[] WordSeparators = { ' ', '\t', '\r', '\n' };
-    private static readonly char[] PunctuationTrim = { '.', ',', '!', '?', ':', ';', '"', '\'', '(', ')' };
 
     private unsafe void OnAddMsgSourceEntry(RaptureLogModule* module, ulong contentId, ulong accountId, int messageIndex, ushort worldId, ushort chatType)
     {
@@ -565,6 +570,63 @@ internal sealed class ChatLogService : IDisposable
         // above) needs to avoid. OrderBy is a guaranteed-stable sort, so ties keep the order they
         // were added in (each file's own write order, oldest file-content first).
         return result.OrderBy(e => e.Timestamp).ToList();
+    }
+
+    /// <summary>
+    /// Every logged message (daily logs and whisper logs) whose text or sender contains
+    /// <paramref name="term"/>, oldest first, at most the newest <paramref name="maxResults"/>.
+    /// Reads every log file, so it's meant to run on a background task - it only touches the files,
+    /// its own locals and the thread-safe writer flush.
+    /// </summary>
+    public List<ChatLogEntry> SearchAllLogs(string term, int maxResults = 2000)
+    {
+        var results = new List<ChatLogEntry>();
+        if (string.IsNullOrWhiteSpace(term))
+        {
+            return results;
+        }
+
+        fileWriter.Flush();
+
+        bool Matches(ChatLogEntry entry) =>
+            entry.Text.Contains(term, StringComparison.OrdinalIgnoreCase)
+            || entry.Sender.Contains(term, StringComparison.OrdinalIgnoreCase);
+
+        try
+        {
+            foreach (var date in GetAvailableLogDates())
+            {
+                foreach (var line in ReadLinesShared(Path.Combine(LogsFolderPath, date + ".txt")))
+                {
+                    if (ParseLine(date, line) is { } entry && Matches(entry))
+                    {
+                        results.Add(entry);
+                    }
+                }
+            }
+
+            var whisperFolder = Path.Combine(LogsFolderPath, WhispersSubfolder);
+            if (Directory.Exists(whisperFolder))
+            {
+                foreach (var file in Directory.GetFiles(whisperFolder, "*.txt"))
+                {
+                    foreach (var line in ReadLinesShared(file))
+                    {
+                        if (ParseWhisperLine(line) is { } entry && Matches(entry))
+                        {
+                            results.Add(entry);
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            log.Warning(ex, "[CelinesChat] Fehler bei der Suche in den Log-Dateien.");
+        }
+
+        var sorted = results.OrderBy(e => e.Timestamp).ToList();
+        return sorted.Count > maxResults ? sorted.GetRange(sorted.Count - maxResults, maxResults) : sorted;
     }
 
     public void RenameWhisperLog(string oldTarget, string newTarget)
