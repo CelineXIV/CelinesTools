@@ -1548,11 +1548,15 @@ public sealed class Plugin : IDalamudPlugin
     internal const uint FriendMenuSearchInfo = 51;
     internal const uint FriendMenuRemove = 65;
     internal const uint FriendMenuAssignGroup = 1678;
+    internal const uint FriendMenuRespond = 63;
+    internal const uint FriendMenuAccept = 460;
+    internal const uint FriendMenuDecline = 461;
 
     private enum FriendActionStage
     {
         Opening,
         MenuRequested,
+        SubMenuRequested,
         Selected,
     }
 
@@ -1561,6 +1565,8 @@ public sealed class Plugin : IDalamudPlugin
         public ulong ContentId;
         public string Name = string.Empty;
         public uint MenuText;
+        public uint SubMenuText;
+        public bool LoggedMissing;
         public FriendActionStage Stage;
         public long Since;
         public bool TabRequested;
@@ -1580,12 +1586,23 @@ public sealed class Plugin : IDalamudPlugin
     internal string FriendMenuLabel(uint addonRow) =>
         dataManager.GetExcelSheet<Lumina.Excel.Sheets.Addon>().GetRowOrDefault(addonRow)?.Text.ExtractText() ?? string.Empty;
 
-    internal unsafe void RunFriendMenuItem(ulong contentId, string name, uint addonRow)
+    internal unsafe void RunFriendMenuItem(ulong contentId, string name, uint addonRow, uint subMenuRow = 0)
     {
         var agentModule = AgentModule.Instance();
-        if (agentModule == null || contentId == 0 || friendAction != null || hiddenSearch != HiddenSearchStage.None)
+        if (agentModule == null || contentId == 0 || hiddenSearch != HiddenSearchStage.None)
         {
             return;
+        }
+
+        if (friendAction != null)
+        {
+            if (Environment.TickCount64 - friendAction.Since <= 10_000)
+            {
+                return;
+            }
+
+            log.Info("[C4TChat][FriendMenu] Alte Aktion hing fest - wird verworfen.");
+            friendAction = null;
         }
 
         friendAction = new FriendAction
@@ -1593,6 +1610,7 @@ public sealed class Plugin : IDalamudPlugin
             ContentId = contentId,
             Name = name,
             MenuText = addonRow,
+            SubMenuText = subMenuRow,
             Stage = FriendActionStage.Opening,
             Since = Environment.TickCount64,
         };
@@ -1667,13 +1685,22 @@ public sealed class Plugin : IDalamudPlugin
                 }
 
                 var context = AgentContext.Instance();
-                if (context != null && context->TargetContentId == action.ContentId && TrySelectContextItem(context, FriendMenuLabel(action.MenuText)))
+                if (context != null && context->TargetContentId == action.ContentId
+                    && TrySelectContextItem(context, &context->MainContextMenu, FriendMenuLabel(action.MenuText), action))
                 {
-                    action.Stage = FriendActionStage.Selected;
                     action.Since = now;
-                    action.QuietSince = 0;
-                    action.ReopenWindow = socialWindow.IsOpen;
-                    socialWindow.IsOpen = false;
+                    if (action.SubMenuText != 0)
+                    {
+                        action.Stage = FriendActionStage.SubMenuRequested;
+                        action.LoggedMissing = false;
+                    }
+                    else
+                    {
+                        action.Stage = FriendActionStage.Selected;
+                        action.QuietSince = 0;
+                        action.ReopenWindow = socialWindow.IsOpen;
+                        socialWindow.IsOpen = false;
+                    }
                 }
                 else if (now - action.Since > 2000)
                 {
@@ -1688,6 +1715,25 @@ public sealed class Plugin : IDalamudPlugin
                         menu->Close(true);
                     }
 
+                    FailFriendAction(manager);
+                }
+
+                break;
+            }
+
+            case FriendActionStage.SubMenuRequested:
+            {
+                var yesNo = manager->GetAddonByName("SelectYesno");
+                if (yesNo != null && yesNo->IsVisible && yesNo->IsReady)
+                {
+                    yesNo->FireCallbackInt(action.SubMenuText == FriendMenuDecline ? 1 : 0);
+                    action.Stage = FriendActionStage.Selected;
+                    action.Since = now;
+                    action.QuietSince = 0;
+                }
+                else if (now - action.Since > 3000)
+                {
+                    log.Info($"[C4TChat][FriendMenu] Keine Ja/Nein-Abfrage nach \"{FriendMenuLabel(action.MenuText)}\".");
                     FailFriendAction(manager);
                 }
 
@@ -1780,7 +1826,6 @@ public sealed class Plugin : IDalamudPlugin
             SendFriendListContextEvent(agent, index, action.Name);
             if (context->TargetContentId == action.ContentId)
             {
-                log.Info($"[C4TChat][FriendMenu] Kontextmenü für {action.Name} über Zeile {index}");
                 return true;
             }
         }
@@ -1922,7 +1967,21 @@ public sealed class Plugin : IDalamudPlugin
         return -1;
     }
 
-    private unsafe bool TrySelectContextItem(AgentContext* context, string label)
+    private static unsafe List<string> MenuTexts(ContextMenu* menu)
+    {
+        var texts = new List<string>();
+        foreach (ref readonly var param in menu->EventParams)
+        {
+            if (param.Type is AtkValueType.String or AtkValueType.ManagedString or AtkValueType.ConstString)
+            {
+                texts.Add(param.GetValueAsString());
+            }
+        }
+
+        return texts;
+    }
+
+    private unsafe bool TrySelectContextItem(AgentContext* context, ContextMenu* menu, string label, FriendAction action, bool logMissing = true)
     {
         if (string.IsNullOrEmpty(label))
         {
@@ -1930,7 +1989,7 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         var texts = new List<string>();
-        foreach (ref readonly var param in context->MainContextMenu.EventParams)
+        foreach (ref readonly var param in menu->EventParams)
         {
             if (param.Type is AtkValueType.String
                 or AtkValueType.ManagedString
@@ -1943,7 +2002,12 @@ public sealed class Plugin : IDalamudPlugin
         var index = texts.FindIndex(t => t.Contains(label, StringComparison.OrdinalIgnoreCase));
         if (index < 0)
         {
-            log.Info($"[C4TChat] Freundesmenü: \"{label}\" nicht gefunden in [{string.Join(" | ", texts)}]");
+            if (logMissing && !action.LoggedMissing)
+            {
+                action.LoggedMissing = true;
+                log.Info($"[C4TChat] Freundesmenü: \"{label}\" nicht gefunden in [{string.Join(" | ", texts)}]");
+            }
+
             return false;
         }
 
@@ -2868,10 +2932,16 @@ public sealed class Plugin : IDalamudPlugin
         FlushConfigurationIfDue();
         UpdateAwayAndRelations();
         ReplaceNativeSocialWindow();
-        SetNativeChatVisible(!Configuration.HideNativeChat);
-        ApplyGameStateVisibility();
 
-        if (!keyState[VirtualKey.RETURN])
+        var typingMinigame = InTypingMinigame();
+        if (!typingMinigame)
+        {
+            SetNativeChatVisible(!Configuration.HideNativeChat);
+        }
+
+        ApplyGameStateVisibility(typingMinigame);
+
+        if (typingMinigame || !keyState[VirtualKey.RETURN])
         {
             return;
         }
@@ -2896,11 +2966,38 @@ public sealed class Plugin : IDalamudPlugin
         lastEnterActivationTick = Environment.TickCount64;
     }
 
-    private void ApplyGameStateVisibility()
+    private static readonly HashSet<uint> TypingMinigameTerritories = new() { 1359 };
+    private static readonly HashSet<uint> TypingMinigameContent = new() { 1095 };
+
+    private unsafe bool InTypingMinigame()
+    {
+        if (TypingMinigameTerritories.Contains(clientState.TerritoryType))
+        {
+            return true;
+        }
+
+        var gameMain = FFXIVClientStructs.FFXIV.Client.Game.GameMain.Instance();
+        return gameMain != null && TypingMinigameContent.Contains(gameMain->CurrentContentFinderConditionId);
+    }
+
+    private void ApplyGameStateVisibility(bool typingMinigame)
     {
         if (!clientState.IsGPosing)
         {
             chatOpenedDuringGpose = false;
+        }
+
+        if (typingMinigame)
+        {
+            IsChatInputActive = false;
+            chatWindow.IsOpen = false;
+            if (secondaryChatWindow != null)
+            {
+                IsSecondaryWindowHiddenByGameState = true;
+                secondaryChatWindow.IsOpen = false;
+            }
+
+            return;
         }
 
         if (IsChatInputActive || Environment.TickCount64 - lastEnterActivationTick < EnterActivationGraceMs)

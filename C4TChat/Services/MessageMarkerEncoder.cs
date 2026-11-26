@@ -10,6 +10,9 @@ internal static class MessageMarkerEncoder
     public static string BuildAutoTranslateMarker(AutoTranslateService.Entry entry) =>
         $"[[{entry.Text}#{entry.Group}.{entry.Key}]]";
 
+    public static string BuildItemMarker(string name, uint itemId, Dalamud.Utility.ItemKind kind) =>
+        $"[[{name.Replace("]]", "] ]").Replace("#", string.Empty)}#i.{itemId}.{(int)kind}]]";
+
     public static byte[] Encode(string text)
     {
         if (!text.Contains("[[", StringComparison.Ordinal))
@@ -37,7 +40,11 @@ internal static class MessageMarkerEncoder
                 break;
             }
 
-            if (TryParseMarker(text, markerStart, markerEnd, out var group, out var key))
+            if (TryParseItemMarker(text, markerStart, markerEnd, out var itemId, out var kind))
+            {
+                result.AddRange(Dalamud.Game.Text.SeStringHandling.SeString.CreateItemLink(itemId, kind, null).Encode());
+            }
+            else if (TryParseMarker(text, markerStart, markerEnd, out var group, out var key))
             {
                 result.AddRange(new AutoTranslatePayload(group, key).Encode());
             }
@@ -61,13 +68,34 @@ internal static class MessageMarkerEncoder
         }
 
         var markerEnd = text.IndexOf("]]", markerStart + 2, StringComparison.Ordinal);
-        if (markerEnd < 0 || !TryParseMarker(text, markerStart, markerEnd, out _, out _))
+        if (markerEnd < 0 || (!TryParseMarker(text, markerStart, markerEnd, out _, out _) && !TryParseItemMarker(text, markerStart, markerEnd, out _, out _)))
         {
             return false;
         }
 
         endExclusive = markerEnd + 2;
         return true;
+    }
+
+    private static bool TryParseItemMarker(string text, int markerStart, int markerEnd, out uint itemId, out Dalamud.Utility.ItemKind kind)
+    {
+        itemId = 0;
+        kind = Dalamud.Utility.ItemKind.Normal;
+        var inner = text[(markerStart + 2)..markerEnd];
+        var hashIndex = inner.LastIndexOf('#');
+        if (hashIndex < 0 || !inner[(hashIndex + 1)..].StartsWith("i.", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var parts = inner[(hashIndex + 3)..].Split('.');
+        if (parts.Length != 2 || !uint.TryParse(parts[0], out itemId) || !int.TryParse(parts[1], out var kindValue))
+        {
+            return false;
+        }
+
+        kind = (Dalamud.Utility.ItemKind)kindValue;
+        return itemId != 0;
     }
 
     private static bool TryParseMarker(string text, int markerStart, int markerEnd, out uint group, out uint key)

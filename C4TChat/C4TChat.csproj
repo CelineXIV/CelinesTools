@@ -10,7 +10,7 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>C4TChat</AssemblyName>
     <RootNamespace>C4TChat</RootNamespace>
-    <Version>1.0.0.0</Version>
+    <Version>1.0.1.0</Version>
     <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>

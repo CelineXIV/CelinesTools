@@ -40,6 +40,8 @@ internal sealed unsafe class SocialWindow : Window
         public bool OtherServer;
 
         public bool Stale;
+
+        public bool Pending;
     }
 
     private sealed class StatusInfo
@@ -51,6 +53,7 @@ internal sealed unsafe class SocialWindow : Window
     }
 
     private const int OfflineBit = 10;
+    private const int WaitingApprovalBit = 6;
     private const int NotFoundBit = 9;
     private const int PartyLeaderBit = 36;
     private const int PartyLeaderCrossWorldBit = 38;
@@ -288,12 +291,12 @@ internal sealed unsafe class SocialWindow : Window
             if (isLeader && row.ContentId != plugin.CurrentCharacterKey)
             {
                 ImGui.Separator();
-                if (ImGui.Selectable(Loc.T("Social.Promote")))
+                if (ChatWindow.MenuItem(Loc.T("Social.Promote"), plugin.Configuration))
                 {
                     plugin.SendRawCommand("/promote " + row.Name);
                 }
 
-                if (ImGui.Selectable(Loc.T("Social.Kick")))
+                if (ChatWindow.MenuItem(Loc.T("Social.Kick"), plugin.Configuration))
                 {
                     plugin.SendRawCommand("/kick " + row.Name);
                 }
@@ -448,7 +451,7 @@ internal sealed unsafe class SocialWindow : Window
         var rows = new List<Row>(all.Count);
         foreach (var row in all)
         {
-            var isOnline = SectionOf(row) <= 1;
+            var isOnline = SectionOf(row) is 1 or 2;
             if (isOnline)
             {
                 online++;
@@ -471,38 +474,58 @@ internal sealed unsafe class SocialWindow : Window
         var footer = ImGui.GetFrameHeightWithSpacing() + ImGui.GetStyle().ItemSpacing.Y;
         DrawList("##friends", rows, footer, sectioned: friendSort == 0, row =>
         {
+            var config = plugin.Configuration;
+            if (row.Pending)
+            {
+                if (ChatWindow.MenuItem(Loc.T("Social.AcceptRequest"), config, new Vector4(0.45f, 0.9f, 0.5f, 1f)))
+                {
+                    plugin.RunFriendMenuItem(row.ContentId, row.Name, Plugin.FriendMenuRespond, Plugin.FriendMenuAccept);
+                }
+
+                if (ChatWindow.MenuItem(Loc.T("Social.DeclineRequest"), config, new Vector4(1f, 0.5f, 0.45f, 1f)))
+                {
+                    plugin.RunFriendMenuItem(row.ContentId, row.Name, Plugin.FriendMenuRespond, Plugin.FriendMenuDecline);
+                }
+
+                ImGui.Separator();
+                DrawCommonActions(row, allowInvite: false);
+                if (ChatWindow.MenuItem(Loc.T("Social.SearchInfo"), config))
+                {
+                    plugin.RunFriendMenuItem(row.ContentId, row.Name, Plugin.FriendMenuSearchInfo);
+                }
+
+                return;
+            }
+
             DrawCommonActions(row, allowInvite: true);
-            if (ImGui.Selectable(Loc.T("ChatLog.EstateTeleportAction")))
+            if (ChatWindow.MenuItem(Loc.T("ChatLog.EstateTeleportAction"), config))
             {
                 AgentFriendlist.Instance()->OpenFriendEstateTeleportation(row.ContentId);
             }
 
-            if (ImGui.Selectable(Loc.T("Social.RequestStatus")))
+            if (ChatWindow.MenuItem(Loc.T("Social.RequestStatus"), config))
             {
                 AgentFriendlist.Instance()->RequestFriendInfo(row.ContentId);
             }
 
-            if (ImGui.Selectable(Loc.T("Social.SearchInfo")))
+            if (ChatWindow.MenuItem(Loc.T("Social.SearchInfo"), config))
             {
                 plugin.RunFriendMenuItem(row.ContentId, row.Name, Plugin.FriendMenuSearchInfo);
             }
 
-            if (ImGui.Selectable(Loc.T("Social.AssignGroup")))
+            if (ChatWindow.MenuItem(Loc.T("Social.AssignGroup"), config))
             {
                 plugin.RunFriendMenuItem(row.ContentId, row.Name, Plugin.FriendMenuAssignGroup);
             }
 
             ImGui.Separator();
-            using (ImRaii.PushColor(ImGuiCol.Text, new Vector4(1f, 0.55f, 0.5f, 1f)))
+            if (ChatWindow.MenuItem(Loc.T("Social.RemoveFriend"), config, new Vector4(1f, 0.55f, 0.5f, 1f)))
             {
-                if (ImGui.Selectable(Loc.T("Social.RemoveFriend")))
-                {
-                    plugin.RunFriendMenuItem(row.ContentId, row.Name, Plugin.FriendMenuRemove);
-                }
+                plugin.RunFriendMenuItem(row.ContentId, row.Name, Plugin.FriendMenuRemove);
             }
 
             ImGui.Separator();
-            if (ImGui.Selectable(Loc.T("Social.MoreInOriginal")))
+            if (ChatWindow.MenuItem(Loc.T("Social.MoreInOriginal"), config))
             {
                 plugin.OpenNativeSocial(SocialTab.Friends);
             }
@@ -641,10 +664,11 @@ internal sealed unsafe class SocialWindow : Window
         Dictionary<ulong, CachedFriend>? byId = null;
         foreach (var row in live)
         {
-            if (!IsOnline(row.State))
+            if (!row.Pending && (!IsOnline(row.State) || HasNoDetails(row)))
             {
                 byId ??= BuildCacheIndex(cache);
-                if (byId.TryGetValue(row.ContentId, out var cachedRow) && IsOnline(cachedRow.State))
+                if (byId.TryGetValue(row.ContentId, out var cachedRow) && IsOnline(cachedRow.State)
+                    && (!IsOnline(row.State) || cachedRow.Job != 0 || cachedRow.Location != 0))
                 {
                     var keep = FromCached(cachedRow);
                     keep.Stale = true;
@@ -694,7 +718,7 @@ internal sealed unsafe class SocialWindow : Window
             var c = cache[i];
             var l = live[i];
             if (c.ContentId != l.ContentId || c.State != l.State || c.Location != l.Location || c.Job != l.Job
-                || c.CurrentWorld != l.CurrentWorld || c.Group != l.Group || c.Name != l.Name || c.FcTag != l.FcTag)
+                || c.CurrentWorld != l.CurrentWorld || c.Group != l.Group || c.Name != l.Name || c.FcTag != l.FcTag || c.Pending != l.Pending)
             {
                 return true;
             }
@@ -716,6 +740,7 @@ internal sealed unsafe class SocialWindow : Window
         Languages = r.Languages,
         MainLanguage = r.MainLanguage,
         Group = r.Group,
+        Pending = r.Pending,
     };
 
     private static Row FromCached(CachedFriend c) => new()
@@ -731,6 +756,7 @@ internal sealed unsafe class SocialWindow : Window
         Languages = c.Languages,
         MainLanguage = c.MainLanguage,
         Group = c.Group,
+        Pending = c.Pending,
     };
 
     private void SortFriends(List<Row> rows)
@@ -775,7 +801,7 @@ internal sealed unsafe class SocialWindow : Window
         return IsOnline(row.State) && here != 0 && row.CurrentWorld != 0 && row.CurrentWorld != here;
     }
 
-    private int SectionOf(Row row) => IsUnconfirmed(row) ? 2 : !IsOnline(row.State) ? 3 : IsElsewhere(row) ? 1 : 0;
+    private int SectionOf(Row row) => row.Pending ? 0 : IsUnconfirmed(row) ? 3 : !IsOnline(row.State) ? 4 : IsElsewhere(row) ? 2 : 1;
 
     private void CheckOtherDataCenters(List<Row> rows)
     {
@@ -851,22 +877,22 @@ internal sealed unsafe class SocialWindow : Window
         var world = WorldName(row.HomeWorld);
         var self = row.ContentId == plugin.CurrentCharacterKey;
 
-        if (!self && ImGui.Selectable(Loc.T("ChatLog.WhisperAction")))
+        if (!self && ChatWindow.MenuItem(Loc.T("ChatLog.WhisperAction"), plugin.Configuration))
         {
             plugin.OpenWhisperTab(world != null ? row.Name + "@" + world : row.Name);
         }
 
-        if (!self && ImGui.Selectable(Loc.T("ChatLog.PlayerCardAction")))
+        if (!self && ChatWindow.MenuItem(Loc.T("ChatLog.PlayerCardAction"), plugin.Configuration))
         {
             plugin.OpenPlayerCard(row.Name, world, row.ContentId);
         }
 
-        if (allowInvite && !self && ImGui.Selectable(Loc.T("Social.Invite")))
+        if (allowInvite && !self && ChatWindow.MenuItem(Loc.T("Social.Invite"), plugin.Configuration))
         {
             plugin.InviteByContentId(row.Name, row.HomeWorld, row.ContentId);
         }
 
-        if (ImGui.Selectable(Loc.T("Social.Plate")))
+        if (ChatWindow.MenuItem(Loc.T("Social.Plate"), plugin.Configuration))
         {
             plugin.OpenAdventurerPlate(row.Name, world, row.ContentId);
         }
@@ -929,7 +955,7 @@ internal sealed unsafe class SocialWindow : Window
             return;
         }
 
-        var counts = new int[4];
+        var counts = new int[5];
         foreach (var row in rows)
         {
             counts[SectionOf(row)]++;
@@ -949,13 +975,21 @@ internal sealed unsafe class SocialWindow : Window
                 switch (section)
                 {
                     case 0:
-                        DrawSection(Loc.T("Social.SectionHere", WorldName(plugin.CurrentWorldId) ?? "?"), counts[0], accent, foldable: false, collapsed: false);
+                        DrawSection(Loc.T("Social.SectionRequests"), counts[0], new Vector4(0.95f, 0.75f, 0.25f, 1f), foldable: false, collapsed: false);
+                        if (ImGui.IsItemHovered())
+                        {
+                            ImGui.SetTooltip(Loc.T("Social.SectionRequestsTooltip"));
+                        }
+
                         break;
                     case 1:
-                        DrawSection(Loc.T("Social.SectionElsewhere"), counts[1], accent with { W = 0.7f }, foldable: false, collapsed: false);
+                        DrawSection(Loc.T("Social.SectionHere", WorldName(plugin.CurrentWorldId) ?? "?"), counts[1], accent, foldable: false, collapsed: false);
                         break;
                     case 2:
-                        DrawSection(Loc.T("Social.SectionChecking"), counts[2], muted with { W = 1f }, foldable: false, collapsed: false);
+                        DrawSection(Loc.T("Social.SectionElsewhere"), counts[2], accent with { W = 0.7f }, foldable: false, collapsed: false);
+                        break;
+                    case 3:
+                        DrawSection(Loc.T("Social.SectionChecking"), counts[3], muted with { W = 1f }, foldable: false, collapsed: false);
                         if (ImGui.IsItemHovered())
                         {
                             ImGui.SetTooltip(Loc.T("Social.SectionCheckingTooltip"));
@@ -963,7 +997,7 @@ internal sealed unsafe class SocialWindow : Window
 
                         break;
                     default:
-                        if (DrawSection(Loc.T("Social.SectionOffline"), counts[3], muted, foldable: true, config.SocialOfflineCollapsed))
+                        if (DrawSection(Loc.T("Social.SectionOffline"), counts[4], muted, foldable: true, config.SocialOfflineCollapsed))
                         {
                             config.SocialOfflineCollapsed = !config.SocialOfflineCollapsed;
                             plugin.SaveConfiguration();
@@ -974,7 +1008,7 @@ internal sealed unsafe class SocialWindow : Window
                 }
             }
 
-            if (skipOffline && section == 3)
+            if (skipOffline && section == 4)
             {
                 continue;
             }
@@ -1037,7 +1071,7 @@ internal sealed unsafe class SocialWindow : Window
         }
 
         var nickname = Nickname(row);
-        var status = row.Stale ? null : StatusOf(row.State);
+        var status = StatusOf(row.State);
         if (hovered)
         {
             ImGui.SetTooltip((nickname != null ? fullName + "\n" : string.Empty)
@@ -1291,7 +1325,9 @@ internal sealed unsafe class SocialWindow : Window
         return true;
     }
 
-    private static List<Row> Read(InfoProxyCommonList* proxy)
+    private bool loggedDropped;
+
+    private List<Row> Read(InfoProxyCommonList* proxy)
     {
         var rows = new List<Row>();
         if (proxy == null)
@@ -1303,16 +1339,20 @@ internal sealed unsafe class SocialWindow : Window
         for (uint i = 0; i < count; i++)
         {
             var data = proxy->GetEntry(i);
-            if (data == null || data->ContentId == 0)
+            if (data == null || data->ContentId == 0 || string.IsNullOrEmpty(data->NameString))
             {
+                if (data != null && !loggedDropped)
+                {
+                    loggedDropped = true;
+                    plugin.Log.Info($"[C4TChat][Social] Eintrag ausgelassen: name='{data->NameString}' id={data->ContentId:X} state={(ulong)data->State:X} extra={data->ExtraFlags:X}");
+                }
+
                 continue;
             }
 
             var name = data->NameString;
-            if (string.IsNullOrEmpty(name))
-            {
-                continue;
-            }
+            var extra = data->ExtraFlags;
+            var pending = data->WaitingForFriendListApproval || (extra & 0x20) != 0 || HasBit((ulong)data->State, WaitingApprovalBit);
 
             rows.Add(new Row
             {
@@ -1328,6 +1368,7 @@ internal sealed unsafe class SocialWindow : Window
                 MainLanguage = (byte)data->ClientLanguage,
                 Group = (sbyte)data->Group,
                 OtherServer = data->IsOtherServer,
+                Pending = pending,
             });
         }
 

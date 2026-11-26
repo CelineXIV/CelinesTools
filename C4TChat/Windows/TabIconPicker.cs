@@ -15,7 +15,6 @@ internal static class TabIconPicker
         FontAwesomeIcon.UserFriends,
         FontAwesomeIcon.User,
         FontAwesomeIcon.Comments,
-        FontAwesomeIcon.CommentDots,
         FontAwesomeIcon.Envelope,
         FontAwesomeIcon.Bullhorn,
         FontAwesomeIcon.Bell,

@@ -456,6 +456,8 @@ public class CachedFriend
     public byte MainLanguage { get; set; }
 
     public sbyte Group { get; set; }
+
+    public bool Pending { get; set; }
 }
 
 public class KnownCharacter

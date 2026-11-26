@@ -554,12 +554,6 @@ internal sealed class ChatWindow : Window
 
         DrawComposeStatusRow(config, state, chunks);
 
-        if (state.LastChannel == ChatChannel.Whisper && !string.IsNullOrEmpty(activeWhisperTabTarget))
-        {
-            ImGui.Dummy(new Vector2(1f, 3f * ImGuiHelpers.GlobalScale));
-            DrawActiveWhisperIndicator(config, activeWhisperTabTarget, chunks.Count);
-        }
-
         if (!string.IsNullOrEmpty(validationMessage))
         {
             ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f), validationMessage);
@@ -977,12 +971,12 @@ internal sealed class ChatWindow : Window
         {
             if (noviceNetworkPopup.Success)
             {
-                if (ImGui.Selectable(Loc.T("NoviceNetwork.Join")))
+                if (MenuItem(Loc.T("NoviceNetwork.Join"), config))
                 {
                     NoviceNetworkService.Connect(plugin.Log);
                 }
 
-                if (ImGui.Selectable(Loc.T("NoviceNetwork.Leave")))
+                if (MenuItem(Loc.T("NoviceNetwork.Leave"), config))
                 {
                     NoviceNetworkService.Disconnect(plugin.Log);
                 }
@@ -2099,28 +2093,28 @@ internal sealed class ChatWindow : Window
 
     private void DrawPlayerMenuItems(ChatLogEntry entry, Configuration config)
     {
-        if (ImGui.Selectable(Loc.T("ChatLog.InvitePartyAction")))
+        if (MenuItem(Loc.T("ChatLog.InvitePartyAction"), config))
         {
             plugin.InviteToParty(entry.Sender, entry.SenderWorld, entry.ContentId);
         }
 
-        if (ImGui.Selectable(Loc.T("ChatLog.TargetAction")))
+        if (MenuItem(Loc.T("ChatLog.TargetAction"), config))
         {
             plugin.TargetPlayer(entry.Sender, entry.SenderWorld);
         }
 
-        if (ImGui.Selectable(Loc.T("ChatLog.AdventurerPlateAction")))
+        if (MenuItem(Loc.T("ChatLog.AdventurerPlateAction"), config))
         {
             plugin.OpenAdventurerPlate(entry.Sender, entry.SenderWorld, entry.ContentId);
         }
 
         if (config.EstateTeleportContextMenuEnabled && plugin.IsFriend(entry.Sender, entry.SenderWorld)
-            && ImGui.Selectable(Loc.T("ChatLog.EstateTeleportAction")))
+            && MenuItem(Loc.T("ChatLog.EstateTeleportAction"), config))
         {
             plugin.TriggerEstateTeleport(entry.Sender, entry.SenderWorld);
         }
 
-        if (ImGui.Selectable(Loc.T("ChatLog.InviteNoviceNetworkAction")))
+        if (MenuItem(Loc.T("ChatLog.InviteNoviceNetworkAction"), config))
         {
             plugin.InviteToNoviceNetwork(entry.Sender, entry.SenderWorld);
         }
@@ -2142,7 +2136,7 @@ internal sealed class ChatWindow : Window
 
     private void DrawBlockMenuItems(ChatLogEntry entry)
     {
-        if (ImGui.Selectable(Loc.T("ChatLog.HideInChatAction")))
+        if (MenuItem(Loc.T("ChatLog.HideInChatAction"), plugin.Configuration))
         {
             plugin.HidePlayer(entry);
         }
@@ -2152,14 +2146,14 @@ internal sealed class ChatWindow : Window
             ImGui.SetTooltip(Loc.T("ChatLog.HideInChatTooltip"));
         }
 
-        if (ImGui.Selectable(Loc.T("ChatLog.AddToBlacklistAction")))
+        if (MenuItem(Loc.T("ChatLog.AddToBlacklistAction"), plugin.Configuration))
         {
             plugin.AddToBlacklist(entry.Sender, entry.SenderWorld);
         }
 
         using (ImRaii.Disabled(entry.AccountId == 0))
         {
-            if (ImGui.Selectable(Loc.T("ChatLog.AddToMuteListAction")))
+            if (MenuItem(Loc.T("ChatLog.AddToMuteListAction"), plugin.Configuration))
             {
                 plugin.AddToMuteList(entry.Sender, entry.SenderWorld, entry.ContentId, entry.AccountId);
             }
@@ -2173,17 +2167,12 @@ internal sealed class ChatWindow : Window
 
     private void DrawMessageMenuItems(ChatLogEntry entry, bool includeReply)
     {
-        if (includeReply && Plugin.CanReplyIn(entry.ChatType) && ImGui.Selectable(Loc.T("ChatLog.ReplyAction")))
+        if (includeReply && Plugin.CanReplyIn(entry.ChatType) && MenuItem(Loc.T("ChatLog.ReplyAction"), plugin.Configuration))
         {
             plugin.ReplyTo(entry);
         }
 
-        if (!string.IsNullOrWhiteSpace(entry.Text) && ImGui.Selectable(Loc.T("ChatLog.QuoteAction")))
-        {
-            QuoteMessage(entry);
-        }
-
-        if (ImGui.Selectable(Loc.T("ChatLog.CopyMessage")))
+        if (MenuItem(Loc.T("ChatLog.CopyMessage"), plugin.Configuration))
         {
             ImGui.SetClipboardText($"{entry.Sender}: {entry.Text}");
         }
@@ -2193,7 +2182,7 @@ internal sealed class ChatWindow : Window
             plugin.ToggleBookmark(entry);
         }
 
-        if (ImGui.Selectable(Loc.T("ChatLog.ShowBookmarks")))
+        if (MenuItem(Loc.T("ChatLog.ShowBookmarks"), plugin.Configuration))
         {
             plugin.ToggleBookmarksWindow();
         }
@@ -2229,6 +2218,20 @@ internal sealed class ChatWindow : Window
             {
                 continue;
             }
+
+            if (ImGui.MenuItem(Loc.T("ChatLog.ItemRelink")))
+            {
+                var state = plugin.GetCharacterState();
+                InsertMarkerAtCursor(state, MessageMarkerEncoder.BuildItemMarker(name, item.ItemId, item.Kind) + " ");
+                pendingFocusInput = true;
+            }
+
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(Loc.T("ChatLog.ItemRelinkTooltip"));
+            }
+
+            ImGui.Separator();
 
             if (ImGui.MenuItem(Loc.T("ChatLog.ItemFind")))
             {
@@ -2771,17 +2774,17 @@ internal sealed class ChatWindow : Window
                 ImGui.TextDisabled(plugin.GetNickname(entry) is { } nick ? $"{nick} ({whisperTarget})" : whisperTarget);
                 ImGui.Separator();
 
-                if (ImGui.Selectable(Loc.T("ChatLog.WhisperAction")))
+                if (MenuItem(Loc.T("ChatLog.WhisperAction"), config))
                 {
                     OpenWhisperTabWithHistory(whisperTarget);
                 }
 
-                if (Plugin.CanReplyIn(entry.ChatType) && ImGui.Selectable(Loc.T("ChatLog.ReplyAction")))
+                if (Plugin.CanReplyIn(entry.ChatType) && MenuItem(Loc.T("ChatLog.ReplyAction"), config))
                 {
                     plugin.ReplyTo(entry);
                 }
 
-                if (ImGui.Selectable(Loc.T("ChatLog.PlayerCardAction")))
+                if (MenuItem(Loc.T("ChatLog.PlayerCardAction"), config))
                 {
                     playerCard.Open(entry);
                 }
@@ -3072,7 +3075,7 @@ internal sealed class ChatWindow : Window
         }
         else if (autoTranslateBrowseGroup is { } browseGroup)
         {
-            if (ImGui.Selectable(Loc.T("Compose.AutoTranslateBack")))
+            if (MenuItem(Loc.T("Compose.AutoTranslateBack"), plugin.Configuration))
             {
                 autoTranslateBrowseGroup = null;
             }
@@ -3345,7 +3348,7 @@ internal sealed class ChatWindow : Window
 
     private void DrawComposeStatusRow(Configuration config, CharacterState state, List<string> chunks)
     {
-        if (!string.IsNullOrEmpty(activeWhisperTabTarget) || chunks.Count < 2)
+        if (chunks.Count < 2)
         {
             return;
         }
@@ -3466,25 +3469,25 @@ internal sealed class ChatWindow : Window
             return;
         }
 
-        if (ImGui.Selectable(Loc.T("Compose.WrapEmote")))
+        if (MenuItem(Loc.T("Compose.WrapEmote"), plugin.Configuration))
         {
             WrapSelection("*", "*");
             ImGui.CloseCurrentPopup();
         }
 
-        if (ImGui.Selectable(Loc.T("Compose.WrapOoc")))
+        if (MenuItem(Loc.T("Compose.WrapOoc"), plugin.Configuration))
         {
             WrapSelection("((", "))");
             ImGui.CloseCurrentPopup();
         }
 
-        if (ImGui.Selectable(Loc.T("Compose.AutoTranslate")))
+        if (MenuItem(Loc.T("Compose.AutoTranslate"), plugin.Configuration))
         {
             pendingAutoTranslatePopup = true;
             ImGui.CloseCurrentPopup();
         }
 
-        if (ImGui.Selectable(Loc.T("Compose.InsertMapFlag")))
+        if (MenuItem(Loc.T("Compose.InsertMapFlag"), plugin.Configuration))
         {
             if (plugin.HasCurrentMapFlag())
             {
@@ -3514,7 +3517,7 @@ internal sealed class ChatWindow : Window
 
         ImGui.Separator();
 
-        if (ImGui.Selectable(Loc.T("Compose.Copy")))
+        if (MenuItem(Loc.T("Compose.Copy"), plugin.Configuration))
         {
             ImGui.SetClipboardText(inputText);
             ImGui.CloseCurrentPopup();
@@ -4285,7 +4288,7 @@ internal sealed class ChatWindow : Window
 
             var whisperText = FirstName(targetName);
             var whisperUnread = whisperUnreadCounts.GetValueOrDefault(targetName);
-            var tabWidth = StripTabWidth(whisperText, whisperUnread, false);
+            var tabWidth = StripTabWidth(whisperText, whisperUnread, false, FontAwesomeIcon.CommentDots);
             tabStripTabStartOffsets.Add(runningX);
 
             if (targetName == pendingTabForceSelect)
@@ -4316,7 +4319,7 @@ internal sealed class ChatWindow : Window
                     ? customBg
                     : config.TabStripBackgroundColorEnabled ? config.TabStripBackgroundColor : (Vector4?)null;
                 var blinking = whisperUnread > 0 && config.BlinkUnreadWhisperTabs;
-                var clicked = DrawStripTab(whisperText, "##whisper" + targetName, isSelected, tabSize, whisperUnread, false, blinking ? BlinkColor() : null, whisperBg, config);
+                var clicked = DrawStripTab(whisperText, "##whisper" + targetName, isSelected, tabSize, whisperUnread, false, blinking ? BlinkColor() : null, whisperBg, config, FontAwesomeIcon.CommentDots);
 
                 var locked = state.LockedWhisperTargets.Contains(targetName);
                 if (!locked)
@@ -4469,6 +4472,33 @@ internal sealed class ChatWindow : Window
     }
 
     private const float StripTabIconGap = 6f;
+
+    internal static bool MenuItem(string label, Configuration config, Vector4? textColor = null, bool selected = false)
+    {
+        var accent = C4tTheme.ActiveMarkerColor(config);
+        bool clicked;
+        using (ImRaii.PushColor(ImGuiCol.HeaderHovered, accent with { W = 0.16f })
+                   .Push(ImGuiCol.HeaderActive, accent with { W = 0.3f })
+                   .Push(ImGuiCol.Header, accent with { W = 0.12f }))
+        using (ImRaii.PushColor(ImGuiCol.Text, textColor ?? Vector4.Zero, textColor != null))
+        {
+            clicked = ImGui.Selectable(label, selected);
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            var pad = new Vector2(3f, 1f) * ImGuiHelpers.GlobalScale;
+            ImGui.GetWindowDrawList().AddRect(
+                ImGui.GetItemRectMin() - pad,
+                ImGui.GetItemRectMax() + pad,
+                ImGui.GetColorU32(accent with { W = 0.85f }),
+                4f * ImGuiHelpers.GlobalScale,
+                ImDrawFlags.None,
+                1.5f * ImGuiHelpers.GlobalScale);
+        }
+
+        return clicked;
+    }
 
     private void DrawStripEdgeFades(Vector2 min, Vector2 size, bool left, bool right)
     {
