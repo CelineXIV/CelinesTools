@@ -1,0 +1,87 @@
+using Dalamud.Bindings.ImGui;
+using Dalamud.Interface;
+using Dalamud.Interface.Components;
+using Dalamud.Interface.Utility.Raii;
+using C4TChat.Services;
+
+namespace C4TChat.Windows.SettingsPages;
+
+internal sealed class InfoPage
+{
+    private readonly Plugin plugin;
+
+    public InfoPage(Plugin plugin)
+    {
+        this.plugin = plugin;
+    }
+
+    public void Draw()
+    {
+        var config = plugin.Configuration;
+
+        if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.UndoAlt, Loc.T("Settings.Reset")))
+        {
+            ColorsPage.ResetToDefaults(config);
+            config.MaxMessageLength = 400;
+            config.DelayMs = 600;
+            config.SendOnEnter = true;
+            config.FileLogSay = true;
+            config.FileLogParty = true;
+            config.FileLogTell = true;
+            config.FileLogYell = true;
+            config.FileLogShout = true;
+            config.FileLogFreeCompany = true;
+            config.FileLogLinkshell = true;
+            config.PlaySounds = true;
+            config.WhisperSoundEnabled = true;
+            config.WhisperSoundEffect = 3;
+            config.MentionSoundEnabled = false;
+            config.MentionSoundEffect = 6;
+            config.ChatWindowLockPosition = false;
+            config.ChatWindowLockSize = false;
+            config.RpFormattingCategories = new()
+            {
+                ChatCategory.Say,
+                ChatCategory.Party,
+                ChatCategory.Whisper,
+                ChatCategory.Linkshell,
+                ChatCategory.CrossWorldLinkshell,
+            };
+            config.RpFormattingLinkshellNumbers.Clear();
+            config.RpFormattingCrossWorldLinkshellNumbers.Clear();
+            config.WindowOpacity = 1f;
+            config.UnfocusedWindowOpacity = 0.35f;
+            config.ChatLogBackgroundOpacity = 0.15f;
+            config.ComposeAreaHeight = 130f;
+            plugin.SaveConfiguration();
+        }
+
+        ImGui.SameLine();
+        if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.InfoCircle, Loc.T("Compose.Changelog")))
+        {
+            ImGui.OpenPopup("##changelogPopup");
+        }
+
+        var perf = config.ShowPerformanceOverlay;
+        if (ImGui.Checkbox(Loc.T("Perf.Toggle"), ref perf))
+        {
+            config.ShowPerformanceOverlay = perf;
+            plugin.SaveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Perf.ToggleTooltip"));
+        }
+
+        using var popup = ImRaii.Popup("##changelogPopup");
+        if (popup.Success)
+        {
+            for (var i = Changelog.Entries.Length - 1; i >= 0; i--)
+            {
+                var (version, text) = Changelog.Entries[i];
+                ImGui.TextUnformatted($"{version}: {text}");
+            }
+        }
+    }
+}

@@ -3,11 +3,11 @@
   "Name": "CelinesChat",
   "InternalName": "CelinesChat",
   "AssemblyVersion": "1.0.13.0",
-  "Description": "Just a Beta Version of a Chatbox",
+  "Description": "CelinesChat is now C4TChat. Please install C4TChat from the plugin installer - settings, chat logs and pictures are carried over automatically. Afterwards you can uninstall CelinesChat.",
   "ApplicableVersion": "any",
   "RepoUrl": "https://github.com/CelineXIV/CelinesTools",
   "IconUrl": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesChat/images/icon-v2.png",
-  "Punchline": "Konfigurierbare Chat-Tabs, freie Farben je Nachrichtentyp und automatische Nachrichtenaufteilung.",
+  "Punchline": "Heißt jetzt C4TChat - bitte C4TChat installieren, alle Daten werden übernommen.",
   "Tags": [
     "roleplay",
     "chat",

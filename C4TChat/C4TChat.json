@@ -1,0 +1,17 @@
+{
+  "Author": "C4T",
+  "Name": "C4TChat",
+  "InternalName": "C4TChat",
+  "AssemblyVersion": "1.0.13.0",
+  "Description": "A modern chat replacement for FFXIV (formerly CelinesChat). Settings, logs and pictures from CelinesChat are carried over automatically.",
+  "ApplicableVersion": "any",
+  "RepoUrl": "https://github.com/CelineXIV/CelinesTools",
+  "IconUrl": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/C4TChat/images/icon.png",
+  "Punchline": "Moderner Chat mit Tabs, Messenger-Ansicht, Spielerkarten und eigenem Social-Fenster (ehemals CelinesChat).",
+  "Tags": [
+    "roleplay",
+    "chat",
+    "utility"
+  ],
+  "DalamudApiLevel": 15
+}

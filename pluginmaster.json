@@ -40,12 +40,32 @@
     "DownloadLinkTesting": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesToolkit/dist/CelinesToolkit-1.8.6.0.zip"
   },
   {
+    "Author": "C4T",
+    "Name": "C4TChat",
+    "InternalName": "C4TChat",
+    "AssemblyVersion": "1.0.0.0",
+    "Description": "A modern chat replacement for FFXIV (formerly CelinesChat). Settings, logs and pictures from CelinesChat are carried over automatically.",
+    "Punchline": "Moderner Chat mit Tabs, Messenger-Ansicht, Spielerkarten und eigenem Social-Fenster (ehemals CelinesChat).",
+    "ApplicableVersion": "any",
+    "RepoUrl": "https://github.com/CelineXIV/CelinesTools",
+    "Tags": [
+      "roleplay",
+      "chat",
+      "utility"
+    ],
+    "DalamudApiLevel": 15,
+    "IconUrl": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/C4TChat/images/icon.png",
+    "DownloadLinkInstall": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/C4TChat/dist/C4TChat-1.0.0.0.zip",
+    "DownloadLinkUpdate": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/C4TChat/dist/C4TChat-1.0.0.0.zip",
+    "DownloadLinkTesting": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/C4TChat/dist/C4TChat-1.0.0.0.zip"
+  },
+  {
     "Author": "CelineXIV",
     "Name": "CelinesChat",
     "InternalName": "CelinesChat",
-    "AssemblyVersion": "1.3.1.0",
-    "Description": "Just a Beta Version of a Chatbox",
-    "Punchline": "Konfigurierbare Chat-Tabs, freie Farben je Nachrichtentyp und automatische Nachrichtenaufteilung.",
+    "AssemblyVersion": "1.3.2.0",
+    "Description": "CelinesChat is now C4TChat. Please install C4TChat from the plugin installer - settings, chat logs and pictures are carried over automatically. Afterwards you can uninstall CelinesChat.",
+    "Punchline": "Heißt jetzt C4TChat - bitte C4TChat installieren, alle Daten werden übernommen.",
     "ApplicableVersion": "any",
     "RepoUrl": "https://github.com/CelineXIV/CelinesTools",
     "Tags": [
@@ -55,8 +75,8 @@
     ],
     "DalamudApiLevel": 15,
     "IconUrl": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesChat/images/icon-v2.png",
-    "DownloadLinkInstall": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesChat/dist/CelinesChat-1.3.1.0.zip",
-    "DownloadLinkUpdate": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesChat/dist/CelinesChat-1.3.1.0.zip",
-    "DownloadLinkTesting": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesChat/dist/CelinesChat-1.3.1.0.zip"
+    "DownloadLinkInstall": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesChat/dist/CelinesChat-1.3.2.0.zip",
+    "DownloadLinkUpdate": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesChat/dist/CelinesChat-1.3.2.0.zip",
+    "DownloadLinkTesting": "https://cdn.jsdelivr.net/gh/CelineXIV/CelinesTools@main/CelinesChat/dist/CelinesChat-1.3.2.0.zip"
   }
 ]

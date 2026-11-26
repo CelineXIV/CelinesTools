@@ -1,2 +1,0 @@
-# CelineXIV (CelinesChat)
-Comming Soon
