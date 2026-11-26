@@ -104,9 +104,6 @@ internal sealed class SoundsPage
         }
     }
 
-    // Whisper has its own dedicated setting above; Mention is cross-cutting rather than tied to one
-    // channel. Deliberately excludes the high-volume system/combat-log categories in ChatCategory -
-    // this list is only the channels people actually talk in.
     private static readonly ChatCategory[] ChannelSoundCategories =
     {
         ChatCategory.Say,

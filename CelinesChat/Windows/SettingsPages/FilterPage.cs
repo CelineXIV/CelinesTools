@@ -8,7 +8,6 @@ using CelinesChat.Services;
 
 namespace CelinesChat.Windows.SettingsPages;
 
-/// <summary>Word filters and the folding of repeated (spam) messages.</summary>
 internal sealed class FilterPage
 {
     private readonly Plugin plugin;

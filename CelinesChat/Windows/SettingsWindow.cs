@@ -72,12 +72,18 @@ internal sealed class SettingsWindow : Window
         infoPage = new InfoPage(plugin);
     }
 
-    // See C4tTheme - colours pushed in PreDraw, popped in PostDraw.
     private int c4tColorsPushed;
 
     public override void PreDraw()
     {
         c4tColorsPushed = C4tTheme.PushColors(plugin.Configuration);
+    }
+
+    internal void ShowPage(SettingsPage page)
+    {
+        currentPage = page;
+        IsOpen = true;
+        BringToFront();
     }
 
     public override void PostDraw()

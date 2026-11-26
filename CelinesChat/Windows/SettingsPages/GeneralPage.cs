@@ -61,6 +61,93 @@ internal sealed class GeneralPage
             plugin.SaveConfiguration();
         }
 
+        var replyHotkey = config.ReplyHotkeyEnabled;
+        if (ImGui.Checkbox(Loc.T("Settings.ReplyHotkey"), ref replyHotkey))
+        {
+            config.ReplyHotkeyEnabled = replyHotkey;
+            plugin.SaveConfiguration();
+        }
+
+        var historyPerChannel = config.SentHistoryPerChannel;
+        if (ImGui.Checkbox(Loc.T("Compose.HistoryPerChannel"), ref historyPerChannel))
+        {
+            config.SentHistoryPerChannel = historyPerChannel;
+            plugin.SaveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Compose.HistoryPerChannelTooltip"));
+        }
+
+        var snippetShortcuts = config.SnippetShortcutsEnabled;
+        if (ImGui.Checkbox(Loc.T("Compose.SnippetShortcutsEnabled"), ref snippetShortcuts))
+        {
+            config.SnippetShortcutsEnabled = snippetShortcuts;
+            plugin.SaveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Compose.SnippetShortcutTooltip"));
+        }
+
+        var playerCard = config.PlayerCardOnClick;
+        if (ImGui.Checkbox(Loc.T("Settings.PlayerCardOnClick"), ref playerCard))
+        {
+            config.PlayerCardOnClick = playerCard;
+            plugin.SaveConfiguration();
+        }
+
+        var inGameMenus = config.PlayerCardInGameMenus;
+        if (ImGui.Checkbox(Loc.T("Settings.PlayerCardInGameMenus"), ref inGameMenus))
+        {
+            config.PlayerCardInGameMenus = inGameMenus;
+            plugin.SaveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Settings.PlayerCardInGameMenusTooltip"));
+        }
+
+        var lodestone = config.LodestoneAvatars;
+        if (ImGui.Checkbox(Loc.T("Settings.LodestoneAvatars"), ref lodestone))
+        {
+            config.LodestoneAvatars = lodestone;
+            plugin.SaveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Settings.LodestoneAvatarsTooltip"));
+        }
+
+        var showNicknames = config.ShowNicknames;
+        if (ImGui.Checkbox(Loc.T("Settings.ShowNicknames"), ref showNicknames))
+        {
+            config.ShowNicknames = showNicknames;
+            plugin.InvalidateChatLayout();
+            plugin.SaveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Settings.ShowNicknamesTooltip"));
+        }
+
+        var detectNameChanges = config.DetectNameChanges;
+        if (ImGui.Checkbox(Loc.T("Settings.DetectNameChanges"), ref detectNameChanges))
+        {
+            config.DetectNameChanges = detectNameChanges;
+            plugin.SaveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Settings.DetectNameChangesTooltip"));
+        }
+
         ImGui.Separator();
         ImGui.TextUnformatted(Loc.T("Settings.VisibilityHeader"));
 
@@ -109,6 +196,18 @@ internal sealed class GeneralPage
 
         ImGui.Separator();
         ImGui.TextUnformatted(Loc.T("Settings.MiscHeader"));
+
+        var replaceSocial = config.ReplaceSocialWindow;
+        if (ImGui.Checkbox(Loc.T("Settings.ReplaceSocialWindow"), ref replaceSocial))
+        {
+            config.ReplaceSocialWindow = replaceSocial;
+            plugin.SaveConfiguration();
+        }
+
+        using (ImRaii.PushColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]))
+        {
+            ImGui.TextWrapped(Loc.T("Settings.ReplaceSocialWindowHint"));
+        }
 
         var estateTeleportEnabled = config.EstateTeleportContextMenuEnabled;
         if (ImGui.Checkbox(Loc.T("Settings.EstateTeleportContextMenu"), ref estateTeleportEnabled))

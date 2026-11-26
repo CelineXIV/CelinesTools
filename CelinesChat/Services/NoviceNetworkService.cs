@@ -28,8 +28,6 @@ internal static unsafe class NoviceNetworkService
     {
         try
         {
-            // "/nnetwork" only works on the English client - "/novicenetwork" is the underlying
-            // command name and works regardless of client language.
             ChatSender.Send(MessageMarkerEncoder.Encode("/novicenetwork on"));
         }
         catch (Exception ex)

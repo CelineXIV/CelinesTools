@@ -36,8 +36,6 @@ internal sealed class ChatFontManager : IDisposable
             _ => DalamudAsset.NotoSansCjkRegular,
         };
 
-        // Rajdhani ships in the plugin's own Fonts folder (SIL OFL) - if the file is somehow missing,
-        // fall back to the default chat font rather than failing the font build.
         var bundledPath = choice == ChatFontChoice.Rajdhani
             ? Path.Combine(pluginInterface.AssemblyLocation.DirectoryName ?? string.Empty, "Fonts", "Rajdhani-SemiBold.ttf")
             : null;
@@ -59,10 +57,6 @@ internal sealed class ChatFontManager : IDisposable
         }));
     }
 
-    // IFontHandle.Push() silently does nothing if the handle isn't Available yet (Dalamud's own
-    // docs: "pushes ... if available", leaving whatever font was already active in effect) -
-    // callers need to know explicitly when that happened, rather than unknowingly drawing a whole
-    // frame with the wrong font's metrics.
     public bool IsAvailable => fontHandle?.Available ?? false;
 
     public IDisposable? Push() => fontHandle?.Push();

@@ -6,12 +6,6 @@ using CelinesChat.Services;
 
 namespace CelinesChat;
 
-/// <summary>
-/// One contiguous run of chunk text that's a verbatim copy of a slice of the original source text
-/// (a single word, or an unsplit paragraph kept whole). Gaps between segments are synthetic content
-/// with no real source position of their own: the single space MessageSplitter re-joins words with,
-/// an emote-boundary "*" it inserts to keep asterisks balanced, or the " (n/m)" part-count suffix.
-/// </summary>
 internal readonly struct ChunkSegment
 {
     public int ChunkStart { get; }
@@ -26,11 +20,6 @@ internal readonly struct ChunkSegment
     }
 }
 
-/// <summary>
-/// A single outgoing message chunk, plus enough information to map a character offset within its
-/// displayed Text back to the corresponding offset in the original compose text it was built from -
-/// used by the preview window's click-to-move-cursor feature.
-/// </summary>
 internal sealed class MappedChunk
 {
     public string Text { get; }
@@ -42,10 +31,6 @@ internal sealed class MappedChunk
         Segments = segments;
     }
 
-    /// Maps a character offset within Text back to the closest corresponding offset in the original
-    /// source text - exact when the offset falls within a verbatim word, snapped to whichever
-    /// neighboring word boundary is pixel/character-closer when it falls on synthetic content (a
-    /// rejoin space, an emote-fix asterisk, or the " (n/m)" suffix) that has no real source position.
     public int MapToSource(int chunkOffset)
     {
         if (Segments.Count == 0)
@@ -82,13 +67,6 @@ internal sealed class MappedChunk
     }
 }
 
-/// <summary>
-/// Mutable builder for one in-progress MappedChunk. Every real word gets appended via AppendVerbatim
-/// (recording exactly where it came from in the source text); everything else MessageSplitter inserts
-/// - rejoin spaces, emote-fix asterisks, the numbering suffix - goes through AppendSynthetic and has no
-/// source position of its own. The Extract/PrependFrom pair exists purely to mirror the emote-boundary
-/// fixup's word-moving between adjacent chunks without losing each moved word's source offset.
-/// </summary>
 internal sealed class ChunkBuilder
 {
     private readonly StringBuilder text;
@@ -141,12 +119,6 @@ internal sealed class ChunkBuilder
         text.Insert(0, s);
     }
 
-    /// Same as reading a segment's own text, but for the first/last segment also pulls in any glued
-    /// synthetic character sitting right at that end with no space of its own (the lone "*" a
-    /// close-and-reopen emote fixup attaches directly to the chunk's first or last word) - internal
-    /// segment boundaries are always a plain space, so this only ever matters at the two ends. Without
-    /// this, asterisk-parity scanning (EndsInsideEmote/TryMoveTrailingEmoteWords) would silently miss
-    /// that glued asterisk and misjudge whether the chunk still ends mid-emote.
     public string SegmentTextForParity(int index)
     {
         var s = segments[index];
@@ -161,10 +133,6 @@ internal sealed class ChunkBuilder
         return text.ToString(start, text.Length - start);
     }
 
-    /// Removes and returns, as a standalone builder, every segment from fromSegmentIndex to the end,
-    /// along with the text they (and the space between them) occupy - also dropping the single
-    /// separator that sat right before fromSegmentIndex, matching how the original re-joins the *kept*
-    /// words with no trailing space of their own.
     public ChunkBuilder ExtractTrailingSegments(int fromSegmentIndex)
     {
         var startChunkOffset = segments[fromSegmentIndex].ChunkStart;
@@ -183,8 +151,6 @@ internal sealed class ChunkBuilder
         return new ChunkBuilder(new StringBuilder(extractedText), extractedSegments);
     }
 
-    /// Prepends another builder's content in front of this one, joined by `separator` - mirrors
-    /// `moveWords + " " + chunks[i + 1]`.
     public void PrependFrom(ChunkBuilder other, string separator)
     {
         var offset = other.text.Length + separator.Length;
@@ -209,20 +175,11 @@ internal sealed class ChunkBuilder
 
 internal static class MessageSplitter
 {
-    /// <summary>
-    /// The game refuses chat lines longer than this many UTF-8 bytes, counted over the whole line
-    /// including the channel command in front ("/tell Jane Doe@Shiva "). A character limit alone
-    /// isn't enough: umlauts take 2 bytes, typographic quotes 3 and emoji 4.
-    /// </summary>
     public const int MaxChatLineBytes = 500;
 
-    /// <param name="prefixBytes">UTF-8 length of the channel command each message will be sent with.</param>
     public static List<string> BuildMessages(string fullText, int maxLength, int prefixBytes = 0)
         => BuildMappedMessages(fullText, maxLength, prefixBytes).Select(c => c.Text).ToList();
 
-    /// Same output as BuildMessages, but each chunk also carries a MapToSource lookup back into
-    /// fullText - see MappedChunk's own remarks. Kept as the single real implementation (BuildMessages
-    /// just projects .Text out of it) so the two can never drift apart.
     public static List<MappedChunk> BuildMappedMessages(string fullText, int maxLength, int prefixBytes = 0)
     {
         var text = Sanitize(fullText);
@@ -234,10 +191,6 @@ internal static class MessageSplitter
             return builders.Select(b => b.Build()).ToList();
         }
 
-        // Every part gets a " (i/n)" suffix, so split again with room reserved for it. Reserving
-        // can itself push n over the next power of ten (9 -> 10 parts), so repeat until the reserved
-        // room is enough for the part count it produces - the old fixed 8 characters only covered
-        // up to 99 parts.
         var suffixLength = SuffixLength(builders.Count);
         while (true)
         {
@@ -261,15 +214,8 @@ internal static class MessageSplitter
         return result;
     }
 
-    // " (" + i + "/" + n + ")" for any i <= n.
     private static int SuffixLength(int count) => 4 + (2 * count.ToString().Length);
 
-    /// <summary>
-    /// Tabs and other control characters can't go into a chat line - turned into plain spaces (so
-    /// they also split words) rather than removed, which keeps every character at its original index
-    /// for the preview's click-to-cursor mapping. Line breaks are left for SplitLinesWithOffsets,
-    /// except a lone '\r' (not part of "\r\n"), which would otherwise end up inside a word.
-    /// </summary>
     private static string Sanitize(string text)
     {
         char[]? chars = null;
@@ -308,9 +254,6 @@ internal static class MessageSplitter
         return result;
     }
 
-    /// Same paragraphs "\r\n"/"\n"-normalizing to "\n" then splitting on it would give, but computed
-    /// directly against fullText's own offsets (a trailing '\r' is trimmed off each line's slice
-    /// instead of removed up front) so every line's start offset stays exact for source-mapping.
     private static List<(string Line, int Start)> SplitLinesWithOffsets(string fullText)
     {
         var result = new List<(string, int)>();
@@ -344,10 +287,6 @@ internal static class MessageSplitter
             return result;
         }
 
-        // Reserve 2 characters of headroom on every chunk: a chunk in the middle of a long
-        // "*emote*" span can need a synthetic "*" appended (to close it for its left boundary) AND a
-        // synthetic "*" prepended (to reopen it for its right boundary) at the same time - this
-        // guarantees FixEmoteBoundary's close/reopen fallback always fits. "*" is 1 char and 1 byte.
         var packLimit = limit.Shrink(2);
         var words = SplitWordsWithOffsets(paragraph);
         var current = new ChunkBuilder();
@@ -416,8 +355,6 @@ internal static class MessageSplitter
         return result;
     }
 
-    /// Words split on spaces - except inside an auto-translate marker ("[[Nice to meet you#4.12]]"),
-    /// which stays one word even though its phrase contains spaces (see MessageMarkerEncoder).
     private static List<(string Word, int Offset)> SplitWordsWithOffsets(string text)
     {
         var result = new List<(string, int)>();
@@ -452,16 +389,8 @@ internal static class MessageSplitter
         return result;
     }
 
-    /// <summary>
-    /// How many chars of a too-long word fit into one chunk. Never cuts a surrogate pair (emoji and
-    /// other characters outside the BMP) in half - that would send a broken character - and never
-    /// cuts into an auto-translate marker, unless the marker alone is too long to fit anywhere.
-    /// </summary>
     private static int LongestFittingPrefix(string word, Limit limit)
     {
-        // A marker that's longer than the (user-chosen) character limit but still fits the game's
-        // byte limit goes out whole and slightly over the character limit - cutting it apart would
-        // send broken literal text instead of the auto-translate phrase.
         if (MessageMarkerEncoder.TryGetMarkerEnd(word, 0, out var leadingMarkerEnd))
         {
             var markerBytes = Encoding.UTF8.GetByteCount(word.AsSpan(0, leadingMarkerEnd));
@@ -487,7 +416,6 @@ internal static class MessageSplitter
             bytes += unitBytes;
         }
 
-        // Back off to the start of a marker the cut would otherwise land inside of.
         for (var i = 0; i < chars; i++)
         {
             if (word[i] != '[' || !MessageMarkerEncoder.TryGetMarkerEnd(word, i, out var markerEnd))
@@ -504,7 +432,6 @@ internal static class MessageSplitter
             i = markerEnd - 1;
         }
 
-        // Always make progress, even if not a single character fits a degenerate limit.
         if (chars == 0)
         {
             chars = char.IsHighSurrogate(word[0]) && word.Length > 1 && char.IsLowSurrogate(word[1]) ? 2 : 1;
@@ -513,7 +440,6 @@ internal static class MessageSplitter
         return chars;
     }
 
-    // Lone surrogates are encoded as U+FFFD (3 bytes), same as Encoding.UTF8 does.
     private static int Utf8Length(char c) => c < 0x80 ? 1 : c < 0x800 ? 2 : 3;
 
     private static void FixEmoteBoundary(List<ChunkBuilder> chunks, int i, Limit limit)
@@ -556,9 +482,6 @@ internal static class MessageSplitter
             return false;
         }
 
-        // The next chunk keeps 1 character of headroom: it may still need a closing "*" of its own
-        // at the following boundary (its start is now a real emote opening, so it never needs the
-        // reopening one).
         var trailingPreview = builder.PeekTrailingText(lastBalancedIndex + 1);
         var candidateChars = trailingPreview.Length + 1 + chunks[i + 1].Length;
         var candidateBytes = Encoding.UTF8.GetByteCount(trailingPreview) + 1 + chunks[i + 1].ByteLength;
@@ -613,7 +536,6 @@ internal static class MessageSplitter
         return count;
     }
 
-    /// <summary>A chunk must stay within both the character and the UTF-8 byte budget.</summary>
     private readonly record struct Limit(int MaxChars, int MaxBytes)
     {
         public bool Fits(string text) => Fits(text.Length, Encoding.UTF8.GetByteCount(text));

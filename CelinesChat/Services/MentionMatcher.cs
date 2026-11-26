@@ -4,12 +4,6 @@ using System.Text;
 
 namespace CelinesChat.Services;
 
-/// <summary>
-/// What counts as "you were mentioned": the character's first name plus the user's own keywords
-/// (Configuration.MentionKeywords - nicknames, RP names, FC name, ...). The terms travel as one
-/// '\n'-separated string, so the existing single "mentionTerm" plumbing (and the per-entry render
-/// cache keyed on it) keeps working unchanged.
-/// </summary>
 internal static class MentionMatcher
 {
     private static readonly char[] WordSeparators = { ' ', '\t', '\r', '\n' };
@@ -36,7 +30,6 @@ internal static class MentionMatcher
         return builder.ToString();
     }
 
-    /// <summary>Whether one word (punctuation already stripped) is a mention - for highlighting.</summary>
     public static bool MatchesToken(string word, string terms)
     {
         if (word.Length == 0 || string.IsNullOrEmpty(terms))
@@ -56,10 +49,6 @@ internal static class MentionMatcher
         return false;
     }
 
-    /// <summary>
-    /// Whether a whole message mentions any term - for sounds/taskbar flashing. Single-word terms
-    /// must match a whole word; terms with spaces ("Black Cats") match as a phrase.
-    /// </summary>
     public static bool TextMentions(string text, string terms)
     {
         if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(terms))

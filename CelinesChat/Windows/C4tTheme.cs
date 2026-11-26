@@ -5,15 +5,6 @@ using Dalamud.Interface.Utility;
 
 namespace CelinesChat.Windows;
 
-/// <summary>
-/// The "C4T" look: dark panel, accent colour with a soft outer glow, corner brackets in the
-/// second colour, the C4T cat logo. Two variants: blue, and purple/pink (the original C4T colours).
-///
-/// Only colours are pushed, from each window's PreDraw and popped in its PostDraw - never style
-/// vars: Dalamud's WindowHost pops one style var of its own between ImGui.End() and PostDraw()
-/// whenever it applies a fade alpha, which would pop ours instead. Rounding/border thickness
-/// therefore stay whatever the window already uses; the glow and brackets are drawn by hand.
-/// </summary>
 internal static class C4tTheme
 {
     internal sealed class Palette
@@ -44,7 +35,6 @@ internal static class C4tTheme
         LogoFile = "c4t-logo-blau.png",
     };
 
-    // The original C4T colours.
     public static readonly Palette Purple = new()
     {
         Bg = Rgb(0x10, 0x09, 0x1B),
@@ -71,7 +61,6 @@ internal static class C4tTheme
 
     public static bool IsActive(Configuration config) => Active(config) != null;
 
-    /// <summary>Pushes the C4T colours if a C4T design is active; returns how many to pop in PostDraw.</summary>
     public static int PushColors(Configuration config)
     {
         var colors = config.Design switch
@@ -102,18 +91,11 @@ internal static class C4tTheme
         }
     }
 
-    /// <summary>Chat log background at the user's chosen opacity - the variant's deep tone in C4T, black otherwise.</summary>
     public static Vector4 LogBackground(Configuration config) =>
         WithAlpha(Active(config)?.LogBg ?? new Vector4(0f, 0f, 0f, 1f), config.ChatLogBackgroundOpacity);
 
-    /// <summary>The active-tab underline: the variant's second colour in C4T, the user's accent colour otherwise.</summary>
     public static Vector4 ActiveMarkerColor(Configuration config) => Active(config)?.Second ?? config.SendAccentColor;
 
-    /// <summary>
-    /// Outer glow and corner brackets for the current window - call from inside Draw(). The glow
-    /// goes onto the background draw list (behind every ImGui window, so it never covers anything),
-    /// the brackets onto this window's own draw list along its outer edge.
-    /// </summary>
     public static void DrawDecorations(Configuration config, float opacity)
     {
         if (Active(config) is not { } palette)
@@ -127,7 +109,6 @@ internal static class C4tTheme
         var rounding = ImGui.GetStyle().WindowRounding;
         var strength = Math.Clamp(opacity, 0.3f, 1f);
 
-        // Soft outer glow around the panel.
         var background = ImGui.GetBackgroundDrawList();
         var glowSteps = (int)MathF.Max(4f, 9f * scale);
         for (var i = glowSteps; i >= 1; i--)
@@ -137,7 +118,6 @@ internal static class C4tTheme
             background.AddRect(min - offset, max + offset, ImGui.ColorConvertFloat4ToU32(WithAlpha(palette.Accent, 0.23f * t * t * strength)), rounding + i, ImDrawFlags.None, 2f);
         }
 
-        // Corner brackets top-left and bottom-right in the second colour.
         var drawList = ImGui.GetWindowDrawList();
         drawList.PushClipRect(min, max, false);
         var length = 16f * scale;
@@ -150,7 +130,6 @@ internal static class C4tTheme
         drawList.PopClipRect();
     }
 
-    /// <summary>Small logo as a normal item (e.g. at the start of the tab row), square, frame height tall.</summary>
     public static void DrawLogoItem(Plugin plugin)
     {
         if (Active(plugin.Configuration) is not { } palette || !plugin.Configuration.ShowC4tLogo
@@ -164,10 +143,6 @@ internal static class C4tTheme
         ImGui.SameLine();
     }
 
-    /// <summary>
-    /// Faint logo centred behind the chat log - call first thing inside the log's child window, so
-    /// everything drawn afterwards sits on top of it. Stays put while the log scrolls.
-    /// </summary>
     public static void DrawWatermark(Plugin plugin)
     {
         if (Active(plugin.Configuration) is not { } palette || !plugin.Configuration.ShowC4tWatermark

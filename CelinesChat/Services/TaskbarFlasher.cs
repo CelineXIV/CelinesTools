@@ -4,10 +4,6 @@ using System.Runtime.InteropServices;
 
 namespace CelinesChat.Services;
 
-/// <summary>
-/// Flashes the game's taskbar button (like an incoming Discord/Teams message) - only while the game
-/// isn't the active window, and Windows stops it by itself as soon as the game is focused again.
-/// </summary>
 internal static class TaskbarFlasher
 {
     private const uint FlashwAll = 0x3;
@@ -31,7 +27,6 @@ internal static class TaskbarFlasher
 
     private static IntPtr gameWindow;
 
-    /// <summary>Whether the game window is the active window (false if that can't be determined).</summary>
     public static bool IsGameInForeground()
     {
         try
@@ -75,7 +70,6 @@ internal static class TaskbarFlasher
         }
         catch (Exception)
         {
-            // Cosmetic only - never let it disturb chat processing.
         }
     }
 }

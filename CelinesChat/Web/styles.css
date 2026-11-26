@@ -5,9 +5,6 @@
   font-display: swap;
 }
 
-/* Saved presets (see app.js's THEMES/applyTheme, persisted per-device in localStorage) - the
-   bare :root values are the "dark" preset and also the fallback before app.js applies whichever
-   theme was saved, so a first paint before JS runs still looks intentional rather than unstyled. */
 :root, html[data-theme="dark"] {
   color-scheme: dark;
   --bg: #16181d;
@@ -34,7 +31,6 @@ html[data-theme="light"] {
   --danger: #d63333;
 }
 
-/* "Celines Classic" - a warmer, near-black dark theme with an orange accent instead of blue. */
 html[data-theme="celines-classic"] {
   color-scheme: dark;
   --bg: #15100c;
@@ -48,10 +44,6 @@ html[data-theme="celines-classic"] {
   --danger: #ff6b5c;
 }
 
-/* "C4T" - blue ("c4t") and purple ("c4t-lila") variants:
-   dark panel, accent with glow, corner markers in the second colour. Shared rules use
-   [data-theme^="c4t"] and only read the per-variant variables. Rajdhani/Share Tech Mono are used
-   if installed, else close fallbacks. */
 html[data-theme="c4t"] {
   color-scheme: dark;
   --bg: #03050c;
@@ -104,7 +96,6 @@ html[data-theme^="c4t"] input:focus {
   box-shadow: 0 0 0 1px rgba(var(--c4t-accent-rgb), 0.6), 0 0 14px rgba(var(--c4t-accent-rgb), 0.45);
 }
 
-/* Corner markers top-left and bottom-right, fixed to the viewport and never in the way of clicks. */
 html[data-theme^="c4t"] body::before,
 html[data-theme^="c4t"] body::after {
   content: "";
@@ -142,24 +133,15 @@ html, body {
   font-size: 15px;
 }
 
-/* --app-height is set by app.js from window.visualViewport.height, tracking the actual visible
-   area under an open on-screen keyboard on browsers that don't honour the viewport meta tag's
-   interactive-widget=resizes-content hint. 100dvh is the fallback until that first JS-driven value
-   lands (and stays the fallback entirely on browsers with no visualViewport support at all). */
 .screen {
   height: var(--app-height, 100dvh);
   display: flex;
   flex-direction: column;
 }
 
-/* A plain [hidden] rule would tie in specificity with this class's own "display: flex" and lose
-   (author rules always beat the browser's default [hidden] { display: none } regardless of
-   source order) - this combined selector is specific enough to actually win. */
 .screen[hidden] {
   display: none;
 }
-
-/* ----- Login ----- */
 
 #login-screen {
   align-items: center;
@@ -218,8 +200,6 @@ html, body {
   margin-top: 12px;
 }
 
-/* ----- Chat header / tab strip / channel button ----- */
-
 #chat-header {
   display: flex;
   align-items: center;
@@ -238,9 +218,6 @@ html, body {
   min-width: 0;
 }
 
-/* Direct children only (not .whisper-pill's own nested buttons below) - plain fixed-tab buttons
-   are direct children of .picker, but a whisper's label+close pair needs different per-side
-   border-radius/border that this shared rule can't express without a specificity fight. */
 .picker > button {
   flex: 0 0 auto;
   padding: 10px 14px;
@@ -344,8 +321,6 @@ html, body {
   background: #4caf50;
 }
 
-/* ----- Message list ----- */
-
 #message-list {
   flex: 1 1 auto;
   overflow-y: auto;
@@ -383,8 +358,6 @@ html, body {
   cursor: pointer;
 }
 
-/* ----- Send error banner ----- */
-
 .error-banner {
   background: rgba(255, 92, 92, 0.16);
   color: var(--danger);
@@ -393,8 +366,6 @@ html, body {
   font-size: 13px;
   text-align: center;
 }
-
-/* ----- Compose ----- */
 
 #compose-form {
   display: flex;
@@ -417,8 +388,6 @@ html, body {
   color: var(--text);
   font-size: 15px;
   font-family: inherit;
-  /* Actual height is driven by app.js's autoGrowTextarea, up to COMPOSE_MAX_HEIGHT_PX - this is
-     just the natural single-line starting point. */
   min-height: 40px;
 }
 
@@ -433,8 +402,6 @@ html, body {
   font-size: 15px;
   cursor: pointer;
 }
-
-/* ----- Channel picker bottom sheet ----- */
 
 .sheet-overlay {
   position: fixed;
@@ -613,8 +580,6 @@ html, body {
   }
 }
 
-
-/* C4T logo - only in the C4T designs, the colour matching the variant. */
 .c4t-logo {
   display: none;
   height: 26px;
@@ -632,7 +597,6 @@ html[data-theme="c4t-lila"] .c4t-logo-purple {
   display: block;
 }
 
-/* ----- Search bar ----- */
 #search-bar {
   display: flex;
   align-items: center;
@@ -671,7 +635,6 @@ html[data-theme="c4t-lila"] .c4t-logo-purple {
   border-color: var(--accent, #4a90e2);
 }
 
-/* ----- Notification options (design sheet) ----- */
 .notify-options {
   margin-top: 16px;
   display: flex;
@@ -691,7 +654,6 @@ html[data-theme="c4t-lila"] .c4t-logo-purple {
   height: 20px;
 }
 
-/* ----- Bookmarks, notes, friend/FC icons ----- */
 .msg {
   cursor: pointer;
 }
@@ -751,4 +713,10 @@ html[data-theme="c4t-lila"] .c4t-logo-purple {
   margin: 4px 0 0;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.older-loading {
+  text-align: center;
+  opacity: 0.6;
+  padding: 6px 0;
 }

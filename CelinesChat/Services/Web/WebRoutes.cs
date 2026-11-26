@@ -17,12 +17,8 @@ internal sealed class WebRoutes : IDisposable
 {
     private const string CookieName = "CelinesChat-token";
 
-    // Same limit as the in-game compose box - the text is split into chat-sized messages anyway,
-    // this only keeps an absurdly large request from being processed (and split) on the game thread.
     private const int MaxSendTextLength = 4000;
 
-    // Comfortably above any real "Firstname Lastname@World" - anything longer isn't a character name
-    // and would only end up persisted in the whisper tab list.
     private const int MaxWhisperTargetLength = 64;
 
     private static readonly Vector4 LinkColor = new(0.4f, 0.7f, 1f, 1f);
@@ -38,15 +34,12 @@ internal sealed class WebRoutes : IDisposable
     private readonly string appJs;
     private readonly string stylesCss;
 
-    // Logo + font for the C4T look - read once, served from memory. Missing files just 404.
     private readonly byte[]? logoBlue;
     private readonly byte[]? logoPurple;
     private readonly byte[]? rajdhaniFont;
 
-    // Hard cap on remembered logins - the oldest ones go first.
     private const int MaxWebSessions = 20;
 
-    // How often a session's "last used" time is written back (and the config saved) at most.
     private static readonly TimeSpan SessionTouchInterval = TimeSpan.FromHours(1);
 
     public WebRoutes(Plugin plugin, WebSseHub hub, MiniHttpServer host, string webRootDir)
@@ -86,6 +79,8 @@ internal sealed class WebRoutes : IDisposable
         host.Routes.PostAuthentication.Static.Add(HttpMethod.POST, "/api/bookmark", HandleBookmarkToggle, OnException);
         host.Routes.PostAuthentication.Static.Add(HttpMethod.GET, "/api/bookmarks", HandleBookmarkList, OnException);
         host.Routes.PostAuthentication.Static.Add(HttpMethod.POST, "/api/bookmark/remove", HandleBookmarkRemove, OnException);
+        host.Routes.PostAuthentication.Static.Add(HttpMethod.POST, "/api/reply", HandleReply, OnException);
+        host.Routes.PostAuthentication.Static.Add(HttpMethod.POST, "/api/history/older", HandleOlderHistory, OnException);
 
         plugin.ChatLog.EntryAdded += OnEntryAdded;
         plugin.ChatWindowInstance.ViewChanged += OnViewChanged;
@@ -225,9 +220,6 @@ internal sealed class WebRoutes : IDisposable
         await SendJson(ctx, 401, new WebErrorResponse("Not authenticated."));
     }
 
-    // Checked on the framework thread - that's the only thread that ever changes
-    // WebClientSessions (login, logout, code change), and a plain HashSet read racing one of those
-    // writes from this HTTP thread can throw or give a wrong answer.
     private async Task<bool> IsAuthenticatedAsync(HttpContext ctx)
     {
         var token = GetCookieToken(ctx);
@@ -247,13 +239,11 @@ internal sealed class WebRoutes : IDisposable
             var now = DateTime.UtcNow;
             if (now - lastUsed > SessionLifetime)
             {
-                // Unused for longer than the configured number of days - log in again.
                 sessions.Remove(token);
                 plugin.SaveConfiguration();
                 return false;
             }
 
-            // Sliding expiry: in use = stays valid. Written back at most hourly (each write saves the config).
             if (now - lastUsed > SessionTouchInterval)
             {
                 sessions[token] = now;
@@ -424,7 +414,6 @@ internal sealed class WebRoutes : IDisposable
     {
         var body = TryDeserialize<WebChannelSwitchRequest>(ctx.Request.DataAsString);
 
-        // IsDefined as well: Enum.TryParse also happily accepts any number ("42") as a channel.
         if (body == null || !Enum.TryParse<ChatChannel>(body.Channel, out var channel) || !Enum.IsDefined(channel)
             || body.Number is < 1 or > 8)
         {
@@ -454,10 +443,6 @@ internal sealed class WebRoutes : IDisposable
         await SendJson(ctx, 202, new { ok = true });
     }
 
-    // Fetched by the client on-demand each time the channel-picker sheet opens, not pushed via SSE -
-    // linkshell/party membership doesn't change often enough to justify that, and this mirrors how
-    // the in-game picker itself just re-queries NativeChannels/GetPartyMemberNames live every single
-    // frame it's open (ChatWindow.DrawChannelPickerButton) rather than caching a snapshot.
     private async Task HandleChannels(HttpContext ctx)
     {
         var options = await plugin.Framework.RunOnFrameworkThread(() => new WebChannelOptionsDto
@@ -497,8 +482,6 @@ internal sealed class WebRoutes : IDisposable
         await SendJson(ctx, 202, new { ok = true });
     }
 
-    // Bookmarks live in the plugin's config - read and changed only on the framework thread, like
-    // everything else the in-game UI also touches.
     private async Task HandleBookmarkToggle(HttpContext ctx)
     {
         var body = TryDeserialize<WebBookmarkRequest>(ctx.Request.DataAsString);
@@ -590,17 +573,11 @@ internal sealed class WebRoutes : IDisposable
         {
             var lastEventId = ctx.Request.RetrieveHeaderValue("Last-Event-ID");
 
-            // A resumed connection (Last-Event-ID present) is only catching up on genuinely new
-            // traffic since a specific sequence - file-based whisper history has no sequence of its
-            // own to resume from, so it's only merged in for a *fresh* connect, same as
-            // OnViewChanged below only does it for an actual view switch. BuildHistoryForCurrentViewAsync
-            // is called directly here (not from inside RunOnFrameworkThread) so its own file read
-            // stays off the framework thread - see its remarks.
-            var entries = long.TryParse(lastEventId, out var sinceSeq)
+            var resuming = long.TryParse(lastEventId, out var sinceSeq);
+            var entries = resuming
                 ? await plugin.Framework.RunOnFrameworkThread(() => FilterToCurrentView(plugin.ChatLog.SnapshotSince(sinceSeq)))
                 : await BuildHistoryForCurrentViewAsync();
 
-            // Built on the framework thread - ToDto checks the friend list / notes / bookmarks.
             var dtos = await plugin.Framework.RunOnFrameworkThread(() =>
             {
                 var config = plugin.Configuration;
@@ -608,9 +585,21 @@ internal sealed class WebRoutes : IDisposable
                 return entries.Select(entry => ToDto(entry, config, mentionTerm)).ToList();
             });
 
-            foreach (var dto in dtos)
+            if (resuming)
             {
-                var frame = BuildFrame("message", dto.Sequence, dto);
+                foreach (var dto in dtos)
+                {
+                    var frame = BuildFrame("message", dto.Sequence, dto);
+                    if (!await ctx.Response.SendChunk(Encoding.UTF8.GetBytes(frame), false, ctx.Token))
+                    {
+                        return;
+                    }
+                }
+            }
+            else
+            {
+                var lastLive = dtos.Count == 0 ? (long?)null : dtos.Max(d => d.Sequence);
+                var frame = BuildFrame("history", lastLive is > 0 ? lastLive : null, dtos);
                 if (!await ctx.Response.SendChunk(Encoding.UTF8.GetBytes(frame), false, ctx.Token))
                 {
                     return;
@@ -648,8 +637,6 @@ internal sealed class WebRoutes : IDisposable
         }
     }
 
-    // FFXIV character names are letters plus ' and -, world names letters - anything else (or a huge
-    // string) can't be a real /tell target and would only end up persisted as a whisper tab.
     private static bool IsPlausibleWhisperTarget(string? target)
     {
         if (string.IsNullOrWhiteSpace(target))
@@ -668,8 +655,6 @@ internal sealed class WebRoutes : IDisposable
 
     private void OnEntryAdded(ChatLogEntry entry)
     {
-        // Runs on the game thread for every incoming chat message while the web client is enabled -
-        // building and serializing the message is wasted work when no browser is connected at all.
         if (hub.ConnectedCount == 0)
         {
             return;
@@ -677,8 +662,6 @@ internal sealed class WebRoutes : IDisposable
 
         var inView = MatchesCurrentView(entry);
 
-        // Incoming whisper / mention (see ChatLogService.NotifyIfNeeded) - lets the browser play a
-        // sound, vibrate and count it in the tab title, also when it's for another tab.
         if (entry.NotifyKind != 0)
         {
             hub.Broadcast(BuildFrame("notify", null, new { kind = entry.NotifyKind == 1 ? "whisper" : "mention", sender = entry.Sender, inView }));
@@ -693,23 +676,13 @@ internal sealed class WebRoutes : IDisposable
         hub.Broadcast(BuildFrame("message", entry.Sequence, dto));
     }
 
-    // async void is deliberate here, not sloppy - ViewChanged is a plain Action event, so this
-    // handler can't return a Task, and the only way to actually keep BuildHistoryForCurrentViewAsync's
-    // file read off the framework thread (see its own remarks) is to genuinely await it rather than
-    // blocking synchronously on .Result/.Wait() from inside a handler that itself already runs on
-    // that same thread (SwitchToFixedTab/EnterWhisperView/SelectChannel all raise ViewChanged
-    // directly, whether triggered by an in-game click or by a web request already marshalled there).
     private async void OnViewChanged()
     {
-        // Every in-game tab switch lands here - with nobody connected there's no one to send the
-        // view or its history (which for a whisper tab means reading its whole log file) to.
         if (hub.ConnectedCount == 0)
         {
             return;
         }
 
-        // An exception escaping an async void method terminates the whole process (the game) - e.g.
-        // the framework going away mid-await while the plugin unloads.
         try
         {
             hub.Broadcast(BuildFrame("view", null, BuildViewDto()));
@@ -729,26 +702,18 @@ internal sealed class WebRoutes : IDisposable
         }
     }
 
-    // The live in-memory buffer alone (what FilterToCurrentView/Tail draw from) only covers this
-    // session's traffic - a whisper tab's *older* history lives in its own per-target log file and
-    // is normally merged in by ChatWindow.PreloadWhisperHistoryForFirstView, which the web client
-    // never went through at all, so whisper history simply never showed up here. Mirrors that same
-    // load-dedupe-merge shape (LoadWhisperHistory, a timestamp-truncated identity check against
-    // what's already live, then a merge-sort of two individually-sorted lists) rather than reusing
-    // ChatWindow's own private version, since triggering it here would also need to reproduce its
-    // "only once per session per target" bookkeeping and its own negative synthetic Sequence
-    // assignment (irrelevant for a one-shot HTTP/SSE response, unlike the always-open ImGui window).
-    //
-    // LoadWhisperHistory reads and parses an entire per-target log file synchronously - for a long-
-    // running conversation that file can grow large enough to produce a real, reported 400-500ms
-    // "[HITCH] Long UiBuilder(CelinesChat)" if done inline on the framework thread (see ChatWindow.
-    // pendingWhisperHistoryLoads' matching remarks for the equivalent in-game-side fix). Everything
-    // that touches game/plugin state is still wrapped in RunOnFrameworkThread as usual; only the
-    // file read itself runs on a plain background Task instead.
+    internal const int HistoryPageSize = 80;
+
     private async Task<List<ChatLogEntry>> BuildHistoryForCurrentViewAsync()
     {
+        var all = await BuildFullHistoryForCurrentViewAsync(HistoryPageSize);
+        return Tail(all, HistoryPageSize);
+    }
+
+    private async Task<List<ChatLogEntry>> BuildFullHistoryForCurrentViewAsync(int liveLimit)
+    {
         var (liveTail, whisperTarget) = await plugin.Framework.RunOnFrameworkThread(() =>
-            (FilterToCurrentView(Tail(plugin.ChatLog.Snapshot(), 200)), plugin.ChatWindowInstance.ActiveWhisperTabTarget));
+            (Tail(FilterToCurrentView(plugin.ChatLog.Snapshot()), liveLimit), plugin.ChatWindowInstance.ActiveWhisperTabTarget));
 
         if (string.IsNullOrEmpty(whisperTarget))
         {
@@ -776,8 +741,61 @@ internal sealed class WebRoutes : IDisposable
             .Where(f => !alreadyLive.Contains((f.ChatType, f.Sender, f.SenderWorld, f.Text, TruncateToSeconds(f.Timestamp))))
             .ToList();
 
-        var merged = MergeByTimestamp(deduped, liveTail).ToList();
-        return merged.Count > 200 ? merged.GetRange(merged.Count - 200, 200) : merged;
+        return MergeByTimestamp(deduped, liveTail).ToList();
+    }
+
+    private async Task HandleOlderHistory(HttpContext ctx)
+    {
+        var body = TryDeserialize<WebOlderHistoryRequest>(ctx.Request.DataAsString);
+        if (body == null || body.Skip < 0)
+        {
+            await SendJson(ctx, 400, new WebErrorResponse("Invalid request."));
+            return;
+        }
+
+        var count = Math.Clamp(body.Count, 1, 200);
+        var all = await BuildFullHistoryForCurrentViewAsync(int.MaxValue);
+        var end = Math.Max(0, all.Count - body.Skip);
+        var start = Math.Max(0, end - count);
+        var page = all.GetRange(start, end - start);
+
+        var dtos = await plugin.Framework.RunOnFrameworkThread(() =>
+        {
+            var config = plugin.Configuration;
+            var mentionTerm = plugin.MentionTerms;
+            return page.Select(entry => ToDto(entry, config, mentionTerm)).ToList();
+        });
+
+        await SendJson(ctx, 200, new { messages = dtos, hasMore = start > 0 });
+    }
+
+    private async Task HandleReply(HttpContext ctx)
+    {
+        var body = TryDeserialize<WebReplyRequest>(ctx.Request.DataAsString);
+        if (body == null)
+        {
+            await SendJson(ctx, 400, new WebErrorResponse("Invalid request."));
+            return;
+        }
+
+        var result = await plugin.Framework.RunOnFrameworkThread(() =>
+        {
+            var entry = plugin.ChatLog.FindBySequence(body.Sequence);
+            if (entry == null)
+            {
+                return "This message is no longer in memory.";
+            }
+
+            return plugin.ReplyTo(entry) ? null : "There is no channel to reply in for this message.";
+        });
+
+        if (result != null)
+        {
+            await SendJson(ctx, 400, new WebErrorResponse(result));
+            return;
+        }
+
+        await SendJson(ctx, 202, new { ok = true });
     }
 
     private static DateTime TruncateToSeconds(DateTime value) =>
@@ -865,7 +883,6 @@ internal sealed class WebRoutes : IDisposable
 
     #region Mapping
 
-    // Framework thread only (friend list, notes, bookmarks).
     private WebMessageDto ToDto(ChatLogEntry entry, Configuration config, string mentionTerm)
     {
         var isOutgoingTell = entry.ChatType == XivChatType.TellOutgoing;
@@ -896,6 +913,12 @@ internal sealed class WebRoutes : IDisposable
             Time = entry.Timestamp.ToString("HH:mm"),
             Note = plugin.GetPlayerNote(entry),
             Bookmarked = plugin.IsBookmarked(entry),
+            CanReply = entry.Sequence > 0 && Plugin.CanReplyIn(entry.ChatType),
+            IsWhisper = entry.ChatType is XivChatType.TellIncoming or XivChatType.TellOutgoing,
+            WhisperTarget = !isOutgoingTell && entry.IsRealPlayer && entry.Sender.Length > 0
+                && !string.Equals(entry.Sender, plugin.OwnCharacterName, StringComparison.OrdinalIgnoreCase)
+                ? displayName
+                : null,
             RelationIcon = relation == 0 || !config.ShowRelationIcons
                 ? null
                 : relation switch

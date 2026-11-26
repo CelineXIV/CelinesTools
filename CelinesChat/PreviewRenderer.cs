@@ -6,20 +6,6 @@ using Dalamud.Interface.Utility.Raii;
 
 namespace CelinesChat;
 
-/// <summary>
-/// Renders one outgoing-message preview chunk word by word (rather than reusing
-/// ColoredTextRenderer's run-batched DrawSequence) so every word's own click/hover can be tested
-/// individually - clicking anywhere in the preview jumps the compose box's cursor to the exact
-/// matching character via MappedChunk.MapToSource, and a thin caret follows the mouse letter by
-/// letter while hovering to show precisely where that click would land. Preview text is always
-/// short (at most a handful of outgoing message chunks), so the extra per-word ImGui calls compared
-/// to the batched renderer used for chat log entries are not a concern here.
-///
-/// Shared between PreviewWindow (a separate, freely movable window) and ChatWindow's embedded
-/// "Inside" preview mode - the two only differ in how a click's resulting source character index
-/// gets applied (cross-window activation vs. a same-window field write), which the caller supplies
-/// via onCharacterClicked.
-/// </summary>
 internal static class PreviewRenderer
 {
     private static readonly Vector4 LinkColor = new(0.4f, 0.7f, 1f, 1f);
@@ -45,11 +31,6 @@ internal static class PreviewRenderer
             var display = word + " ";
             var size = ImGui.CalcTextSize(display);
 
-            // No explicit ImGui.NewLine() here - simply not calling SameLine() below is enough to
-            // start a fresh line (every Text-family call does that on its own by default). Calling
-            // NewLine() as well double-advanced the cursor at every wrap point - one line from the
-            // explicit call, another from the next word naturally starting its own line - stacking
-            // into the doubled gap between wrapped lines the preview showed.
             if (!startOfLine && lineWidthUsed + size.X > wrapWidth)
             {
                 startOfLine = true;
@@ -75,12 +56,6 @@ internal static class PreviewRenderer
 
     private static void DrawClickableWord(string display, string bareWord, int wordChunkOffset, Vector2 size, Vector4 color, MappedChunk chunk, Action<int> onCharacterClicked, int uniqueId)
     {
-        // Deliberately ImGui.Selectable rather than ImGui.TextColored + manual IsItemClicked - this
-        // matches how Chat2's own click-to-cursor preview draws each letter (a real, nav-participating
-        // widget). A plain Text item's click never reliably let a later SetKeyboardFocusHere() call
-        // actually activate the compose box for keyboard input in this project, even once every
-        // cross-window/same-frame timing issue was ruled out - Selectable is the one thing that fixed
-        // it, matching WrapSelection's own trigger (also a Selectable, in its rp-actions popup).
         bool clicked;
         using (ImRaii.PushColor(ImGuiCol.Text, color)
                    .Push(ImGuiCol.HeaderHovered, new Vector4(1f, 1f, 1f, 0.08f))
@@ -113,9 +88,6 @@ internal static class PreviewRenderer
         }
     }
 
-    /// Finds the character offset within `word` whose boundary is pixel-closest to `localPixelX`
-    /// (measured from the word's own left edge) - the "letter by letter" precision the caret and the
-    /// resulting cursor jump both rely on.
     private static int FindCharOffset(string word, float localPixelX)
     {
         if (localPixelX <= 0f)
@@ -138,10 +110,6 @@ internal static class PreviewRenderer
         return word.Length;
     }
 
-    /// Same whitespace-splitting rule ColoredTextRenderer.Tokenize uses internally, but also
-    /// returning each word's start offset within `text` - the two are zipped by index in
-    /// DrawMappedChunk, which only works because both split on the exact same characters with the
-    /// exact same "no empty entries" behavior.
     private static List<(string Word, int Offset)> SplitWordsWithOffsets(string text)
     {
         var result = new List<(string, int)>();

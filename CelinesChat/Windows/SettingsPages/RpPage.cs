@@ -15,10 +15,6 @@ internal sealed class RpPage
         this.plugin = plugin;
     }
 
-    // Only the channels people actually type free-form roleplay text into - excludes system/notice/
-    // combat-log categories, where a coincidental "*" or "((" in unrelated text was never RP
-    // formatting to begin with (see Configuration.RpFormattingCategories' own remarks). Linkshell and
-    // CrossWorldLinkshell are handled separately below, per numbered slot.
     private static readonly ChatCategory[] Categories =
     {
         ChatCategory.Say,

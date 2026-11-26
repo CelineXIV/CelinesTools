@@ -3,11 +3,6 @@ using System.Collections.Generic;
 
 namespace CelinesChat.Services;
 
-/// <summary>
-/// "While you were away": collects incoming whispers and mentions while the game is in the
-/// background or the character is /afk, and offers them as a summary once the player is back -
-/// but only after a real absence (Configuration.AwaySummaryMinutes), not a quick Alt+Tab.
-/// </summary>
 internal sealed class AwayTracker
 {
     private const int MaxCollected = 200;
@@ -16,7 +11,6 @@ internal sealed class AwayTracker
     private bool away;
     private DateTime awayStart;
 
-    /// <summary>The summary to show, or null. Stays until dismissed; a later absence adds to it.</summary>
     public AwaySummary? Summary { get; private set; }
 
     public bool IsAway => away;
@@ -57,7 +51,6 @@ internal sealed class AwayTracker
         collected.Clear();
     }
 
-    /// <summary>Called for every new message; only whispers/mentions (ChatLogEntry.NotifyKind) are kept.</summary>
     public void OnEntry(ChatLogEntry entry)
     {
         if (away && entry.NotifyKind != 0 && collected.Count < MaxCollected)

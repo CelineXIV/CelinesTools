@@ -8,6 +8,7 @@ using Dalamud.Game.ClientState.Keys;
 using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Game.ClientState.Objects.SubKinds;
 using Dalamud.Game.Command;
+using Dalamud.Game.Gui.ContextMenu;
 using Dalamud.Interface.Textures;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
@@ -34,14 +35,10 @@ public sealed class Plugin : IDalamudPlugin
     private const string CommandName = "/celineschat";
     private const string LogCommandName = "/celineschatlog";
 
-    private const int MaxSentHistory = 10;
+    private const int MaxSentHistory = 50;
 
     private const long EnterActivationGraceMs = 500;
 
-    // Configuration changes are written to disk once they've settled for this long (but at the
-    // latest after ConfigSaveMaxDelayMs) instead of on every call - SavePluginConfig serializes the
-    // whole config (every character's tabs, drafts, whisper colours, ...) on the game's main thread,
-    // and settings sliders/colour pickers used to trigger that on every single frame while dragged.
     private const long ConfigSaveDebounceMs = 1000;
     private const long ConfigSaveMaxDelayMs = 5000;
 
@@ -82,13 +79,16 @@ public sealed class Plugin : IDalamudPlugin
     private readonly CommandInfo openCommandInfo;
     private readonly CommandInfo openLogCommandInfo;
     private readonly EstateTeleportService estateTeleportService;
-    private readonly List<string> sentHistory = new();
+    private readonly PerfOverlayWindow perfWindow;
+    private readonly SocialWindow socialWindow;
 
     public Configuration Configuration { get; }
 
     internal ChatLogService ChatLog { get; }
 
     internal IPluginLog Log => log;
+
+    internal IDataManager DataManager => dataManager;
 
     internal ChatWindow ChatWindowInstance => chatWindow;
 
@@ -100,7 +100,30 @@ public sealed class Plugin : IDalamudPlugin
 
     internal int SendRemaining => sender.Remaining;
 
-    internal IReadOnlyList<string> SentHistory => sentHistory;
+    internal IReadOnlyList<SentHistoryItem> SentHistory => GetCharacterState().SentHistory;
+
+    internal PerfStats Perf { get; } = new();
+
+    internal AvatarService Avatars { get; private set; } = null!;
+
+    internal string? OwnHomeWorld => playerState.IsLoaded ? playerState.HomeWorld.ValueNullable?.Name.ExtractText() : null;
+
+    internal string? ResolveWorld(ChatLogEntry entry) =>
+        entry.SenderWorld
+        ?? (playerState.IsLoaded ? playerState.CurrentWorld.ValueNullable?.Name.ExtractText() : null);
+
+    internal string? LastIncomingWhisperFrom { get; private set; }
+
+    internal static string ChannelKey(ChatChannel channel, int linkshellNumber, int crossWorldLinkshellNumber, string whisperTarget) => channel switch
+    {
+        ChatChannel.Linkshell => "Linkshell:" + linkshellNumber,
+        ChatChannel.CrossWorldLinkshell => "CrossWorldLinkshell:" + crossWorldLinkshellNumber,
+        ChatChannel.Whisper => "Whisper:" + whisperTarget,
+        _ => channel.ToString(),
+    };
+
+    internal static string ChannelKey(CharacterState state) =>
+        ChannelKey(state.LastChannel, state.LinkshellNumber, state.CrossWorldLinkshellNumber, state.LastWhisperTarget);
 
     internal string? PendingWhisperTarget { get; set; }
 
@@ -120,9 +143,6 @@ public sealed class Plugin : IDalamudPlugin
 
     private readonly ChatFontManager chatFontManager;
 
-    // Reflects whether the chat font was actually pushed by the most recent PushChatFont() call -
-    // callers use this to avoid caching a text measurement taken with the wrong font's metrics
-    // (see ChatFontManager.IsAvailable's own remarks for why that happens at all).
     internal bool IsChatFontAvailable => chatFontManager.IsAvailable;
 
     internal IDisposable? PushChatFont()
@@ -131,7 +151,59 @@ public sealed class Plugin : IDalamudPlugin
         return chatFontManager.IsAvailable ? chatFontManager.Push() : null;
     }
 
-    internal bool IsFriend(string name, string? world) => estateTeleportService.IsFriend(name, world);
+    internal bool IsFriend(string name, string? world)
+    {
+        world ??= playerState.IsLoaded ? playerState.CurrentWorld.ValueNullable?.Name.ExtractText() : null;
+        if (estateTeleportService.IsFriend(name, world))
+        {
+            return true;
+        }
+
+        return world != null && SavedFriendKeys().Contains(name + "@" + world);
+    }
+
+    private List<CachedFriend>? savedFriendSource;
+    private int savedFriendSourceCount = -1;
+    private HashSet<string> savedFriendKeys = new(StringComparer.OrdinalIgnoreCase);
+
+    private HashSet<string> SavedFriendKeys()
+    {
+        if (!playerState.IsLoaded)
+        {
+            return savedFriendKeys;
+        }
+
+        var cache = GetCharacterState().FriendCache;
+        if (!ReferenceEquals(cache, savedFriendSource) || cache.Count != savedFriendSourceCount)
+        {
+            savedFriendSource = cache;
+            savedFriendSourceCount = cache.Count;
+            var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var worlds = dataManager.GetExcelSheet<World>();
+            foreach (var friend in cache)
+            {
+                if (worlds.GetRowOrDefault(friend.HomeWorld) is { } row)
+                {
+                    keys.Add(friend.Name + "@" + row.Name.ExtractText());
+                }
+            }
+
+            savedFriendKeys = keys;
+        }
+
+        return savedFriendKeys;
+    }
+
+    internal List<int> RelationPriorityOrder()
+    {
+        var order = Configuration.RelationPriority;
+        if (order.Count != 3 || !order.Contains(RelationFavorite) || !order.Contains(RelationFriend) || !order.Contains(RelationFcMember))
+        {
+            Configuration.RelationPriority = order = new List<int> { RelationFavorite, RelationFriend, RelationFcMember };
+        }
+
+        return order;
+    }
 
     internal void TriggerEstateTeleport(string name, string? world) => estateTeleportService.TryTriggerEstateTeleport(name, world);
 
@@ -151,11 +223,14 @@ public sealed class Plugin : IDalamudPlugin
         IDataManager dataManager,
         IGameGui gameGui,
         ITextureProvider textureProvider,
+        ITextureReadbackProvider textureReadbackProvider,
         IGameInteropProvider gameInteropProvider,
         IFramework framework,
         IClientState clientState,
-        ICondition condition)
+        ICondition condition,
+        IContextMenu contextMenu)
     {
+        this.contextMenu = contextMenu;
         this.pluginInterface = pluginInterface;
         this.commandManager = commandManager;
         this.partyList = partyList;
@@ -177,8 +252,6 @@ public sealed class Plugin : IDalamudPlugin
 
         Configuration = this.pluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
 
-        // Web logins used to be a plain token set without any expiry - carry them over once, as if
-        // just used, so nobody gets logged out by the update itself.
         if (Configuration.WebClientAuthStore.Count > 0)
         {
             foreach (var token in Configuration.WebClientAuthStore)
@@ -189,25 +262,25 @@ public sealed class Plugin : IDalamudPlugin
             Configuration.WebClientAuthStore.Clear();
         }
 
-        // TabStripBackgroundOpacity split off ChromeBackgroundOpacity as its own adjustable slider -
-        // -1 is a sentinel meaning "never migrated yet" (distinct from a user explicitly choosing
-        // 0/off), so this only ever copies the old combined value across once, the first time an
-        // existing config loads after the split. The footer itself no longer has its own opacity
-        // slider at all (always fully transparent), so there's nothing left to migrate for it.
         if (Configuration.TabStripBackgroundOpacity < 0f)
         {
             Configuration.TabStripBackgroundOpacity = Configuration.ChromeBackgroundOpacity;
         }
 
-        // ChatWindowLockPosition/ChatWindowLockSize split the old single "lock everything" toggle
-        // into two independent ones - migrate a user who already had the old combined lock on into
-        // both new ones being on (preserving their existing fully-locked window), then clear the old
-        // field so this doesn't refire and re-force both back on if they later unlock just one.
         if (Configuration.ChatWindowLocked)
         {
             Configuration.ChatWindowLockPosition = true;
             Configuration.ChatWindowLockSize = true;
             Configuration.ChatWindowLocked = false;
+        }
+
+        foreach (var tab in Configuration.ChatTabs)
+        {
+            if (tab.Muted)
+            {
+                tab.NotifyMode = TabNotifyMode.Never;
+                tab.Muted = false;
+            }
         }
 
         if (Configuration.ChatTabs.Count == 0)
@@ -259,15 +332,15 @@ public sealed class Plugin : IDalamudPlugin
         settingsWindow = new SettingsWindow(this);
         previewWindow = new PreviewWindow(this);
         bookmarksWindow = new BookmarksWindow(this);
+        perfWindow = new PerfOverlayWindow(this) { IsOpen = Configuration.ShowPerformanceOverlay };
+        socialWindow = new SocialWindow(this);
+        windowSystem.AddWindow(socialWindow);
+        Avatars = new AvatarService(textureProvider, textureReadbackProvider, log, this.pluginInterface.GetPluginConfigDirectory());
         windowSystem.AddWindow(settingsWindow);
         windowSystem.AddWindow(bookmarksWindow);
+        windowSystem.AddWindow(perfWindow);
         windowSystem.AddWindow(previewWindow);
 
-        // ChatWindow is registered (and therefore drawn) last on purpose - a click inside
-        // PreviewWindow briefly makes ImGui treat PreviewWindow as the frontmost window, and with
-        // ChatWindow drawn (and calling SetKeyboardFocusHere for the compose box) after that every
-        // single frame, it reliably reclaims keyboard focus instead of losing it back to PreviewWindow
-        // on the very next frame the way it did when ChatWindow was drawn first.
         windowSystem.AddWindow(chatWindow);
 
         if (Configuration.SecondaryChatTabIds.Count > 0 || Configuration.SecondaryChatWhisperTargets.Count > 0)
@@ -288,15 +361,6 @@ public sealed class Plugin : IDalamudPlugin
         this.commandManager.AddHandler(CommandName, openCommandInfo);
         this.commandManager.AddHandler(LogCommandName, openLogCommandInfo);
 
-        // Dalamud auto-hides plugin UI during cutscenes/GPose on its own, entirely separate from (and
-        // invisible to) ApplyGameStateVisibility's own ShowChatDuringCutscenes/IsGPosing handling
-        // below - without opting out here, the chat window still vanished during a cutscene even with
-        // that setting on, since Dalamud's own hide wins regardless of what chatWindow.IsOpen is set
-        // to. DisableGposeUiHide was already set for the same reason on the GPose side; missing its
-        // cutscene counterpart was the actual gap (confirmed by live testing: not caused by this
-        // plugin's own suppression logic, whose own diagnostic never once fired despite the window
-        // visibly disappearing - and other chat plugins like Chat2 stay visible through cutscenes by
-        // opting out of Dalamud's automatic hide the same way).
         this.pluginInterface.UiBuilder.DisableCutsceneUiHide = true;
         this.pluginInterface.UiBuilder.DisableGposeUiHide = true;
 
@@ -307,12 +371,83 @@ public sealed class Plugin : IDalamudPlugin
 
         this.framework.Update += OnFrameworkUpdate;
         ChatLog.EntryAdded += OnEntryAddedForPlugin;
+        ChatLog.SenderIdentified += OnSenderIdentified;
+        this.contextMenu.OnMenuOpened += OnGameContextMenuOpened;
     }
 
-    /// <summary>
-    /// Marks the configuration as changed. It's written to disk shortly afterwards (see
-    /// FlushConfigurationIfDue), so this is cheap enough to call on every edit.
-    /// </summary>
+    private readonly IContextMenu contextMenu;
+
+    private static readonly HashSet<string> PlayerMenuAddons = new(StringComparer.Ordinal)
+    {
+        "FriendList",
+        "SocialList",
+        "PartyMemberList",
+        "_PartyList",
+        "FreeCompany",
+        "LinkShell",
+        "CrossWorldLinkshell",
+        "ContentMemberList",
+        "BeginnerChatList",
+        "BlackList",
+        "LookingForGroup",
+    };
+
+    private void OnGameContextMenuOpened(IMenuOpenedArgs args)
+    {
+        if (!Configuration.PlayerCardInGameMenus
+            || args.MenuType != ContextMenuType.Default
+            || (args.AddonName != null && !PlayerMenuAddons.Contains(args.AddonName))
+            || args.Target is not MenuTargetDefault target
+            || string.IsNullOrWhiteSpace(target.TargetName))
+        {
+            return;
+        }
+
+        if (args.AddonName == null && target.TargetObject is not IPlayerCharacter)
+        {
+            return;
+        }
+
+        var name = target.TargetName;
+        var worldId = target.TargetHomeWorld.RowId;
+        var world = worldId != 0 ? target.TargetHomeWorld.ValueNullable?.Name.ExtractText() : null;
+        var contentId = target.TargetContentId;
+
+        if (string.Equals(name, OwnCharacterName, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        args.AddMenuItem(new MenuItem
+        {
+            Name = Loc.T("ChatLog.PlayerCardAction"),
+            PrefixChar = 'C',
+            PrefixColor = 538,
+            OnClicked = _ => OpenPlayerCard(name, string.IsNullOrEmpty(world) ? null : world, contentId),
+        });
+    }
+
+    internal void OpenPlayerCard(string name, string? world, ulong contentId)
+    {
+        var currentWorld = playerState.IsLoaded ? playerState.CurrentWorld.ValueNullable?.Name.ExtractText() : null;
+        var entry = new ChatLogEntry
+        {
+            Sender = name,
+            SenderWorld = world != null && !string.Equals(world, currentWorld, StringComparison.OrdinalIgnoreCase) ? world : null,
+            ChatType = XivChatType.Say,
+            ContentId = contentId,
+            ContentIdKnown = contentId != 0,
+            Timestamp = DateTime.Now,
+        };
+
+        if (contentId != 0)
+        {
+            ObserveCharacter(contentId, name, world, fromFriendList: false);
+        }
+
+        chatWindow.OpenPlayerCard(entry);
+    }
+
     public void SaveConfiguration()
     {
         var now = Environment.TickCount64;
@@ -355,6 +490,8 @@ public sealed class Plugin : IDalamudPlugin
 
     public void ToggleSettingsWindow() => settingsWindow.Toggle();
 
+    internal void OpenSettingsPage(SettingsPage page) => settingsWindow.ShowPage(page);
+
     internal void ToggleBookmarksWindow() => bookmarksWindow.Toggle();
 
     internal string ConfigDirectory => pluginInterface.GetPluginConfigDirectory();
@@ -365,13 +502,11 @@ public sealed class Plugin : IDalamudPlugin
     private long nextRelationRefreshTicks;
     private int relationVersion;
 
-    // OnlineStatus sheet row for "Away from Keyboard" (/afk).
     private const uint AfkOnlineStatusId = 17;
 
-    // Away/back detection and the periodic refresh of friend/FC highlighting - a couple of cheap
-    // checks, done a few times per second rather than every frame.
     private void UpdateAwayAndRelations()
     {
+        PrintPendingNameChangeNotices();
         var now = Environment.TickCount64;
         if (now >= nextAwayCheckTicks)
         {
@@ -381,19 +516,65 @@ public sealed class Plugin : IDalamudPlugin
             Away.Update(awayNow, Configuration.AwaySummaryMinutes);
         }
 
-        // The friend list can change at any time - re-check every message's highlight now and then.
         if (now >= nextRelationRefreshTicks)
         {
             nextRelationRefreshTicks = now + 30_000;
             relationVersion++;
+            CheckFriendListForNameChanges();
         }
+
+        if (nextLogMaintenanceTicks == 0)
+        {
+            nextLogMaintenanceTicks = now + 60_000;
+        }
+        else if (now >= nextLogMaintenanceTicks)
+        {
+            nextLogMaintenanceTicks = now + (6 * 60 * 60 * 1000L);
+            RunLogMaintenance();
+        }
+    }
+
+    private long nextLogMaintenanceTicks;
+    private System.Threading.Tasks.Task? logMaintenanceTask;
+
+    internal string? LastLogMaintenanceResult { get; private set; }
+
+    internal bool IsLogMaintenanceRunning => logMaintenanceTask is { IsCompleted: false };
+
+    internal void RunLogMaintenance(bool evenIfOff = false)
+    {
+        var archiveDays = Configuration.LogArchiveAfterDays;
+        var deleteDays = Configuration.LogDeleteAfterDays;
+        if (IsLogMaintenanceRunning || (!evenIfOff && archiveDays <= 0 && deleteDays <= 0))
+        {
+            return;
+        }
+
+        var folder = ChatLog.LogsFolderPath;
+        logMaintenanceTask = System.Threading.Tasks.Task.Run(() =>
+        {
+            try
+            {
+                var result = LogArchive.Run(folder, archiveDays, deleteDays);
+                LastLogMaintenanceResult = Loc.T("FileLog.MaintenanceResult", DateTime.Now.ToString("HH:mm"), result.Archived, result.Deleted);
+            }
+            catch (Exception ex)
+            {
+                log.Warning(ex, "[CelinesChat] Aufräumen der Log-Dateien fehlgeschlagen.");
+                LastLogMaintenanceResult = Loc.T("FileLog.MaintenanceFailed");
+            }
+        });
     }
 
     private void OnEntryAddedForPlugin(ChatLogEntry entry)
     {
         Away.OnEntry(entry);
 
-        // Anyone writing in the FC chat is an FC member - remembered per character for highlighting.
+        if (entry.ChatType == XivChatType.TellIncoming && !string.IsNullOrEmpty(entry.Sender) && !IsFilteredOut(entry))
+        {
+            LastIncomingWhisperFrom = entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender;
+        }
+
         if (entry.ChatType == XivChatType.FreeCompany
             && !string.IsNullOrEmpty(entry.Sender)
             && !string.Equals(entry.Sender, OwnCharacterName, StringComparison.OrdinalIgnoreCase)
@@ -406,6 +587,300 @@ public sealed class Plugin : IDalamudPlugin
                 SaveConfiguration();
             }
         }
+    }
+
+    private int nicknameVersion;
+
+    internal string? GetNickname(ChatLogEntry entry)
+    {
+        if (!Configuration.ShowNicknames || Configuration.PlayerNicknames.Count == 0 || string.IsNullOrEmpty(entry.Sender)
+            || entry.ChatType == XivChatType.TellOutgoing)
+        {
+            return null;
+        }
+
+        if (entry.NicknameVersion != nicknameVersion)
+        {
+            entry.Nickname = FindNickname(entry.SenderKey, entry.Sender, ResolveWorld(entry));
+            entry.NicknameVersion = nicknameVersion;
+        }
+
+        return entry.Nickname;
+    }
+
+    internal string? FindNickname(string senderKey, string name, string? world)
+    {
+        var nicknames = Configuration.PlayerNicknames;
+        return nicknames.TryGetValue(senderKey, out var nick)
+            || (world != null && nicknames.TryGetValue(name + "@" + world, out nick))
+            || nicknames.TryGetValue(name, out nick)
+            ? nick
+            : null;
+    }
+
+    internal void SetNickname(string key, string name, string nickname)
+    {
+        var nicknames = Configuration.PlayerNicknames;
+        nicknames.Remove(name);
+        if (string.IsNullOrWhiteSpace(nickname))
+        {
+            nicknames.Remove(key);
+        }
+        else
+        {
+            nicknames[key] = nickname.Trim();
+        }
+
+        nicknameVersion++;
+        InvalidateChatLayout();
+        SaveConfiguration();
+    }
+
+    private const int MaxKnownCharacters = 5000;
+    private bool knownCharactersDirty;
+
+    private readonly Dictionary<ulong, (string Name, int Count)> pendingChatRenames = new();
+
+    private void OnSenderIdentified(ChatLogEntry entry)
+    {
+        if (entry.ChatType == XivChatType.TellOutgoing || !entry.IsRealPlayer)
+        {
+            return;
+        }
+
+        ObserveCharacter(entry.ContentId, entry.Sender, ResolveWorld(entry), fromFriendList: false);
+    }
+
+    private void CheckFriendListForNameChanges()
+    {
+        if (!Configuration.DetectNameChanges || !playerState.IsLoaded)
+        {
+            return;
+        }
+
+        try
+        {
+            foreach (var (contentId, name, world) in estateTeleportService.GetFriends())
+            {
+                ObserveCharacter(contentId, name, world, fromFriendList: true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Verbose(ex, "[CelinesChat] Freundesliste konnte nicht gelesen werden.");
+        }
+
+        if (knownCharactersDirty)
+        {
+            knownCharactersDirty = false;
+            SaveConfiguration();
+        }
+    }
+
+    private void ObserveCharacter(ulong contentId, string name, string? world, bool fromFriendList)
+    {
+        if (!Configuration.DetectNameChanges || contentId == 0 || string.IsNullOrWhiteSpace(name)
+            || contentId == CurrentCharacterKey)
+        {
+            return;
+        }
+
+        var known = Configuration.KnownCharacters;
+        if (!known.TryGetValue(contentId, out var character))
+        {
+            if ((fromFriendList || HasPersonalData(name, world)) && known.Count < MaxKnownCharacters)
+            {
+                known[contentId] = new KnownCharacter { Name = name, World = world };
+                knownCharactersDirty = true;
+            }
+
+            return;
+        }
+
+        var nameChanged = !string.Equals(character.Name, name, StringComparison.OrdinalIgnoreCase);
+
+        var worldChanged = fromFriendList && world != null && character.World != null
+            && !string.Equals(character.World, world, StringComparison.OrdinalIgnoreCase);
+
+        if (!nameChanged && !worldChanged)
+        {
+            pendingChatRenames.Remove(contentId);
+            if (character.World == null && world != null)
+            {
+                character.World = world;
+                knownCharactersDirty = true;
+            }
+
+            return;
+        }
+
+        if (!fromFriendList)
+        {
+            var count = pendingChatRenames.TryGetValue(contentId, out var pending)
+                && string.Equals(pending.Name, name, StringComparison.OrdinalIgnoreCase)
+                ? pending.Count + 1
+                : 1;
+            if (count < 2)
+            {
+                pendingChatRenames[contentId] = (name, count);
+                return;
+            }
+        }
+
+        pendingChatRenames.Remove(contentId);
+
+        var oldName = character.Name;
+        var oldWorld = character.World;
+        var newWorld = worldChanged || character.World == null ? world : character.World;
+
+        var oldLabel = oldWorld != null ? oldName + "@" + oldWorld : oldName;
+        character.PreviousNames.RemoveAll(n => string.Equals(n, oldLabel, StringComparison.OrdinalIgnoreCase));
+        character.PreviousNames.Insert(0, oldLabel);
+        if (character.PreviousNames.Count > 5)
+        {
+            character.PreviousNames.RemoveRange(5, character.PreviousNames.Count - 5);
+        }
+
+        character.Name = name;
+        character.World = newWorld;
+        character.ChangedAt = DateTime.Now;
+
+        var moved = MovePlayerData(oldName, oldWorld, name, newWorld);
+        SaveConfiguration();
+
+        var newLabel = newWorld != null ? name + "@" + newWorld : name;
+        var text = nameChanged
+            ? Loc.T("NameChange.Renamed", oldLabel, newLabel)
+            : Loc.T("NameChange.Transferred", name, newWorld ?? "?");
+        if (moved)
+        {
+            text += " " + Loc.T("NameChange.DataMoved");
+        }
+
+        log.Info($"[CelinesChat] Namenswechsel erkannt: {oldLabel} -> {newLabel}");
+
+        pendingNameChangeNotices.Add("[CelinesChat] " + text);
+    }
+
+    private readonly List<string> pendingNameChangeNotices = new();
+
+    private void PrintPendingNameChangeNotices()
+    {
+        if (pendingNameChangeNotices.Count == 0)
+        {
+            return;
+        }
+
+        var notices = pendingNameChangeNotices.ToArray();
+        pendingNameChangeNotices.Clear();
+        foreach (var notice in notices)
+        {
+            try
+            {
+                chatGui.Print(new XivChatEntry { Type = XivChatType.Echo, Message = notice });
+            }
+            catch (Exception ex)
+            {
+                Log.Verbose(ex, "[CelinesChat] Hinweis zum Namenswechsel konnte nicht angezeigt werden.");
+            }
+        }
+    }
+
+    internal IReadOnlyList<string>? GetPreviousNames(ChatLogEntry entry)
+    {
+        var known = Configuration.KnownCharacters;
+        if (known.Count == 0)
+        {
+            return null;
+        }
+
+        if (entry.ContentIdKnown && entry.ContentId != 0)
+        {
+            return known.TryGetValue(entry.ContentId, out var byId) && byId.PreviousNames.Count > 0 ? byId.PreviousNames : null;
+        }
+
+        var world = ResolveWorld(entry);
+        foreach (var character in known.Values)
+        {
+            if (character.PreviousNames.Count > 0
+                && string.Equals(character.Name, entry.Sender, StringComparison.OrdinalIgnoreCase)
+                && (world == null || character.World == null || string.Equals(character.World, world, StringComparison.OrdinalIgnoreCase)))
+            {
+                return character.PreviousNames;
+            }
+        }
+
+        return null;
+    }
+
+    private bool HasPersonalData(string name, string? world)
+    {
+        var config = Configuration;
+        var key = world != null ? name + "@" + world : name;
+        bool has(Func<string, bool> contains) => contains(key) || contains(name);
+
+        return has(config.PlayerNotes.ContainsKey)
+            || has(config.FavoritePlayers.Contains)
+            || has(config.CustomAvatars.ContainsKey)
+            || has(config.PlayerNicknames.ContainsKey)
+            || has(config.HiddenPlayers.Contains)
+            || (playerState.IsLoaded && GetCharacterState().RecentWhisperTargets.Exists(t => string.Equals(t, key, StringComparison.OrdinalIgnoreCase)));
+    }
+
+    private bool MovePlayerData(string oldName, string? oldWorld, string newName, string? newWorld)
+    {
+        var config = Configuration;
+        var oldKey = oldWorld != null ? oldName + "@" + oldWorld : oldName;
+        var newKey = newWorld != null ? newName + "@" + newWorld : newName;
+        var moved = false;
+
+        void moveDict(Dictionary<string, string> dict)
+        {
+            foreach (var (from, to) in new[] { (oldKey, newKey), (oldName, newName) })
+            {
+                if (dict.Remove(from, out var value))
+                {
+                    dict.TryAdd(to, value);
+                    moved = true;
+                }
+            }
+        }
+
+        void moveSet(HashSet<string> set)
+        {
+            foreach (var (from, to) in new[] { (oldKey, newKey), (oldName, newName) })
+            {
+                if (set.Remove(from))
+                {
+                    set.Add(to);
+                    moved = true;
+                }
+            }
+        }
+
+        moveDict(config.PlayerNotes);
+        moveDict(config.PlayerNicknames);
+        moveDict(config.CustomAvatars);
+        moveSet(config.FavoritePlayers);
+        moveSet(config.HiddenPlayers);
+        if (playerState.IsLoaded)
+        {
+            moveSet(GetCharacterState().KnownFcMembers);
+        }
+
+        if (oldWorld != null && newWorld != null)
+        {
+            var hadConversation = playerState.IsLoaded
+                && GetCharacterState().RecentWhisperTargets.Exists(t => string.Equals(t, oldKey, StringComparison.OrdinalIgnoreCase));
+            RenameWhisperTarget(oldKey, newKey);
+            moved |= hadConversation;
+        }
+
+        relationVersion++;
+        nicknameVersion++;
+        filterVersion++;
+        InvalidateChatLayout();
+        return moved;
     }
 
     internal const int RelationFriend = 1;
@@ -439,7 +914,6 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
-    /// <summary>0 = nobody special, 1 = on the friend list, 2 = known FC member, 3 = favourite (wins over the others). Cached per message.</summary>
     internal int GetRelation(ChatLogEntry entry)
     {
         if (entry.RelationVersion == relationVersion)
@@ -454,20 +928,20 @@ public sealed class Plugin : IDalamudPlugin
         {
             try
             {
-                if (Configuration.HighlightFavorites && IsFavorite(entry))
+                foreach (var candidate in RelationPriorityOrder())
                 {
-                    relation = RelationFavorite;
-                }
-                else if (Configuration.HighlightFriends && IsFriend(entry.Sender, entry.SenderWorld))
-                {
-                    relation = RelationFriend;
-                }
-                else if (Configuration.HighlightFcMembers && playerState.IsLoaded)
-                {
-                    var fc = GetCharacterState().KnownFcMembers;
-                    if (fc.Contains(entry.SenderKey) || fc.Contains(entry.Sender))
+                    var applies = candidate switch
                     {
-                        relation = RelationFcMember;
+                        RelationFavorite => Configuration.HighlightFavorites && IsFavorite(entry),
+                        RelationFriend => Configuration.HighlightFriends && IsFriend(entry.Sender, entry.SenderWorld),
+                        _ => Configuration.HighlightFcMembers && playerState.IsLoaded
+                            && (GetCharacterState().KnownFcMembers.Contains(entry.SenderKey) || GetCharacterState().KnownFcMembers.Contains(entry.Sender)),
+                    };
+
+                    if (applies)
+                    {
+                        relation = candidate;
+                        break;
                     }
                 }
             }
@@ -482,7 +956,6 @@ public sealed class Plugin : IDalamudPlugin
         return relation;
     }
 
-    /// <summary>Call after changing the friend/FC highlight settings.</summary>
     internal void OnRelationSettingsChanged()
     {
         relationVersion++;
@@ -513,11 +986,6 @@ public sealed class Plugin : IDalamudPlugin
 
     internal void RegenerateWebClientAuthCode() => SetWebClientAuthCode(WebAuth.GenerateAuthCode());
 
-    // Shared by the "generate a random one" and "type your own" paths (WebClientPage) - clearing
-    // WebClientSessions on any code change (not just a random regeneration) is deliberate: a
-    // session token is independent of the code itself, but treating "the code changed" as "log
-    // everyone out" consistently, regardless of *why* it changed, is simpler to reason about than a
-    // rule that only applies to one of the two ways of changing it.
     internal void SetWebClientAuthCode(string code)
     {
         Configuration.WebClientAuthCode = code;
@@ -538,17 +1006,6 @@ public sealed class Plugin : IDalamudPlugin
 
     internal bool IsGPosing => clientState.IsGPosing;
 
-    // Set when Enter opens the chat while gposing (see OnFrameworkUpdate), cleared on leaving GPose
-    // or via CloseGposeChatWindow - deliberately NOT tied to IsChatInputActive/focus at all, unlike
-    // the grace-period check below. It used to be: ApplyGameStateVisibility's GPose suppression only
-    // stayed bypassed while the compose box had keyboard focus (or briefly after, via the grace
-    // period), so clicking anything else in the window - a tab, a toolbar button - dropped that
-    // focus and the very next frame's suppression check slammed the window shut again ("man kann in
-    // gpose keine tabs wechseln, sobald man es versucht geht das fenster nur zu"). A persistent flag
-    // keeps it open regardless of *why* the compose box isn't focused right now, and ChatWindow.
-    // TrySend's empty-input branch calls CloseGposeChatWindow explicitly to still support the
-    // "press Enter on nothing to dismiss" toggle the user wants kept - just as a deliberate action
-    // instead of an accidental side effect of losing focus.
     private bool chatOpenedDuringGpose;
 
     internal void CloseGposeChatWindow()
@@ -556,18 +1013,9 @@ public sealed class Plugin : IDalamudPlugin
         chatOpenedDuringGpose = false;
         chatWindow.IsOpen = false;
 
-        // Without this, IsChatInputActive stays stuck at whatever it was the instant the window
-        // closed (Draw() never runs again to naturally refresh it while IsOpen is false) - and
-        // OnFrameworkUpdate's Enter handler treats IsChatInputActive == true as "already open and
-        // focused, just consume the key," permanently swallowing every later Enter press meant to
-        // reopen the window. Matches HideChatWindow's own reset for the same reason.
         IsChatInputActive = false;
     }
 
-    /// Single on/off switch for the message preview, regardless of which PreviewPosition mode is
-    /// active - backed by previewWindow.IsOpen either way. In "Window" mode that's already what
-    /// governs the floating window's own visibility; in "Inside" mode there's no separate window to
-    /// toggle, so ChatWindow.DrawEmbeddedPreview checks this same flag before drawing.
     internal bool IsPreviewVisible => previewWindow.IsOpen;
 
     public void TogglePreviewWindow() => previewWindow.Toggle();
@@ -659,12 +1107,9 @@ public sealed class Plugin : IDalamudPlugin
 
     public void CancelSending() => sender.Cancel();
 
-    // Exposed separately from GetCharacterState() (rather than having callers infer "did the
-    // character change" from the CharacterState reference itself) so ChatWindow can detect a real
-    // login/character switch on its own, using its own locally-tracked "last seen" value - restoring
-    // that character's last active tab and forcing a scroll-to-bottom needs to happen exactly once
-    // per switch, not on every one of the several GetCharacterState() calls a single frame makes.
     internal ulong CurrentCharacterKey => playerState.IsLoaded ? playerState.ContentId : 0UL;
+
+    internal ushort CurrentWorldId => playerState.IsLoaded ? (ushort)playerState.CurrentWorld.RowId : (ushort)0;
 
     internal CharacterState GetCharacterState()
     {
@@ -708,10 +1153,6 @@ public sealed class Plugin : IDalamudPlugin
     private int mentionTermsKeywordsVersion = -1;
     private int mentionKeywordsVersion;
 
-    /// <summary>
-    /// First name plus Configuration.MentionKeywords, newline-separated (see MentionMatcher) - what the
-    /// renderer highlights as a mention. Cached, since it's asked for on every frame.
-    /// </summary>
     internal string MentionTerms
     {
         get
@@ -728,7 +1169,6 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
-    /// <summary>Call after editing Configuration.MentionKeywords.</summary>
     internal void OnMentionKeywordsChanged()
     {
         mentionKeywordsVersion++;
@@ -737,7 +1177,6 @@ public sealed class Plugin : IDalamudPlugin
 
     private int filterVersion;
 
-    /// <summary>Hidden player or word filter - cached per entry until a filter changes (see OnFiltersChanged).</summary>
     internal bool IsFilteredOut(ChatLogEntry entry)
     {
         var version = filterVersion;
@@ -752,14 +1191,12 @@ public sealed class Plugin : IDalamudPlugin
         return result;
     }
 
-    /// <summary>Call after editing Configuration.WordFilters or HiddenPlayers.</summary>
     internal void OnFiltersChanged()
     {
         filterVersion++;
         SaveConfiguration();
     }
 
-    /// <summary>The note saved for this message's sender ("Name@World" first, then plain "Name"), or null.</summary>
     internal string? GetPlayerNote(ChatLogEntry entry)
     {
         var notes = Configuration.PlayerNotes;
@@ -779,8 +1216,6 @@ public sealed class Plugin : IDalamudPlugin
         }
         else
         {
-            // Not trimmed - the settings page saves while typing, and trimming there ate every space
-            // typed at the end of the note.
             Configuration.PlayerNotes[key] = note;
         }
 
@@ -796,8 +1231,6 @@ public sealed class Plugin : IDalamudPlugin
             return false;
         }
 
-        // Also called from the web client's threads - build into a local and only then publish it,
-        // and treat a list changed mid-copy as "not bookmarked" for that one call.
         var keys = bookmarkKeys;
         if (keys == null)
         {
@@ -849,7 +1282,6 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
-    /// <summary>After Configuration was replaced from a backup file - drop every cache built from the old one.</summary>
     internal void OnConfigurationImported()
     {
         Configuration.RestoreComparers();
@@ -861,7 +1293,6 @@ public sealed class Plugin : IDalamudPlugin
         SaveConfiguration();
     }
 
-    /// <summary>Bumped whenever every message's rendered height changes (e.g. a tab's timestamps toggled), so the chat windows drop their cached heights.</summary>
     internal int LayoutVersion { get; private set; }
 
     internal void InvalidateChatLayout() => LayoutVersion++;
@@ -906,10 +1337,6 @@ public sealed class Plugin : IDalamudPlugin
         return ownWorld == null || string.Equals(targetWorld, ownWorld, StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>
-    /// The targeted player as "Name@HomeWorld". Without the world, /tell only reaches players from
-    /// your current world - visitors from other worlds never got the message.
-    /// </summary>
     internal string? GetCurrentTargetPlayerName()
     {
         return targetManager.Target is IPlayerCharacter player
@@ -917,8 +1344,6 @@ public sealed class Plugin : IDalamudPlugin
             : null;
     }
 
-    // "Name@HomeWorld" for the same reason as GetCurrentTargetPlayerName - cross-world parties are
-    // common. Skips the player themselves.
     internal List<string> GetPartyMemberNames()
     {
         var names = new List<string>();
@@ -996,6 +1421,359 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
+    internal unsafe void InviteByContentId(string name, ushort homeWorldId, ulong contentId)
+    {
+        var proxy = InfoProxyPartyInvite.Instance();
+        if (proxy == null || contentId == 0)
+        {
+            return;
+        }
+
+        var isCrossWorld = playerState.IsLoaded && playerState.HomeWorld.RowId != 0 && playerState.HomeWorld.RowId != homeWorldId;
+        if (isCrossWorld)
+        {
+            proxy->InviteToPartyContentId(contentId, homeWorldId);
+        }
+        else
+        {
+            proxy->InviteToParty(contentId, name, homeWorldId);
+        }
+    }
+
+    private static readonly string[] SocialAddonNames = { "Social", "FriendList", "PartyMemberList", "SocialList" };
+    private bool socialBypass;
+    private bool socialBypassSeen;
+    private long socialBypassSince;
+
+    internal unsafe void OpenNativeSocial(SocialWindow.SocialTab tab, bool openSearchConditions = false)
+    {
+        if (openSearchConditions)
+        {
+            StartHiddenSearch();
+            return;
+        }
+
+        pendingSearchConditions = false;
+
+        reopenSocialTab = socialWindow.IsOpen ? tab : null;
+        socialWindow.IsOpen = false;
+
+        socialBypass = true;
+        socialBypassSeen = false;
+        socialBypassSince = Environment.TickCount64;
+
+        var agentModule = AgentModule.Instance();
+        if (agentModule == null)
+        {
+            return;
+        }
+
+        agentModule->GetAgentByInternalId(AgentId.Social)->Show();
+        pendingNativeSocialTab = tab;
+    }
+
+    private SocialWindow.SocialTab? pendingNativeSocialTab;
+
+    private enum HiddenSearchStage
+    {
+        None,
+        Opening,
+        WaitingForDialog,
+        DialogOpen,
+        Closing,
+    }
+
+    private HiddenSearchStage hiddenSearch;
+    private long hiddenSearchSince;
+    private bool hiddenSearchTabRequested;
+
+    private unsafe void StartHiddenSearch()
+    {
+        var agentModule = AgentModule.Instance();
+        if (agentModule == null)
+        {
+            return;
+        }
+
+        socialWindow.IsOpen = false;
+        hiddenSearch = HiddenSearchStage.Opening;
+        hiddenSearchSince = Environment.TickCount64;
+        hiddenSearchTabRequested = false;
+        agentModule->GetAgentByInternalId(AgentId.Social)->Show();
+    }
+
+    private unsafe void RunHiddenSearch(RaptureAtkUnitManager* manager)
+    {
+        var now = Environment.TickCount64;
+
+        foreach (var name in SocialAddonNames)
+        {
+            var addon = manager->GetAddonByName(name);
+            if (addon != null && addon->IsVisible)
+            {
+                addon->IsVisible = false;
+            }
+        }
+
+        var social = manager->GetAddonByName("Social");
+        var list = manager->GetAddonByName("SocialList");
+        var dialog = manager->GetAddonByName("PcSearchDetail");
+        var dialogOpen = dialog != null && dialog->IsVisible;
+
+        switch (hiddenSearch)
+        {
+            case HiddenSearchStage.Opening:
+                if (list != null && list->IsReady && ClickAddonButton(list, SearchConditionsButtonParam))
+                {
+                    hiddenSearch = HiddenSearchStage.WaitingForDialog;
+                    hiddenSearchSince = now;
+                }
+                else if (social != null && social->IsReady && !hiddenSearchTabRequested)
+                {
+                    hiddenSearchTabRequested = true;
+                    var agents = AgentModule.Instance();
+                    if (agents != null)
+                    {
+                        agents->GetAgentByInternalId(AgentId.Search)->Show();
+                    }
+                }
+                else if (now - hiddenSearchSince > 3000)
+                {
+                    FinishHiddenSearch(manager);
+                }
+
+                break;
+
+            case HiddenSearchStage.WaitingForDialog:
+                if (dialogOpen)
+                {
+                    hiddenSearch = HiddenSearchStage.DialogOpen;
+                }
+                else if (now - hiddenSearchSince > 3000)
+                {
+                    FinishHiddenSearch(manager);
+                }
+
+                break;
+
+            case HiddenSearchStage.DialogOpen:
+                if (!dialogOpen)
+                {
+                    hiddenSearch = HiddenSearchStage.Closing;
+                    hiddenSearchSince = now;
+                    socialWindow.Show(SocialWindow.SocialTab.Search, toggle: false);
+                }
+
+                break;
+
+            case HiddenSearchStage.Closing:
+                if (now - hiddenSearchSince > 1500)
+                {
+                    FinishHiddenSearch(manager);
+                }
+
+                break;
+        }
+    }
+
+    private unsafe void FinishHiddenSearch(RaptureAtkUnitManager* manager)
+    {
+        hiddenSearch = HiddenSearchStage.None;
+
+        var agentModule = AgentModule.Instance();
+        if (agentModule != null)
+        {
+            agentModule->GetAgentByInternalId(AgentId.Social)->Hide();
+        }
+
+        foreach (var name in SocialAddonNames)
+        {
+            var addon = manager->GetAddonByName(name);
+            if (addon != null)
+            {
+                addon->Close(true);
+            }
+        }
+
+        if (!socialWindow.IsOpen)
+        {
+            socialWindow.Show(SocialWindow.SocialTab.Search, toggle: false);
+        }
+    }
+    private bool pendingSearchConditions;
+    private SocialWindow.SocialTab? reopenSocialTab;
+
+    private const int SearchConditionsButtonParam = 1;
+
+    private static unsafe bool ClickAddonButton(AtkUnitBase* addon, int param)
+    {
+        if (addon == null || !addon->IsReady)
+        {
+            return false;
+        }
+
+        var manager = &addon->UldManager;
+        for (var i = 0; i < manager->NodeListCount; i++)
+        {
+            var node = manager->NodeList[i];
+            if (node == null)
+            {
+                continue;
+            }
+
+            for (var evt = node->AtkEventManager.Event; evt != null; evt = evt->NextEvent)
+            {
+                if (evt->State.EventType == AtkEventType.ButtonClick && evt->Param == param && evt->Listener != null)
+                {
+                    var data = default(AtkEventData);
+                    evt->Listener->ReceiveEvent(AtkEventType.ButtonClick, param, evt, &data);
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private unsafe void ReplaceNativeSocialWindow()
+    {
+        if (!Configuration.ReplaceSocialWindow && hiddenSearch == HiddenSearchStage.None)
+        {
+            socialBypass = false;
+            return;
+        }
+
+        var raptureAtkModule = RaptureAtkModule.Instance();
+        if (raptureAtkModule == null)
+        {
+            return;
+        }
+
+        var manager = &raptureAtkModule->RaptureAtkUnitManager;
+        if (hiddenSearch != HiddenSearchStage.None)
+        {
+            RunHiddenSearch(manager);
+            return;
+        }
+
+        var anyOpen = false;
+        SocialWindow.SocialTab? tab = null;
+        foreach (var name in SocialAddonNames)
+        {
+            var addon = manager->GetAddonByName(name);
+            if (addon == null || !addon->IsVisible)
+            {
+                continue;
+            }
+
+            anyOpen = true;
+            tab ??= name switch
+            {
+                "PartyMemberList" => SocialWindow.SocialTab.Party,
+                "FriendList" => SocialWindow.SocialTab.Friends,
+                "SocialList" => SocialWindow.SocialTab.Search,
+                _ => null,
+            };
+        }
+
+        if (socialBypass)
+        {
+            var conditions = manager->GetAddonByName("PcSearchDetail");
+            anyOpen |= conditions != null && conditions->IsVisible;
+
+            if (anyOpen)
+            {
+                socialBypassSeen = true;
+                if (pendingNativeSocialTab is { } pendingTab)
+                {
+                    pendingNativeSocialTab = null;
+                    var tabAgent = pendingTab switch
+                    {
+                        SocialWindow.SocialTab.Party => AgentId.PartyMember,
+                        SocialWindow.SocialTab.Search => AgentId.Search,
+                        _ => AgentId.Friendlist,
+                    };
+                    var agents = AgentModule.Instance();
+                    if (agents != null && tab != pendingTab)
+                    {
+                        agents->GetAgentByInternalId(tabAgent)->Show();
+                    }
+                }
+            }
+            else if (socialBypassSeen || Environment.TickCount64 - socialBypassSince > 3000)
+            {
+                socialBypass = false;
+                pendingSearchConditions = false;
+                if (reopenSocialTab is { } reopen)
+                {
+                    reopenSocialTab = null;
+                    socialWindow.Show(reopen, toggle: false);
+                }
+            }
+
+            if (pendingSearchConditions && pendingNativeSocialTab == null)
+            {
+                var list = manager->GetAddonByName("SocialList");
+                if (list != null && list->IsVisible && ClickAddonButton(list, SearchConditionsButtonParam))
+                {
+                    pendingSearchConditions = false;
+                }
+                else if (Environment.TickCount64 - socialBypassSince > 3000)
+                {
+                    pendingSearchConditions = false;
+                }
+            }
+
+            return;
+        }
+
+        if (!anyOpen)
+        {
+            CloseLeftoverSocial(manager);
+            return;
+        }
+
+        var agentModule = AgentModule.Instance();
+        if (agentModule != null)
+        {
+            agentModule->GetAgentByInternalId(AgentId.Social)->Hide();
+        }
+
+        foreach (var name in SocialAddonNames)
+        {
+            var addon = manager->GetAddonByName(name);
+            if (addon != null && addon->IsVisible)
+            {
+                addon->IsVisible = false;
+                addon->Close(true);
+            }
+        }
+
+        socialWindow.Show(tab ?? SocialWindow.SocialTab.Friends, toggle: true);
+    }
+
+    private long nextLeftoverSocialCheck;
+
+    private unsafe void CloseLeftoverSocial(RaptureAtkUnitManager* manager)
+    {
+        var now = Environment.TickCount64;
+        if (now < nextLeftoverSocialCheck)
+        {
+            return;
+        }
+
+        nextLeftoverSocialCheck = now + 1000;
+        foreach (var name in SocialAddonNames)
+        {
+            var addon = manager->GetAddonByName(name);
+            if (addon != null && addon->IsReady && !addon->IsVisible)
+            {
+                log.Debug($"[CelinesChat] Unsichtbares {name}-Fenster geschlossen.");
+                addon->Close(true);
+            }
+        }
+    }
+
     internal unsafe void AddToMuteList(string name, string? world, ulong contentId, ulong accountId)
     {
         if (accountId == 0)
@@ -1051,14 +1829,6 @@ public sealed class Plugin : IDalamudPlugin
     private bool pendingChatActivation;
     private int? pendingPreviewCursorTarget;
 
-    /// Routes a preview-click cursor jump through the exact same activation trigger the physical
-    /// Enter key uses (pendingChatActivation, detected in OnFrameworkUpdate) instead of setting
-    /// ChatWindow's own fields directly from PreviewWindow's Draw - Enter reliably grabs true keyboard
-    /// input while the direct approach never did, and the one difference is that OnFrameworkUpdate
-    /// runs before ImGui draws any window for that frame, while a click handled inside
-    /// PreviewWindow.Draw only takes effect after PreviewWindow (the window the user just genuinely
-    /// clicked) has already run its own frame - going through the same pre-draw trigger point Enter
-    /// already uses avoids that ordering disadvantage entirely.
     internal void RequestComposeCursorActivation(int sourceCharIndex)
     {
         pendingPreviewCursorTarget = sourceCharIndex;
@@ -1125,20 +1895,56 @@ public sealed class Plugin : IDalamudPlugin
         SaveConfiguration();
         chatManuallyHidden = false;
         chatWindow.IsOpen = true;
+        chatWindow.NotifyViewChanged();
+    }
+
+    internal bool ReplyTo(ChatLogEntry entry)
+    {
+        if (entry.ChatType is XivChatType.TellIncoming or XivChatType.TellOutgoing)
+        {
+            if (string.IsNullOrEmpty(entry.Sender))
+            {
+                return false;
+            }
+
+            OpenWhisperTab(entry.SenderWorld != null ? $"{entry.Sender}@{entry.SenderWorld}" : entry.Sender);
+            return true;
+        }
+
+        if (!CanReplyIn(entry.ChatType))
+        {
+            return false;
+        }
+
+        ReplyInMessageChannel(entry.ChatType);
+        RequestComposeFocus();
+        return true;
+    }
+
+    internal static bool CanReplyIn(XivChatType type) =>
+        type is XivChatType.TellIncoming or XivChatType.TellOutgoing or XivChatType.Say or XivChatType.Party
+            or XivChatType.Yell or XivChatType.Shout or XivChatType.FreeCompany or XivChatType.Alliance
+            or XivChatType.PvPTeam or XivChatType.NoviceNetwork
+        || ChannelDisplay.LinkshellIndex(type) != null
+        || ChannelDisplay.CrossWorldLinkshellIndex(type) != null;
+
+    internal void RequestComposeFocus() => chatWindow.RequestComposeFocus();
+
+    internal bool ReplyToLastWhisper()
+    {
+        if (string.IsNullOrEmpty(LastIncomingWhisperFrom))
+        {
+            return false;
+        }
+
+        OpenWhisperTab(LastIncomingWhisperFrom);
+        return true;
     }
 
     internal bool HasCurrentMapFlag() => MapFlagWatcher.HasFlag();
 
     internal readonly record struct StatusIconInfo(Dalamud.Bindings.ImGui.ImTextureID TextureHandle, Vector2 Uv0, Vector2 Uv1, Vector2 Size);
 
-    // Resolved once and kept alive for the plugin's whole lifetime, rather than calling
-    // TextureProvider.GetFromGame fresh on every GetStatusIconInfo call (i.e. once per status icon
-    // per message, every single frame). A freshly-requested ISharedImmediateTexture that's never
-    // held onto between calls never gets the chance to stay "warm" in Dalamud's own shared-texture
-    // cache, so GetWrapOrDefault() could intermittently return null right after the plugin
-    // considered it loaded - flipping a message's status icon on/off between frames, which shifts
-    // that whole line's word-wrap prefix width right along with it. Holding one shared reference
-    // here keeps it consistently resolved instead.
     private ISharedImmediateTexture? fontIconTexture;
 
     internal StatusIconInfo? GetStatusIconInfo(BitmapFontIcon icon, float targetHeight)
@@ -1164,11 +1970,8 @@ public sealed class Plugin : IDalamudPlugin
         return new StatusIconInfo(texture.Handle, uv0, uv1, size);
     }
 
-    // Same reasoning as fontIconTexture above - held for the plugin's lifetime so the texture stays
-    // resolved instead of flickering in and out between frames. Keyed by file name (one per C4T variant).
     private readonly Dictionary<string, ISharedImmediateTexture> c4tLogoTextures = new();
 
-    /// <summary>The C4T logo from the plugin's Assets folder, or null until it's loaded (or if it's missing).</summary>
     internal Dalamud.Bindings.ImGui.ImTextureID? GetC4tLogo(string fileName)
     {
         if (!c4tLogoTextures.TryGetValue(fileName, out var texture))
@@ -1298,8 +2101,6 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        // The try/catch has to live inside the deferred callback - wrapped around RunOnTick itself it
-        // only covered scheduling, and an exception thrown by the other plugin's handler went unseen.
         framework.RunOnTick(() =>
         {
             try
@@ -1325,10 +2126,6 @@ public sealed class Plugin : IDalamudPlugin
         chatWindow.IsOpen = true;
     }
 
-    /// <summary>
-    /// Sends a slash command as typed. Returns false (and sends nothing) if it's longer than the
-    /// game allows for one chat line - unlike normal messages, a command can't be split up.
-    /// </summary>
     public bool SendRawCommand(string command)
     {
         var encoded = MessageMarkerEncoder.Encode(command);
@@ -1338,14 +2135,10 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         sender.Enqueue(new[] { encoded }, Configuration.DelayMs);
-        RecordSentHistory(command);
+        RecordSentHistory(command, string.Empty);
         return true;
     }
 
-    /// <summary>
-    /// Sends text to an explicit channel without touching the main compose box's channel selection -
-    /// used by the torn-off window's own input. Returns an error text, or null when it was queued.
-    /// </summary>
     internal string? SendToChannel(ChatChannel channel, int linkshellNumber, int crossWorldLinkshellNumber, string whisperTarget, string text)
     {
         var trimmed = text.Trim();
@@ -1379,7 +2172,7 @@ public sealed class Plugin : IDalamudPlugin
 
         var delayMs = channel == ChatChannel.Whisper ? Math.Max(Configuration.DelayMs, MinWhisperDelayMs) : Configuration.DelayMs;
         sender.Enqueue(commands, delayMs);
-        RecordSentHistory(text);
+        RecordSentHistory(text, ChannelKey(channel, linkshellNumber, crossWorldLinkshellNumber, whisperTarget));
         return null;
     }
 
@@ -1403,22 +2196,25 @@ public sealed class Plugin : IDalamudPlugin
             RememberWhisperTarget(state, state.LastWhisperTarget);
         }
 
-        RecordSentHistory(originalDraft);
+        RecordSentHistory(originalDraft, ChannelKey(state));
     }
 
-    private void RecordSentHistory(string text)
+    private void RecordSentHistory(string text, string channelKey)
     {
         if (string.IsNullOrWhiteSpace(text))
         {
             return;
         }
 
-        sentHistory.Remove(text);
-        sentHistory.Insert(0, text);
-        while (sentHistory.Count > MaxSentHistory)
+        var history = GetCharacterState().SentHistory;
+        history.RemoveAll(item => item.Text == text && item.Channel == channelKey);
+        history.Insert(0, new SentHistoryItem { Text = text, Channel = text.StartsWith('/') ? string.Empty : channelKey });
+        while (history.Count > MaxSentHistory)
         {
-            sentHistory.RemoveAt(sentHistory.Count - 1);
+            history.RemoveAt(history.Count - 1);
         }
+
+        SaveConfiguration();
     }
 
     internal string RememberWhisperTarget(CharacterState state, string target)
@@ -1501,7 +2297,6 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
-    /// <summary>UTF-8 size of the channel command each message goes out with - MessageSplitter needs it to keep every whole line within the game's limit.</summary>
     internal int GetChannelPrefixBytes(CharacterState state) => System.Text.Encoding.UTF8.GetByteCount(GetChannelPrefix(state));
 
     internal string GetChannelPrefix(CharacterState state) =>
@@ -1525,9 +2320,6 @@ public sealed class Plugin : IDalamudPlugin
 
     private bool mainChatInputActive;
 
-    // Set by the main window's compose box (setter) - the torn-off window's own input reports via
-    // IsSecondaryChatInputActive. Either one being focused means Enter belongs to that input, not to
-    // "open the chat" (see OnFrameworkUpdate).
     internal bool IsChatInputActive
     {
         private get => mainChatInputActive || IsSecondaryChatInputActive;
@@ -1536,10 +2328,30 @@ public sealed class Plugin : IDalamudPlugin
 
     internal bool IsSecondaryChatInputActive { private get; set; }
 
-    private unsafe void OnFrameworkUpdate(IFramework _)
+    private void OnFrameworkUpdate(IFramework _)
+    {
+        if (!Configuration.ShowPerformanceOverlay)
+        {
+            OnFrameworkUpdateCore();
+            return;
+        }
+
+        var start = PerfStats.Start();
+        try
+        {
+            OnFrameworkUpdateCore();
+        }
+        finally
+        {
+            Perf.FrameworkUpdate.Add(PerfStats.ElapsedMs(start));
+        }
+    }
+
+    private unsafe void OnFrameworkUpdateCore()
     {
         FlushConfigurationIfDue();
         UpdateAwayAndRelations();
+        ReplaceNativeSocialWindow();
         SetNativeChatVisible(!Configuration.HideNativeChat);
         ApplyGameStateVisibility();
 
@@ -1570,9 +2382,6 @@ public sealed class Plugin : IDalamudPlugin
 
     private void ApplyGameStateVisibility()
     {
-        // Kept in sync regardless of the early-return below, so a *later* gpose session always
-        // starts fresh (requiring its own Enter press) instead of inheriting a stale "already opened
-        // this session" flag from whenever gposing last ended.
         if (!clientState.IsGPosing)
         {
             chatOpenedDuringGpose = false;
@@ -1583,10 +2392,6 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        // OccupiedInEvent covers scripted sequences that aren't flagged as a "cutscene" by the two
-        // WatchingCutscene* flags at all - a duty's own entry sequence (e.g. walking into a dungeon)
-        // reportedly still hid the chat window with both ShowChatDuringCutscenes and
-        // ShowChatDuringLoadingScreens on, which only this flag being unaccounted-for explains.
         var inCutscene = condition[ConditionFlag.WatchingCutscene]
             || condition[ConditionFlag.WatchingCutscene78]
             || condition[ConditionFlag.OccupiedInCutSceneEvent]
@@ -1600,13 +2405,6 @@ public sealed class Plugin : IDalamudPlugin
 
         chatWindow.IsOpen = !chatManuallyHidden && !suppressedByGameState;
 
-        // The secondary window has no manual show/hide toggle of its own (chatManuallyHidden doesn't
-        // apply here), but it should still honour the same ShowChatDuringCutscenes/
-        // ShowChatDuringLoadingScreens/GPose rules the main window does - without this it just sat at
-        // whatever IsOpen its own OnClose/empty-check last left it at, ignoring those settings
-        // entirely. IsSecondaryWindowHiddenByGameState is checked by SecondaryChatWindow.OnClose so
-        // this programmatic hide is never mistaken for the user actually closing the window (which
-        // would otherwise dump every tab in it back onto the main window every time a cutscene starts).
         if (secondaryChatWindow != null)
         {
             IsSecondaryWindowHiddenByGameState = suppressedByGameState;
@@ -1624,7 +2422,6 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        // Runs every frame - the names are fixed strings rather than rebuilt (and allocated) each time.
         foreach (var name in NativeChatAddonNames)
         {
             SetAddonVisible(raptureAtkModule, name, visible);
@@ -1640,7 +2437,23 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
-    private void OnOpenCommand(string command, string args) => ToggleChatWindow();
+    private void OnOpenCommand(string command, string args)
+    {
+        if (string.Equals(args.Trim(), "social", StringComparison.OrdinalIgnoreCase))
+        {
+            socialWindow.Show(socialWindow.ActiveTab, toggle: true);
+            return;
+        }
+
+        if (string.Equals(args.Trim(), "perf", StringComparison.OrdinalIgnoreCase))
+        {
+            Configuration.ShowPerformanceOverlay = !Configuration.ShowPerformanceOverlay;
+            SaveConfiguration();
+            return;
+        }
+
+        ToggleChatWindow();
+    }
 
     private void OnLanguageChanged(string langCode)
     {
@@ -1651,10 +2464,16 @@ public sealed class Plugin : IDalamudPlugin
         chatWindow.WindowName = WindowTitles.Chat;
         settingsWindow.WindowName = WindowTitles.Settings;
         previewWindow.WindowName = WindowTitles.Preview;
+        socialWindow.WindowName = Loc.T("Social.Title") + "###celineschatSocial";
     }
 
     private void DrawUi()
     {
+        if (perfWindow.IsOpen != Configuration.ShowPerformanceOverlay)
+        {
+            perfWindow.IsOpen = Configuration.ShowPerformanceOverlay;
+        }
+
         windowSystem.Draw();
         ReconcileItemTooltip();
     }
@@ -1666,21 +2485,10 @@ public sealed class Plugin : IDalamudPlugin
 
         if (!chatWindow.IsOpen)
         {
-            // Same reset HideChatWindow() already does - ChatWindow.Draw() (the only other place that
-            // keeps IsChatInputActive in sync) never runs again while the window is closed. If the
-            // compose box happened to be focused right when /celineschat (or the OpenMainUi toggle)
-            // closed it, IsChatInputActive would otherwise stay stuck true forever, silently
-            // swallowing every later Enter press meant to reopen the window - OnFrameworkUpdate's own
-            // Enter handler bails out immediately whenever IsChatInputActive is true.
             IsChatInputActive = false;
         }
     }
 
-    // Set for the duration of Dispose() so SecondaryChatWindow.OnClose can tell a genuine, user-
-    // clicked close (which should return its tabs to the main window) apart from any close Dalamud's
-    // own teardown triggers while the plugin is unloading/reloading - without this, tearing a tab out
-    // never survived a reload: OnClose ran during shutdown just like a real close would, wiping
-    // SecondaryChatTabIds/SecondaryChatWhisperTargets right before that now-empty config got saved.
     internal bool IsDisposing { get; private set; }
 
     public void Dispose()
@@ -1695,6 +2503,8 @@ public sealed class Plugin : IDalamudPlugin
         pluginInterface.LanguageChanged -= OnLanguageChanged;
         framework.Update -= OnFrameworkUpdate;
         ChatLog.EntryAdded -= OnEntryAddedForPlugin;
+        ChatLog.SenderIdentified -= OnSenderIdentified;
+        contextMenu.OnMenuOpened -= OnGameContextMenuOpened;
         SetNativeChatVisible(true);
 
         windowSystem.RemoveAllWindows();
@@ -1703,12 +2513,12 @@ public sealed class Plugin : IDalamudPlugin
         commandManager.RemoveHandler(LogCommandName);
 
         webServerService.Dispose();
+        Avatars.Dispose();
         ChatLog.Dispose();
         chatActivationWatcher.Dispose();
         chatFontManager.Dispose();
         sender.Dispose();
 
-        // Last, so it also catches anything the teardown above still changed.
         if (configDirtySince >= 0)
         {
             SaveConfigurationNow();

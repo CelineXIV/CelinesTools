@@ -62,6 +62,18 @@ internal sealed class InfoPage
             ImGui.OpenPopup("##changelogPopup");
         }
 
+        var perf = config.ShowPerformanceOverlay;
+        if (ImGui.Checkbox(Loc.T("Perf.Toggle"), ref perf))
+        {
+            config.ShowPerformanceOverlay = perf;
+            plugin.SaveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Perf.ToggleTooltip"));
+        }
+
         using var popup = ImRaii.Popup("##changelogPopup");
         if (popup.Success)
         {

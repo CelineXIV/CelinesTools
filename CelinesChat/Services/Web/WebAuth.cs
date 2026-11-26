@@ -14,12 +14,6 @@ internal static class WebAuth
 
     public static string GenerateSessionToken() => RandomNumberGenerator.GetHexString(30);
 
-    // Now that the login code can be a user-chosen password rather than always a short throwaway
-    // numeric one, a plain != comparison's early-exit-on-first-mismatched-character timing isn't
-    // worth leaving as-is just because it was fine for a 5-digit code. FixedTimeEquals takes the
-    // same time regardless of where (or whether) the inputs differ - the 10s per-IP rate limit
-    // already makes any such timing attack impractically slow either way, but this is a one-line
-    // change to remove the concern rather than merely mitigate it.
     public static bool CodeMatches(string candidate, string actual) =>
         CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(candidate), Encoding.UTF8.GetBytes(actual));
 

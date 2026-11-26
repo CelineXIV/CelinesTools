@@ -1,11 +1,19 @@
+using System;
+using System.Diagnostics;
+using System.Threading.Tasks;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface;
+using Dalamud.Interface.Components;
 using Dalamud.Interface.Utility.Raii;
+using CelinesChat.Services;
 
 namespace CelinesChat.Windows.SettingsPages;
 
 internal sealed class FileLogPage
 {
     private readonly Plugin plugin;
+    private Task<long>? sizeTask;
+    private long? folderSize;
 
     public FileLogPage(Plugin plugin)
     {
@@ -88,6 +96,84 @@ internal sealed class FileLogPage
         {
             config.FileLogNoviceNetwork = fileLogNovice;
             plugin.SaveConfiguration();
+        }
+
+        DrawCleanupSection(config);
+    }
+
+    private void DrawCleanupSection(Configuration config)
+    {
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.TextUnformatted(Loc.T("FileLog.CleanupHeader"));
+        ImGui.TextWrapped(Loc.T("FileLog.CleanupHint"));
+
+        var archiveDays = config.LogArchiveAfterDays;
+        ImGui.SetNextItemWidth(120);
+        if (ImGui.InputInt(Loc.T("FileLog.ArchiveAfter"), ref archiveDays, 1, 7))
+        {
+            config.LogArchiveAfterDays = Math.Clamp(archiveDays, 0, 3650);
+            plugin.SaveConfiguration();
+        }
+
+        var deleteDays = config.LogDeleteAfterDays;
+        ImGui.SetNextItemWidth(120);
+        if (ImGui.InputInt(Loc.T("FileLog.DeleteAfter"), ref deleteDays, 1, 30))
+        {
+            config.LogDeleteAfterDays = Math.Clamp(deleteDays, 0, 3650);
+            plugin.SaveConfiguration();
+        }
+
+        if (config.LogDeleteAfterDays > 0 && config.LogArchiveAfterDays >= config.LogDeleteAfterDays)
+        {
+            ImGui.TextColored(new System.Numerics.Vector4(1f, 0.75f, 0.3f, 1f), Loc.T("FileLog.ArchiveNeverHint"));
+        }
+
+        using (ImRaii.Disabled(plugin.IsLogMaintenanceRunning || (config.LogArchiveAfterDays <= 0 && config.LogDeleteAfterDays <= 0)))
+        {
+            if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.Broom, Loc.T("FileLog.RunNow")))
+            {
+                plugin.RunLogMaintenance(true);
+                folderSize = null;
+            }
+        }
+
+        if (plugin.LastLogMaintenanceResult is { } result)
+        {
+            ImGui.SameLine();
+            ImGui.TextDisabled(result);
+        }
+
+        if (sizeTask is { IsCompleted: true } done)
+        {
+            folderSize = done.IsCompletedSuccessfully ? done.Result : null;
+            sizeTask = null;
+        }
+
+        if (folderSize == null && sizeTask == null)
+        {
+            var folder = plugin.ChatLog.LogsFolderPath;
+            sizeTask = Task.Run(() => LogArchive.FolderSize(folder));
+        }
+
+        ImGui.TextDisabled(folderSize is { } size ? Loc.T("FileLog.FolderSize", LogArchive.FormatSize(size)) : Loc.T("FileLog.FolderSizeMeasuring"));
+        ImGui.SameLine();
+        if (ImGuiComponents.IconButton(FontAwesomeIcon.SyncAlt))
+        {
+            folderSize = null;
+        }
+
+        ImGui.SameLine();
+        if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.FolderOpen, Loc.T("FileLog.OpenFolder")))
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo { FileName = plugin.ChatLog.LogsFolderPath, UseShellExecute = true });
+            }
+            catch (Exception ex)
+            {
+                plugin.Log.Warning(ex, "[CelinesChat] Log-Ordner konnte nicht geöffnet werden.");
+            }
         }
     }
 }

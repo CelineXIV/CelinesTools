@@ -6,7 +6,6 @@ using Dalamud.Interface.Utility.Raii;
 
 namespace CelinesChat.Windows.SettingsPages;
 
-/// <summary>Mention keywords, taskbar flashing and the players hidden from the chat.</summary>
 internal sealed class MentionsPage
 {
     private readonly Plugin plugin;
@@ -107,49 +106,45 @@ internal sealed class MentionsPage
         ImGui.Separator();
         ImGui.TextUnformatted(Loc.T("Relation.Header"));
 
-        var favorites = config.HighlightFavorites;
-        if (ImGui.Checkbox(Loc.T("Relation.HighlightFavorites"), ref favorites))
+        DrawHint(Loc.T("Relation.PriorityHint"));
+        var order = plugin.RelationPriorityOrder();
+        int? moveUp = null;
+        int? moveDown = null;
+        for (var i = 0; i < order.Count; i++)
         {
-            config.HighlightFavorites = favorites;
+            using var rowId = ImRaii.PushId("relationPrio" + order[i]);
+            using (ImRaii.Disabled(i == 0))
+            {
+                if (ImGuiComponents.IconButton(FontAwesomeIcon.ArrowUp))
+                {
+                    moveUp = i;
+                }
+            }
+
+            ImGui.SameLine();
+            using (ImRaii.Disabled(i == order.Count - 1))
+            {
+                if (ImGuiComponents.IconButton(FontAwesomeIcon.ArrowDown))
+                {
+                    moveDown = i;
+                }
+            }
+
+            ImGui.SameLine();
+            ImGui.TextDisabled((i + 1) + ".");
+            ImGui.SameLine();
+            DrawRelationRow(config, order[i]);
+        }
+
+        if (moveUp is { } up)
+        {
+            (order[up - 1], order[up]) = (order[up], order[up - 1]);
             plugin.OnRelationSettingsChanged();
         }
-
-        ImGui.SameLine();
-        var favoriteColor = config.FavoriteNameColor;
-        if (ImGui.ColorEdit4("##favoriteColor", ref favoriteColor, ImGuiColorEditFlags.NoInputs | ImGuiColorEditFlags.AlphaPreviewHalf))
+        else if (moveDown is { } down)
         {
-            config.FavoriteNameColor = favoriteColor;
-            plugin.SaveConfiguration();
-        }
-
-        var friends = config.HighlightFriends;
-        if (ImGui.Checkbox(Loc.T("Relation.HighlightFriends"), ref friends))
-        {
-            config.HighlightFriends = friends;
+            (order[down + 1], order[down]) = (order[down], order[down + 1]);
             plugin.OnRelationSettingsChanged();
-        }
-
-        ImGui.SameLine();
-        var friendColor = config.FriendNameColor;
-        if (ImGui.ColorEdit4("##friendColor", ref friendColor, ImGuiColorEditFlags.NoInputs | ImGuiColorEditFlags.AlphaPreviewHalf))
-        {
-            config.FriendNameColor = friendColor;
-            plugin.SaveConfiguration();
-        }
-
-        var fc = config.HighlightFcMembers;
-        if (ImGui.Checkbox(Loc.T("Relation.HighlightFc"), ref fc))
-        {
-            config.HighlightFcMembers = fc;
-            plugin.OnRelationSettingsChanged();
-        }
-
-        ImGui.SameLine();
-        var fcColor = config.FcMemberNameColor;
-        if (ImGui.ColorEdit4("##fcColor", ref fcColor, ImGuiColorEditFlags.NoInputs | ImGuiColorEditFlags.AlphaPreviewHalf))
-        {
-            config.FcMemberNameColor = fcColor;
-            plugin.SaveConfiguration();
         }
 
         var icons = config.ShowRelationIcons;
@@ -288,6 +283,72 @@ internal sealed class MentionsPage
         else if (changedKey != null && changedText.Trim().Length > 0)
         {
             plugin.SetPlayerNote(changedKey, changedText);
+        }
+    }
+
+    private void DrawRelationRow(Configuration config, int relation)
+    {
+        switch (relation)
+        {
+            case Plugin.RelationFavorite:
+            {
+                var favorites = config.HighlightFavorites;
+                if (ImGui.Checkbox(Loc.T("Relation.HighlightFavorites"), ref favorites))
+                {
+                    config.HighlightFavorites = favorites;
+                    plugin.OnRelationSettingsChanged();
+                }
+
+                ImGui.SameLine();
+                var favoriteColor = config.FavoriteNameColor;
+                if (ImGui.ColorEdit4("##favoriteColor", ref favoriteColor, ImGuiColorEditFlags.NoInputs | ImGuiColorEditFlags.AlphaPreviewHalf))
+                {
+                    config.FavoriteNameColor = favoriteColor;
+                    plugin.SaveConfiguration();
+                }
+
+                break;
+            }
+
+            case Plugin.RelationFriend:
+            {
+                var friends = config.HighlightFriends;
+                if (ImGui.Checkbox(Loc.T("Relation.HighlightFriends"), ref friends))
+                {
+                    config.HighlightFriends = friends;
+                    plugin.OnRelationSettingsChanged();
+                }
+
+                ImGui.SameLine();
+                var friendColor = config.FriendNameColor;
+                if (ImGui.ColorEdit4("##friendColor", ref friendColor, ImGuiColorEditFlags.NoInputs | ImGuiColorEditFlags.AlphaPreviewHalf))
+                {
+                    config.FriendNameColor = friendColor;
+                    plugin.SaveConfiguration();
+                }
+
+                break;
+            }
+
+            default:
+            {
+                var fc = config.HighlightFcMembers;
+                if (ImGui.Checkbox(Loc.T("Relation.HighlightFc"), ref fc))
+                {
+                    config.HighlightFcMembers = fc;
+                    plugin.OnRelationSettingsChanged();
+                }
+
+                ImGui.SameLine();
+                var fcColor = config.FcMemberNameColor;
+                if (ImGui.ColorEdit4("##fcColor", ref fcColor, ImGuiColorEditFlags.NoInputs | ImGuiColorEditFlags.AlphaPreviewHalf))
+                {
+                    config.FcMemberNameColor = fcColor;
+                    plugin.SaveConfiguration();
+                }
+
+                break;
+            }
         }
     }
 

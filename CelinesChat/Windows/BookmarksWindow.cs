@@ -9,7 +9,6 @@ using CelinesChat.Services;
 
 namespace CelinesChat.Windows;
 
-/// <summary>Messages the user bookmarked (right-click a message), newest first.</summary>
 internal sealed class BookmarksWindow : Window
 {
     private readonly Plugin plugin;

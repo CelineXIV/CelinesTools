@@ -11,11 +11,8 @@ using Newtonsoft.Json.Linq;
 
 namespace CelinesChat.Windows.SettingsPages;
 
-/// <summary>Save all settings to a file and load them back (new PC, broken config, ...).</summary>
 internal sealed class BackupPage
 {
-    // Login secrets of the web client stay on this PC - never written into a backup, and an import
-    // keeps whatever this PC currently has.
     private static readonly string[] ExcludedProperties =
     {
         nameof(Configuration.WebClientAuthCode),
@@ -101,7 +98,6 @@ internal sealed class BackupPage
         }
     }
 
-    /// <summary>The file dialog is its own ImGui window - drawn every frame the settings window is.</summary>
     public void DrawDialogs() => fileDialog.Draw();
 
     private void Export()

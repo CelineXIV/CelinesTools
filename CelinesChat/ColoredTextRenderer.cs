@@ -76,9 +76,6 @@ internal static class ColoredTextRenderer
         }
     }
 
-    /// Same as Draw/DrawRich, but computes the (word, kind, link, foreground) breakdown once per
-    /// entry and reuses it on every later call instead of re-tokenizing entry.Text/entry.Payloads
-    /// from scratch every frame - see ChatLogEntry.CachedRuns' own remarks for why this matters.
     public static void DrawForEntry(
         Services.ChatLogEntry entry,
         Vector4 defaultColor,
@@ -160,15 +157,6 @@ internal static class ColoredTextRenderer
                 case RawPayload raw when raw.Equals(RawPayload.LinkTerminator):
                     currentLink = null;
 
-                    // A link's own foreground colour (an item's rarity colour, say) is meant to be
-                    // scoped to exactly that link's display text - reported as "linking an item
-                    // turned the rest of the whole message white too." The colour push and this
-                    // terminator both come from the same encoded link, but nothing guarantees a
-                    // matching UIForegroundPayload "disable" is actually present in what the game
-                    // sends for a link built by *another* player's client (Dalamud's own link-
-                    // building API always emits one, but that's not proof the wire format always
-                    // does) - clearing here regardless of whether one showed up already means an
-                    // unmatched push can never bleed into the rest of the message either way.
                     foregroundStack.Clear();
                     break;
                 case ITextProvider textProvider:
@@ -261,9 +249,6 @@ internal static class ColoredTextRenderer
                 color = highlightColor ?? color;
             }
 
-            // Icon-glyph words need Dalamud's default font (the only one with these private-use-area
-            // glyphs - see IsIconGlyphWord's own remarks) and are never batched into a run with
-            // neighboring text, since a run is drawn as a single ImGui call under a single font.
             if (kind == TextSegmentKind.IconGlyph)
             {
                 FlushRun();
@@ -370,11 +355,6 @@ internal static class ColoredTextRenderer
         }
     }
 
-    /// Draws one icon-glyph word using Dalamud's default font instead of whatever custom chat font
-    /// is currently pushed - see IsIconGlyphWord's own remarks for why that's necessary at all.
-    /// FontDefault is ImGui's io.FontDefault, which Dalamud sets to its own bundled default font
-    /// (the one already proven to have these glyphs, since that's what briefly showed correctly
-    /// during the one frame a font rebuild left the custom chat font not-yet-pushed).
     private static void DrawIconGlyphUnit(string display, Vector4 color)
     {
         var defaultFont = ImGui.GetIO().FontDefault;
@@ -400,22 +380,11 @@ internal static class ColoredTextRenderer
         IconGlyph,
     }
 
-    // The game encodes small decorative glyphs (cross-world/linkshell markers, map-flag icons, item
-    // level badges, ...) as private-use-area characters directly in chat text, in the range Dalamud's
-    // own SeIconChar enum uses (roughly U+E020-U+E0E9). Dalamud's default UI font has these glyphs -
-    // the custom chat fonts this plugin lets users pick (bundled CJK/Inconsolata assets) do not, so
-    // without special handling they fell back to that font's "missing glyph" placeholder (which
-    // renders as a plain "=" in those particular fonts) instead of the actual icon.
     private const int IconGlyphRangeStart = 0xE020;
     private const int IconGlyphRangeEnd = 0xE0FF;
 
     private static bool IsIconGlyphChar(char c) => c >= IconGlyphRangeStart && c <= IconGlyphRangeEnd;
 
-    /// Splits one whitespace-delimited word into runs of consecutive icon-glyph characters vs.
-    /// everything else. The game glues these icon markers directly onto the text that follows them
-    /// (no space in between - e.g. a map-flag icon immediately followed by "Labyrinthos"), so they
-    /// often aren't their own whole word; a simple "is this entire word an icon" check missed those,
-    /// only catching icons that happened to be standalone words with real spaces around them.
     private static IEnumerable<(string Text, bool IsIconGlyph)> SplitIconGlyphRuns(string word)
     {
         var start = 0;
@@ -439,13 +408,6 @@ internal static class ColoredTextRenderer
     {
         var words = text.Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
 
-        // A message that's nothing but one word opening with '*' and never closing it anywhere in
-        // that same word reads exactly like the common chat convention of "*corrected" - a quick
-        // typo-fix note for the previous line, not the start of an RP action - not "*waves happily*"
-        // or even "*waves" followed by more words, both of which stay real emote formatting below.
-        // Each chat message gets its own fresh TokenizeState (see BuildPlainRuns/BuildRuns), so a
-        // genuine multi-message emote could never have been closed by a *later* message anyway -
-        // there's no continuation case this would be stealing from.
         var treatAsTypoCorrection = allowRpFormatting && words.Length == 1 && IsLikelyTypoCorrectionMarker(words[0]);
 
         foreach (var word in words)
@@ -466,15 +428,8 @@ internal static class ColoredTextRenderer
     private static bool IsLikelyTypoCorrectionMarker(string word)
         => word.Length > 1 && word[0] == '*' && word.IndexOf('*', 1) < 0;
 
-    // allowRpFormatting off (a channel that isn't configured for RP, e.g. a plugin/bot notice posted
-    // into an ordinary channel) skips the */( )/ state machine entirely rather than just discarding
-    // its result - a stray "(" from unrelated text would otherwise still flip OocDepth and misclassify
-    // whatever happens to follow it, even though nothing here is ever actually colored as Ooc/Emote.
-    // Mentions stay recognized regardless - "your name got mentioned" isn't specific to roleplay.
     private static TextSegmentKind ClassifySegment(string word, string mentionTerm, TokenizeState state, bool allowRpFormatting = true)
     {
-        // mentionTerm may hold several newline-separated terms - first name plus the user's own
-        // keywords (see Services.MentionMatcher).
         var isMention = !string.IsNullOrEmpty(mentionTerm) && Services.MentionMatcher.MatchesToken(StripPunctuation(word), mentionTerm);
         if (isMention)
         {
@@ -518,15 +473,6 @@ internal static class ColoredTextRenderer
         return isOoc ? TextSegmentKind.Ooc : (isEmote ? TextSegmentKind.Emote : TextSegmentKind.Default);
     }
 
-    // A word is only safe to colour as one whole Emote run if neither edge leaves real, non-
-    // asterisk content sitting "outside" the boundary its own asterisk represents - e.g. "bla*"
-    // (asterisk glued directly onto unrelated preceding text with no space) used to colour "bla"
-    // itself as part of the emote too, since a lone word.Contains('*') check has no idea *where*
-    // in the word the asterisk actually sits. Tokenize only ever splits on whitespace, so a mid-
-    // word asterisk can't be carved into its own run here without risking a stray rendered space
-    // where the source text had none (the same trade-off SplitIconGlyphRuns already accepts for
-    // icon glyphs) - falling back to Default for a "dirty" edge undercolours that rare case
-    // instead, which is the safer direction to get wrong.
     private static bool IsWholeWordEmote(string word, bool startedInEmote, bool endedInEmote)
     {
         var firstStar = word.IndexOf('*');

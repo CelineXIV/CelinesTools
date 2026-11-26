@@ -7,21 +7,13 @@ using Lumina.Excel.Sheets;
 
 namespace CelinesChat.Services;
 
-/// <summary>
-/// "Right-click a friend's name in chat -> Estate Teleportation." Friend detection goes through
-/// InfoProxyFriendList.GetEntryByName; the trigger itself is
-/// AgentFriendlist.OpenFriendEstateTeleportation(contentId) - a small, purpose-built native function
-/// that needs only the friend's ContentId (also read straight off InfoProxyFriendList's CharacterData).
-/// This replaced an earlier approach that opened the Friend List's own right-click context menu and
-/// clicked through it by simulated FireCallback calls - that worked, but only while the Friend List
-/// window itself happened to be open on screen. This dedicated agent call needs no UI open at all.
-/// </summary>
 internal sealed unsafe class EstateTeleportService
 {
     private readonly IDataManager dataManager;
     private readonly IPluginLog log;
 
     private Dictionary<string, ushort>? worldIdsByName;
+    private Dictionary<ushort, string>? worldNamesById;
 
     public EstateTeleportService(IDataManager dataManager, IPluginLog log)
     {
@@ -29,10 +21,6 @@ internal sealed unsafe class EstateTeleportService
         this.log = log;
     }
 
-    /// <summary>
-    /// True if the given character is on the local player's Friend List. Works regardless of whether
-    /// the Friend List window is open or the character is currently nearby.
-    /// </summary>
     public bool IsFriend(string name, string? world)
     {
         if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(world))
@@ -93,6 +81,38 @@ internal sealed unsafe class EstateTeleportService
         log.Info($"[CelinesChat][EstateTeleport] Anwesen-Teleport fuer '{name}' ausgeloest.");
     }
 
+    public List<(ulong ContentId, string Name, string? World)> GetFriends()
+    {
+        var result = new List<(ulong, string, string?)>();
+        var proxy = InfoProxyFriendList.Instance();
+        if (proxy == null)
+        {
+            return result;
+        }
+
+        worldIdsByName ??= BuildWorldIdLookup();
+        var count = proxy->GetEntryCount();
+        for (uint i = 0; i < count; i++)
+        {
+            var friend = proxy->GetEntry(i);
+            if (friend == null || friend->ContentId == 0)
+            {
+                continue;
+            }
+
+            var name = friend->NameString;
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                continue;
+            }
+
+            worldNamesById!.TryGetValue(friend->HomeWorld, out var world);
+            result.Add((friend->ContentId, name, world));
+        }
+
+        return result;
+    }
+
     private bool TryGetWorldId(string worldName, out ushort worldId)
     {
         worldIdsByName ??= BuildWorldIdLookup();
@@ -102,6 +122,7 @@ internal sealed unsafe class EstateTeleportService
     private Dictionary<string, ushort> BuildWorldIdLookup()
     {
         var lookup = new Dictionary<string, ushort>(StringComparer.OrdinalIgnoreCase);
+        worldNamesById = new Dictionary<ushort, string>();
 
         try
         {
@@ -112,6 +133,7 @@ internal sealed unsafe class EstateTeleportService
                 if (!string.IsNullOrEmpty(name))
                 {
                     lookup[name] = (ushort)row.RowId;
+                    worldNamesById[(ushort)row.RowId] = name;
                 }
             }
         }

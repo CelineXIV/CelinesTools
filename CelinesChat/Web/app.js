@@ -1,38 +1,13 @@
 "use strict";
 
-// Chat text (sender names, message segments, whisper/party names, linkshell names) is untrusted
-// (any player, or the player's own game data, can contain arbitrary text) - every place it reaches
-// the DOM below goes through textContent/createTextNode, never innerHTML/insertAdjacentHTML. Keep it
-// that way if you touch this file - it's the one thing standing between a hostile chat message (or a
-// maliciously-named linkshell) and script execution in whoever's browser is viewing this page.
-
-// Flat (non-numbered, non-whisper) channels, in the same order the in-game channel picker uses
-// (ChatWindow.DrawChannelPickerButton) - Whisper gets its own section (free text + suggestions) and
-// Linkshell/CrossWorldLinkshell get their own numbered sections, both rendered separately below.
 const FLAT_CHANNELS = ["Say", "Party", "Alliance", "Yell", "Shout", "FreeCompany", "PvpTeam", "NoviceNetwork"];
 
-// How long with no received event (including the server's own heartbeat - see WebServerService)
-// before the connection is treated as dead and force-reconnected. Well above the 15s heartbeat
-// interval so normal jitter never trips it, but short enough that a silently-stalled connection
-// (the "Chat2 sometimes stops updating" failure mode this exists to catch) doesn't sit broken for
-// long - a native TCP-level drop is already handled by EventSource's own reconnect logic on its
-// own; this specifically covers "the connection looks alive but nothing is actually arriving."
 const WATCHDOG_TIMEOUT_MS = 40_000;
 
-// Textarea auto-grow cap, in CSS pixels - roughly 6 lines at the compose box's own font size/line
-// height, matching the in-game compose box's own general feel without letting one huge paste push
-// the whole layout (and therefore the message list) around unpredictably.
 const COMPOSE_MAX_HEIGHT_PX = 168;
 
-// Oldest messages are dropped from the page beyond this - in a long session the list otherwise
-// grew without bound, slowly eating memory and making scrolling sluggish on a phone. The plugin
-// keeps its own full history; this is only what this page keeps rendered.
 const MAX_RENDERED_MESSAGES = 500;
 
-// Saved design presets - purely a per-device browser preference (localStorage), not something the
-// plugin's own Configuration knows or needs to know about. bg/accent here are only used to paint
-// each option's own preview swatch in the design sheet; the actual page colours come from the
-// matching html[data-theme="..."] block in styles.css.
 const THEME_STORAGE_KEY = "celineschat-theme";
 const THEMES = [
   { id: "dark", label: "Dark", bg: "#16181d", accent: "#4a9eff" },
@@ -48,18 +23,14 @@ function applyTheme(themeId) {
   try {
     localStorage.setItem(THEME_STORAGE_KEY, theme);
   } catch {
-    // Private browsing / storage disabled - the choice just won't persist across reloads.
   }
 }
 
-// Applied immediately at script load (before main()/DOMContentLoaded) so the very first paint
-// already uses the saved theme instead of flashing the default dark palette first.
 (function initTheme() {
   let saved = "dark";
   try {
     saved = localStorage.getItem(THEME_STORAGE_KEY) || "dark";
   } catch {
-    // Same as above - falls back to the default theme silently.
   }
 
   applyTheme(saved);
@@ -69,16 +40,19 @@ const state = {
   source: null,
   lastEventAt: 0,
   watchdogTimer: null,
-  view: null, // last WebViewDto received
-  channelOptions: null, // last WebChannelOptionsDto received (linkshells/CWLS/party members)
+  view: null,
+  channelOptions: null,
   sheetOpen: false,
   themeSheetOpen: false,
   sendErrorTimer: null,
-  unread: 0, // messages/whispers that arrived while the page was in the background
+  unread: 0,
   searchTerm: "",
+  loadedCount: 0,
+  hasMore: false,
+  loadingOlder: false,
 };
 
-// ----- Notifications: tab-title counter, sound, vibration -----
+const HISTORY_PAGE_SIZE = 80;
 
 const NOTIFY_SOUND_KEY = "celineschat-notify-sound";
 const NOTIFY_VIBRATE_KEY = "celineschat-notify-vibrate";
@@ -98,7 +72,6 @@ function writeFlag(key, value) {
   try {
     localStorage.setItem(key, value ? "1" : "0");
   } catch {
-    // Private mode etc. - the setting just isn't remembered.
   }
 }
 
@@ -124,8 +97,6 @@ function resetUnread() {
   }
 }
 
-// Browsers only allow audio after the user interacted with the page - so the audio context is
-// created on the first tap/key press and reused afterwards.
 function unlockAudio() {
   if (audioContext) {
     if (audioContext.state === "suspended") {
@@ -146,7 +117,6 @@ function playNotifySound(kind) {
     return;
   }
 
-  // Two short tones - higher for a whisper, lower for a mention.
   const tones = kind === "whisper" ? [880, 1175] : [660, 880];
   const start = audioContext.currentTime;
   tones.forEach((frequency, index) => {
@@ -165,7 +135,6 @@ function playNotifySound(kind) {
 }
 
 function onNotify(info) {
-  // Messages in the open view are already counted by the "message" event.
   if (!info.inView) {
     countUnread();
   }
@@ -178,8 +147,6 @@ function onNotify(info) {
     navigator.vibrate(info.kind === "whisper" ? [120, 80, 120] : [150]);
   }
 }
-
-// ----- Search (filters the messages currently loaded) -----
 
 function messageMatchesSearch(row) {
   return state.searchTerm === "" || row.textContent.toLowerCase().includes(state.searchTerm);
@@ -233,9 +200,6 @@ async function main() {
   el("compose-text").addEventListener("keydown", onComposeKeyDown);
   el("compose-text").addEventListener("input", autoGrowTextarea);
   el("compose-text").addEventListener("focus", () => {
-    // Last-resort safety net on top of the visualViewport handling below - some browsers still
-    // leave the freshly-focused box a little off-screen for a frame or two while the keyboard
-    // animates in.
     setTimeout(() => el("compose-text").scrollIntoView({ block: "end" }), 50);
   });
 
@@ -249,6 +213,7 @@ async function main() {
 
   el("theme-button").addEventListener("click", openThemeSheet);
   el("search-button").addEventListener("click", toggleSearch);
+  setupOlderPaging();
   el("bookmarks-button").addEventListener("click", openBookmarkList);
   el("action-sheet-close").addEventListener("click", closeActionSheet);
   el("action-sheet").addEventListener("click", (ev) => {
@@ -289,11 +254,6 @@ function showChat() {
 async function onLoginSubmit(ev) {
   ev.preventDefault();
 
-  // The server rate-limits /api/auth per IP (10s cooldown) regardless of whether an attempt
-  // succeeds - a double-click/double-tap firing two overlapping submits would always get the
-  // second one rejected with a confusing "rate limit" error for what the user experienced as one
-  // single login attempt. Guarding here (rather than only rate-limiting server-side) means that
-  // never happens in the first place.
   const submitButton = ev.submitter ?? el("login-form").querySelector("button[type=submit]");
   if (submitButton?.disabled) {
     return;
@@ -304,9 +264,6 @@ async function onLoginSubmit(ev) {
   errorEl.hidden = true;
   if (submitButton) submitButton.disabled = true;
 
-  // fetch() has no built-in timeout - without this, a request that never gets a response (a
-  // server-side hang, a dropped connection that doesn't reset cleanly) leaves the user staring at
-  // a form that visibly does nothing forever, with no error to explain why.
   const timeout = AbortSignal.timeout(8_000);
 
   try {
@@ -333,15 +290,6 @@ async function onLoginSubmit(ev) {
   }
 }
 
-// ----- Viewport / on-screen-keyboard handling -----
-
-// The viewport meta tag's interactive-widget=resizes-content already tells modern Chrome/Android
-// WebView to shrink the visual viewport (and therefore 100dvh) for the on-screen keyboard instead
-// of overlaying it - but that hint isn't honoured everywhere (older WebViews, some iOS Safari
-// versions), which is exactly the "keyboard covers the compose box/Send button" bug reported. This
-// listens to window.visualViewport directly (supported far more broadly than the meta hint) and
-// drives an --app-height custom property as a JS-level fallback, so .screen tracks the *actual*
-// visible area either way.
 function setupViewportHandling() {
   if (!window.visualViewport) {
     return;
@@ -350,9 +298,6 @@ function setupViewportHandling() {
   const apply = () => {
     document.documentElement.style.setProperty("--app-height", `${window.visualViewport.height}px`);
 
-    // The visible area just changed size (keyboard opened/closed) - re-anchor the message list to
-    // the bottom if it was already effectively at the bottom, matching appendMessage's own
-    // "only follow if already following" behaviour rather than yanking a scrolled-up reader down.
     const list = el("message-list");
     if (list && list.scrollTop + list.clientHeight >= list.scrollHeight - 40) {
       list.scrollTop = list.scrollHeight;
@@ -369,8 +314,6 @@ function autoGrowTextarea() {
   textarea.style.height = "auto";
   textarea.style.height = `${Math.min(textarea.scrollHeight, COMPOSE_MAX_HEIGHT_PX)}px`;
 }
-
-// ----- SSE -----
 
 function connectEvents() {
   if (state.source) {
@@ -390,6 +333,7 @@ function connectEvents() {
   source.addEventListener("message", (ev) => {
     markAlive();
     appendMessage(JSON.parse(ev.data));
+    state.loadedCount++;
     countUnread();
   });
 
@@ -408,17 +352,17 @@ function connectEvents() {
     }
   });
 
-  // Sent right after "view" whenever the active tab/channel/whisper changes (from this device or
-  // any other) - replaces the message list with that view's own history, since "message" events
-  // only ever cover newly-arriving traffic from here on.
   source.addEventListener("history", (ev) => {
     markAlive();
     const list = el("message-list");
     list.textContent = "";
-    for (const msg of JSON.parse(ev.data)) {
+    const messages = JSON.parse(ev.data);
+    for (const msg of messages) {
       appendMessage(msg);
     }
 
+    state.loadedCount = messages.length;
+    state.hasMore = messages.length >= HISTORY_PAGE_SIZE;
     applySearch();
     list.scrollTop = list.scrollHeight;
   });
@@ -427,8 +371,6 @@ function connectEvents() {
 
   source.addEventListener("error", () => {
     setConnected(false);
-    // EventSource retries connecting on its own - the watchdog below is the backstop for the
-    // "looks connected but nothing arrives" case a native error event doesn't catch.
   });
 
   startWatchdog();
@@ -457,12 +399,23 @@ function setConnected(connected) {
   el("connection-dot").classList.toggle("connected", connected);
 }
 
-// ----- Rendering: messages -----
-
 function appendMessage(msg) {
   const list = el("message-list");
   const wasAtBottom = list.scrollTop + list.clientHeight >= list.scrollHeight - 40;
+  const row = buildMessageRow(msg);
+  list.appendChild(row);
 
+  while (list.childElementCount > MAX_RENDERED_MESSAGES) {
+    list.removeChild(list.firstElementChild);
+    state.hasMore = true;
+  }
+
+  if (wasAtBottom) {
+    list.scrollTop = list.scrollHeight;
+  }
+}
+
+function buildMessageRow(msg) {
   const row = document.createElement("div");
   row.className = "msg" + (msg.bookmarked ? " bookmarked" : "");
   row.dataset.sequence = String(msg.sequence);
@@ -517,7 +470,6 @@ function appendMessage(msg) {
     row.appendChild(span);
   }
 
-  // Tap a message (anywhere but a link) for its actions: bookmark, copy, the note about the sender.
   row.addEventListener("click", (ev) => {
     if (ev.target.closest(".link")) {
       return;
@@ -530,18 +482,59 @@ function appendMessage(msg) {
     row.classList.add("search-hidden");
   }
 
-  list.appendChild(row);
+  return row;
+}
 
-  while (list.childElementCount > MAX_RENDERED_MESSAGES) {
-    list.removeChild(list.firstElementChild);
+async function loadOlderMessages() {
+  if (state.loadingOlder || !state.hasMore) {
+    return;
   }
 
-  if (wasAtBottom) {
-    list.scrollTop = list.scrollHeight;
+  state.loadingOlder = true;
+  const list = el("message-list");
+  const indicator = document.createElement("div");
+  indicator.className = "older-loading";
+  indicator.textContent = "...";
+  list.insertBefore(indicator, list.firstChild);
+
+  try {
+    const res = await fetch("/api/history/older", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ skip: list.querySelectorAll(".msg").length, count: 50 }),
+    });
+    indicator.remove();
+    if (!res.ok) {
+      return;
+    }
+
+    const body = await res.json();
+    const before = list.scrollHeight;
+    const fragment = document.createDocumentFragment();
+    for (const msg of body.messages) {
+      fragment.appendChild(buildMessageRow(msg));
+    }
+
+    list.insertBefore(fragment, list.firstChild);
+    state.loadedCount += body.messages.length;
+    state.hasMore = body.hasMore;
+
+    list.scrollTop += list.scrollHeight - before;
+  } catch {
+    indicator.remove();
+  } finally {
+    state.loadingOlder = false;
   }
 }
 
-// ----- Rendering: tab strip -----
+function setupOlderPaging() {
+  const list = el("message-list");
+  list.addEventListener("scroll", () => {
+    if (list.scrollTop < 80) {
+      loadOlderMessages();
+    }
+  }, { passive: true });
+}
 
 function renderTabStrip() {
   const container = el("tab-strip");
@@ -583,8 +576,6 @@ function renderTabStrip() {
   }
 }
 
-// ----- Rendering: channel label + sheet -----
-
 function findChannelName(list, number) {
   return list?.find((c) => c.number === number)?.name ?? "";
 }
@@ -621,8 +612,6 @@ async function fetchChannelOptions() {
       renderChannelSheet();
     }
   } catch {
-    // Best-effort - the sheet still works with whatever it last had (or nothing, showing just bare
-    // numbers with no linkshell names) if this fails.
   }
 }
 
@@ -654,7 +643,6 @@ function renderChannelSheet() {
   const container = el("sheet-content");
   container.textContent = "";
 
-  // ----- Whisper -----
   const whisperInput = document.createElement("div");
   whisperInput.className = "sheet-whisper-input";
 
@@ -709,7 +697,6 @@ function renderChannelSheet() {
     container.appendChild(list);
   }
 
-  // ----- Flat channels -----
   container.appendChild(sheetSectionTitle("Channels"));
   const flatList = document.createElement("div");
   flatList.className = "sheet-option-list";
@@ -724,10 +711,8 @@ function renderChannelSheet() {
 
   container.appendChild(flatList);
 
-  // ----- Cross-world Linkshells -----
   appendNumberedChannelSection(container, "Cross-world Linkshells", "CrossWorldLinkshell", state.channelOptions?.crossWorldLinkshells ?? [], state.view?.crossWorldLinkshellNumber);
 
-  // ----- Linkshells -----
   appendNumberedChannelSection(container, "Linkshells", "Linkshell", state.channelOptions?.linkshells ?? [], state.view?.linkshellNumber);
 }
 
@@ -750,8 +735,6 @@ function appendNumberedChannelSection(container, title, channel, entries, active
 
   container.appendChild(list);
 }
-
-// ----- Rendering: design/theme sheet -----
 
 function openThemeSheet() {
   state.themeSheetOpen = true;
@@ -797,7 +780,6 @@ function renderThemeSheet() {
 
   container.appendChild(list);
 
-  // Notification options for this device (remembered in the browser).
   const options = document.createElement("div");
   options.className = "notify-options";
   options.appendChild(sheetSectionTitle("Notifications (whispers & mentions)"));
@@ -824,8 +806,6 @@ function makeToggle(text, key) {
   label.appendChild(document.createTextNode(text));
   return label;
 }
-
-// ----- Actions -----
 
 async function onSendSubmit(ev) {
   ev.preventDefault();
@@ -882,15 +862,10 @@ async function post(path, body, options) {
       options.onError(errorBody.error || "Something went wrong.");
     }
   } catch {
-    // A failed action request isn't fatal - the SSE watchdog above handles genuine connection
-    // loss; a one-off failed POST just means try again. onError above only fires for responses
-    // the server actually sent back (e.g. validation failures), not network-level failures.
   }
 }
 
 main();
-
-// ----- Message actions, bookmarks -----
 
 function openActionSheet(title) {
   el("action-sheet-title").textContent = title;
@@ -936,6 +911,22 @@ function openMessageSheet(msg, row) {
   const list = document.createElement("div");
   list.className = "sheet-option-list";
 
+  if (msg.canReply) {
+    list.appendChild(actionButton(msg.isWhisper ? "Reply (whisper)" : "Reply in " + msg.channelTag.replace(/[\[\]]/g, ""), async () => {
+      closeActionSheet();
+      await post("/api/reply", { sequence: msg.sequence }, { onError: showSendError });
+      el("compose-text")?.focus();
+    }));
+  }
+
+  if (msg.whisperTarget && !msg.isWhisper) {
+    list.appendChild(actionButton("Whisper " + msg.sender, async () => {
+      closeActionSheet();
+      await post("/api/view/whisper", { target: msg.whisperTarget }, { onError: showSendError });
+      el("compose-text")?.focus();
+    }));
+  }
+
   const bookmarked = row.classList.contains("bookmarked");
   list.appendChild(actionButton(bookmarked ? "Remove bookmark" : "Bookmark", async () => {
     closeActionSheet();
@@ -978,7 +969,6 @@ async function openBookmarkList() {
     const res = await fetch("/api/bookmarks");
     bookmarks = res.ok ? await res.json() : [];
   } catch {
-    // Shown as an empty list.
   }
 
   content.textContent = "";

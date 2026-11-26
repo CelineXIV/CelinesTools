@@ -28,8 +28,6 @@ internal sealed unsafe class ChatActivationWatcher : IDisposable
         }
     }
 
-    // A native hook detour: an exception escaping from here would crash the game, so anything
-    // unexpected falls back to letting the game handle the event itself.
     private byte ChatLogRefreshDetour(nint log, ushort eventId, AtkValue* value)
     {
         try

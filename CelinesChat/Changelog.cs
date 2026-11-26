@@ -22,5 +22,6 @@ internal static class Changelog
         ("1.1.0", "Performance, Bugfixes & C4T Design"),
         ("1.1.1", "Hotfix"),
         ("1.2.0", "New Big Update"),
+        ("1.3.0", "Optional Social Window"),
     };
 }

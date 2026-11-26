@@ -30,12 +30,6 @@ internal sealed class MessageQueueSender : IDisposable
         this.framework.Update += OnUpdate;
     }
 
-    /// <summary>
-    /// Appends to whatever is still being sent instead of replacing it - anything enqueued while a
-    /// multi-part post is still going out (a slash command, a message from the web client, ...) used
-    /// to silently drop the remaining parts of that post. The pacing also carries over, so the first
-    /// new message still waits out the delay after the last one that went out.
-    /// </summary>
     public void Enqueue(IEnumerable<byte[]> commands, int delayBetweenMessagesMs)
     {
         if (queue.Count == 0)
@@ -67,15 +61,12 @@ internal sealed class MessageQueueSender : IDisposable
             return;
         }
 
-        // Logged out mid-post: drop the rest rather than posting it from whichever character logs
-        // in next.
         if (!clientState.IsLoggedIn)
         {
             Cancel();
             return;
         }
 
-        // Chat input sent during a loading screen can get lost - wait until the zone is loaded.
         if (condition[ConditionFlag.BetweenAreas] || condition[ConditionFlag.BetweenAreas51])
         {
             return;
@@ -89,8 +80,6 @@ internal sealed class MessageQueueSender : IDisposable
         var (command, delayAfterMs) = queue.Dequeue();
         try
         {
-            // Last line of defence - everything that builds commands already keeps to this limit,
-            // but a line over it must never reach the game's chat box.
             if (command.Length > MessageSplitter.MaxChatLineBytes)
             {
                 log.Error($"[CelinesChat] Nachricht mit {command.Length} Bytes verworfen - das Spiel erlaubt hoechstens {MessageSplitter.MaxChatLineBytes}.");

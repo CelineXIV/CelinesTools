@@ -13,7 +13,6 @@ internal sealed class SecondaryChatWindow : Window
 {
     private static readonly Vector4 LinkColor = new(0.4f, 0.7f, 1f, 1f);
 
-    // See ChatWindow.BottomToleranceForNewMessagePx's own remarks.
     private const float BottomToleranceForNewMessagePx = 12f;
 
     private readonly Plugin plugin;
@@ -25,35 +24,23 @@ internal sealed class SecondaryChatWindow : Window
     private long lastBoundsChangeTicks;
     private bool boundsSavePending;
 
-    // See ChatWindow.lastSeenSequenceByView's own remarks - same bug, same fix: a single global
-    // watermark let this window's own cross-tab/whisper traffic race a lower-traffic view's
-    // watermark past a message before that view ever got credit for it as "new", silently
-    // suppressing auto-scroll-to-bottom for it specifically.
     private readonly Dictionary<string, long> lastSeenSequenceByView = new();
     private string lastViewKey = string.Empty;
 
-    // See ChatWindow.entryHeightCache's own remarks - same viewport-culling technique, same
-    // reasoning (skip the real per-word ImGui work for an entry outside the visible area).
     private readonly Dictionary<long, float> entryHeightCache = new();
     private readonly HashSet<long> provisionalHeightSequences = new();
 
-    // See ChatWindow.entryVariantCache.
     private readonly Dictionary<long, byte> entryVariantCache = new();
     private bool lastKnownFontAvailable = true;
 
-    // See ChatWindow.viewMatchingLiveEntriesBuffer's own remarks - reused every frame to avoid
-    // per-frame list allocation/growth.
     private readonly List<ChatLogEntry> viewMatchingLiveEntriesBuffer = new();
 
-    // See ChatWindow.liveEntriesBuffer's own remarks.
     private readonly List<ChatLogEntry> liveEntriesBuffer = new();
 
     private const long BoundsSaveDebounceMs = 400;
 
-    // Layout version last seen - see Plugin.InvalidateChatLayout.
     private int seenLayoutVersion = -1;
 
-    // Compose box at the bottom of this window.
     private string composeText = string.Empty;
     private string? composeError;
     private bool refocusCompose;
@@ -74,11 +61,6 @@ internal sealed class SecondaryChatWindow : Window
 
         Flags |= ImGuiWindowFlags.NoTitleBar;
 
-        // See ChatWindow's matching RespectCloseHotkey = false - without it, Escape closed this
-        // window outright (dumping every tab in it back onto the main window via OnClose), which for
-        // a window with no title bar and no close button felt like an accidental trap door rather
-        // than a deliberate action. Right-click on a tab now offers an explicit, deliberate way back
-        // instead (see DrawReturnToMainWindowContextMenu).
         RespectCloseHotkey = false;
     }
 
@@ -86,14 +68,6 @@ internal sealed class SecondaryChatWindow : Window
     {
         plugin.IsSecondaryChatInputActive = false;
 
-        // Only a close the user actually triggered (right-clicking a tab back to the main window,
-        // which empties this one) should return its remaining tabs and tear this window down. A
-        // close that happens to fire while the plugin itself is unloading/reloading (Plugin.
-        // IsDisposing), or because ApplyGameStateVisibility is hiding it for a cutscene/loading
-        // screen/GPose the same way it hides the main window (IsSecondaryWindowHiddenByGameState),
-        // must leave SecondaryChatTabIds/SecondaryChatWhisperTargets untouched - otherwise a reload
-        // or simply walking into a cutscene would silently dump every torn-off tab back onto the
-        // main window instead of restoring/reappearing exactly as it was.
         if (plugin.IsDisposing || plugin.IsSecondaryWindowHiddenByGameState)
         {
             return;
@@ -103,7 +77,6 @@ internal sealed class SecondaryChatWindow : Window
         onEmpty();
     }
 
-    // See C4tTheme - colours pushed in PreDraw, popped in PostDraw.
     private int c4tColorsPushed;
     private float currentOpacity = 1f;
 
@@ -123,18 +96,32 @@ internal sealed class SecondaryChatWindow : Window
 
     public override void Draw()
     {
+        if (!plugin.Configuration.ShowPerformanceOverlay)
+        {
+            DrawCore();
+            return;
+        }
+
+        var start = PerfStats.Start();
+        try
+        {
+            DrawCore();
+        }
+        finally
+        {
+            plugin.Perf.SecondaryWindow.Add(PerfStats.ElapsedMs(start));
+        }
+    }
+
+    private void DrawCore()
+    {
         C4tTheme.DrawDecorations(plugin.Configuration, currentOpacity);
 
-        // See ChatWindow.Draw's matching remarks - drawing proceeds either way; only caching a
-        // height measured with the wrong font is skipped, not the whole frame.
         using var chatFontScope = plugin.PushChatFont();
 
         var fontAvailableNow = plugin.IsChatFontAvailable;
         if (fontAvailableNow && !lastKnownFontAvailable && provisionalHeightSequences.Count > 0)
         {
-            // See ChatWindow.Draw's matching remarks - purge any heights that were measured with
-            // the wrong (fallback) font while it wasn't ready, so they get correctly re-measured
-            // immediately instead of drifting until the entry happens to scroll back into view.
             foreach (var seq in provisionalHeightSequences)
             {
                 entryHeightCache.Remove(seq);
@@ -147,7 +134,6 @@ internal sealed class SecondaryChatWindow : Window
 
         var config = plugin.Configuration;
 
-        // Something changed every message's height (e.g. a tab's timestamps toggled) - re-measure.
         if (plugin.LayoutVersion != seenLayoutVersion)
         {
             seenLayoutVersion = plugin.LayoutVersion;
@@ -228,8 +214,6 @@ internal sealed class SecondaryChatWindow : Window
 
         var lineHeight = ImGui.GetFrameHeight();
 
-        // See ChatWindow.DrawLogTabBar's matching remarks - same plain opacity fill behind the whole
-        // tab strip row, same TabStripBackgroundOpacity config value shared with the main window.
         var tabBarOrigin = ImGui.GetCursorScreenPos();
         ImGui.GetWindowDrawList().AddRectFilled(
             tabBarOrigin,
@@ -381,10 +365,6 @@ internal sealed class SecondaryChatWindow : Window
         }
     }
 
-    // Right-click on a torn-off tab to send it back to the main window one at a time - a deliberate
-    // alternative to closing this whole window, now that RespectCloseHotkey = false means Escape no
-    // longer does that for you. Moving the very last tab out closes this window on its own (see the
-    // myTabs/myWhispers-both-empty check above), so there's no separate "close" action needed either.
     private static void DrawReturnToMainWindowContextMenu(string popupId, Action onReturn)
     {
         using var popup = ImRaii.ContextPopupItem(popupId);
@@ -414,9 +394,6 @@ internal sealed class SecondaryChatWindow : Window
         var viewChanged = viewKey != lastViewKey;
         lastViewKey = viewKey;
 
-        // See ChatWindow.DrawChatLogEntries' matching remarks - a small (well under one line's
-        // height) tolerance, not exact equality: SetScrollHereY(1f) itself can settle a handful of
-        // pixels short of GetScrollMaxY(), and exact equality never recovers from that afterward.
         var nearBottomBeforeDraw = ImGui.GetScrollMaxY() - ImGui.GetScrollY() <= BottomToleranceForNewMessagePx;
 
         var hasNewEntries = false;
@@ -425,20 +402,9 @@ internal sealed class SecondaryChatWindow : Window
         var viewSeenBefore = lastSeenSequenceByView.GetValueOrDefault(viewKey, 0L);
         var viewSeenMax = viewSeenBefore;
 
-        // See ChatWindow.DrawChatLogEntries' matching remarks - a locked copy, not the live Entries
-        // property, taken once here into a reused buffer.
         plugin.ChatLog.CopyEntriesTo(liveEntriesBuffer);
         var liveEntries = liveEntriesBuffer;
 
-        // See ChatWindow.DrawChatLogEntries' matching remarks - filter to the active view *before*
-        // capping (walking backward and stopping once the cap is filled, not collecting every match
-        // forward and trimming afterward), reusing viewMatchingLiveEntriesBuffer across frames
-        // instead of allocating a new list every frame. Capping the raw global stream first meant a
-        // busy, unrelated tab/channel's own volume alone could push this (possibly much lower-
-        // traffic) view's recent messages out of the "last 600" window entirely, while older file-
-        // preloaded whisper history (not subject to this cap) kept showing - "newest messages
-        // vanish, old ones stay". Allocating a fresh, potentially-large list every frame before
-        // trimming it was also producing enough GC pressure to show up as an actual UI hitch.
         const int maxLiveEntriesConsidered = 600;
         viewMatchingLiveEntriesBuffer.Clear();
         for (var i = liveEntries.Count - 1; i >= 0 && viewMatchingLiveEntriesBuffer.Count < maxLiveEntriesConsidered; i--)
@@ -459,7 +425,6 @@ internal sealed class SecondaryChatWindow : Window
 
         for (var i = 0; i < entries.Count; i++)
         {
-            // See ChatWindow.DrawChatLogEntries - repeats drawn once with "×N", same-sender blocks grouped.
             var last = i;
             if (config.CollapseRepeatedMessages)
             {
@@ -508,8 +473,6 @@ internal sealed class SecondaryChatWindow : Window
             lastShownEntry = entry;
             var variant = MessageGrouping.Variant(continuation, trailingSpacing, repeatCount);
 
-            // See ChatWindow.DrawChatLogEntries' matching remarks - ImGui.IsItemVisible() against a
-            // Dummy of the cached height, not a hand-rolled scrollY/viewHeight comparison.
             var hadCache = entryHeightCache.TryGetValue(entry.Sequence, out var cachedHeight)
                 && entryVariantCache.TryGetValue(entry.Sequence, out var cachedVariant)
                 && cachedVariant == variant;
@@ -530,10 +493,6 @@ internal sealed class SecondaryChatWindow : Window
             DrawEntry(entry, config, availableWidth, showingWhisper, showTimestamps, repeatCount, continuation, trailingSpacing);
             var newHeight = ImGui.GetCursorPosY() - entryTop;
 
-            // See ChatWindow.DrawChatLogEntries' matching remarks - only skip caching if an entry
-            // already had a real, correctly-measured height to protect; an uncached entry still
-            // needs something written so culling has a height to work with at all. Either way,
-            // mark it provisional so Draw's own font-restored check can fix it up immediately.
             if (!plugin.IsChatFontAvailable)
             {
                 provisionalHeightSequences.Add(entry.Sequence);
@@ -559,11 +518,6 @@ internal sealed class SecondaryChatWindow : Window
         }
         else if (hasNewOwnMessageInView || (hasNewEntries && nearBottomBeforeDraw))
         {
-            // See ChatWindow.DrawChatLogEntries' matching remarks - only snaps when something
-            // actually new arrived while already near the bottom, not just because the current
-            // position happens to be close to (but not exactly at) GetScrollMaxY(). Snapping on
-            // proximity alone hijacked manual scroll-back-toward-bottom gestures the instant they
-            // crossed into range.
             ImGui.SetScrollHereY(1f);
         }
 
@@ -692,10 +646,6 @@ internal sealed class SecondaryChatWindow : Window
         }
     }
 
-    /// <summary>
-    /// One-line compose box: whisper views send to their partner, fixed tabs to the channel picked
-    /// with the button on the left (remembered per tab).
-    /// </summary>
     private void DrawCompose(Configuration config)
     {
         var showingWhisper = activeWhisperTarget.Length > 0;
@@ -831,7 +781,6 @@ internal sealed class SecondaryChatWindow : Window
         {
             ChatChannel.Linkshell => NumberedLabel(Loc.T("Channel.Linkshell"), linkshellNumber, NativeChannels.GetExistingLinkshells()),
             ChatChannel.CrossWorldLinkshell => NumberedLabel(Loc.T("Channel.CrossWorldLinkshell"), crossWorldLinkshellNumber, NativeChannels.GetExistingCrossWorldLinkshells()),
-            // Whisper without a target isn't possible from a fixed tab - fall back to Say.
             _ => Loc.T("Channel.Say"),
         };
     }
@@ -842,8 +791,6 @@ internal sealed class SecondaryChatWindow : Window
         return match.Name != null ? $"{baseName} [{number}]: {match.Name}" : $"{baseName} [{number}]";
     }
 
-    // Same match as the main window's whisper tabs (minus their per-tab "clear" cutoff, which this
-    // window never had) - see ChatWindow.MatchesWhisperTargetIgnoringCutoff.
     private static bool MatchesWhisper(ChatLogEntry entry, string target) =>
         ChatWindow.MatchesWhisperTargetIgnoringCutoff(entry, target);
 }

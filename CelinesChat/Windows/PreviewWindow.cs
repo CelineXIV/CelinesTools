@@ -20,12 +20,8 @@ internal sealed class PreviewWindow : Window
         };
     }
 
-    // When the "Inside" preview mode is selected, ChatWindow draws the same preview content
-    // embedded directly below the compose box instead - this floating window stays fully closed in
-    // that mode (regardless of its own manually-toggled IsOpen state) so there's never a duplicate.
     public override bool DrawConditions() => plugin.Configuration.PreviewPosition == PreviewPosition.Window;
 
-    // See C4tTheme - colours pushed in PreDraw, popped in PostDraw.
     private int c4tColorsPushed;
     private float currentOpacity = 1f;
 
@@ -47,9 +43,6 @@ internal sealed class PreviewWindow : Window
     {
         C4tTheme.DrawDecorations(plugin.Configuration, currentOpacity);
 
-        // See ChatWindow.Draw's matching remarks - drawing proceeds either way. This window has no
-        // cached heights to worry about (it redraws its preview text fresh every frame), so there's
-        // nothing further to guard here beyond just letting it draw with whatever font is active.
         using var chatFontScope = plugin.PushChatFont();
 
         var config = plugin.Configuration;
@@ -64,13 +57,6 @@ internal sealed class PreviewWindow : Window
         var availableWidth = ImGui.GetContentRegionAvail().X;
         for (var i = 0; i < chunks.Count; i++)
         {
-            // Goes through the exact same activation trigger the physical Enter key uses (see
-            // Plugin.RequestComposeCursorActivation's own remarks) rather than nudging ChatWindow's
-            // fields directly from here - reacting to a click inside THIS separate window only ever
-            // won the cross-window focus fight one frame too late, after PreviewWindow itself already
-            // claimed it that frame, leaving the compose box positioned correctly but not typable
-            // without an extra Enter press or click. The "Inside" preview mode (ChatWindow.cs) doesn't
-            // need this at all, since there both live in the same window to begin with.
             PreviewRenderer.DrawMappedChunk(chunks[i], config, availableWidth, plugin.RequestComposeCursorActivation, i * 10000);
             ImGui.TextDisabled(Loc.T("Compose.CharCount", chunks[i].Text.Length, config.MaxMessageLength));
             if (i < chunks.Count - 1)

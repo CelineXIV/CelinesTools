@@ -7,7 +7,6 @@ using CelinesChat.Services;
 
 namespace CelinesChat;
 
-// Persisted as numbers - new values only ever at the end.
 public enum ChatFontChoice
 {
     Default,
@@ -15,19 +14,15 @@ public enum ChatFontChoice
     NotoSansCjkMedium,
     InconsolataRegular,
 
-    // Ships with the plugin (Fonts folder, SIL OFL) - the C4T design's font.
     Rajdhani,
 }
 
-/// <summary>Overall look of the chat windows. Standard is the plugin's original design. Persisted as numbers - append only.</summary>
 public enum ChatDesign
 {
     Standard,
 
-    // Blue variant.
     C4T,
 
-    // Purple/pink - the original C4T colours.
     C4TPurple,
 }
 
@@ -40,14 +35,6 @@ public enum ToolbarIconPack
     FrostedGlass,
 }
 
-/// <summary>
-/// Where the message-preview appears - matches Chat2's own Preview position setting. "Window" is a
-/// separate, freely movable/resizable floating window (CelinesChat's long-standing default);
-/// "Inside" embeds the same preview directly in the compose area of the main chat window itself.
-/// Only "Inside" guarantees clicking a character in the preview lets you keep typing immediately
-/// afterward - a separate window briefly steals ImGui's keyboard focus on click, and getting it back
-/// to the compose box takes one more Enter press or click, a limitation "Window" mode still has.
-/// </summary>
 public enum PreviewPosition
 {
     Window,
@@ -74,6 +61,22 @@ public class Snippet
     public string Name { get; set; } = string.Empty;
 
     public string Text { get; set; } = string.Empty;
+
+    public string Shortcut { get; set; } = string.Empty;
+}
+
+public class SentHistoryItem
+{
+    public string Text { get; set; } = string.Empty;
+
+    public string Channel { get; set; } = string.Empty;
+}
+
+public enum TabNotifyMode
+{
+    All,
+    MentionsOnly,
+    Never,
 }
 
 public class ChannelSoundSetting
@@ -85,6 +88,8 @@ public class ChannelSoundSetting
 
 public class CharacterState
 {
+    public List<CachedFriend> FriendCache { get; set; } = new();
+
     public ChatChannel LastChannel { get; set; } = ChatChannel.Say;
 
     public string LastWhisperTarget { get; set; } = string.Empty;
@@ -95,7 +100,6 @@ public class CharacterState
 
     public HashSet<string> MutedWhisperTargets { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>Players seen writing in this character's FC chat ("Name@World") - used to highlight FC members elsewhere.</summary>
     public HashSet<string> KnownFcMembers { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     public int LinkshellNumber { get; set; } = 1;
@@ -108,11 +112,8 @@ public class CharacterState
 
     public bool SnippetsMigrated { get; set; }
 
-    // Which view (fixed tab / whisper tab / novice network) was active when this character last
-    // closed or logged out - restored on the next login so it "feels the same" as before, instead of
-    // always falling back to the first fixed tab. Exactly one of these three should be set at once;
-    // ChatWindow.RestoreLastActiveView checks them in this same order (whisper, then novice network,
-    // then fixed tab) and clears the other two whenever it saves a new one.
+    public List<SentHistoryItem> SentHistory { get; set; } = new();
+
     public Guid? LastActiveTabId { get; set; }
 
     public string? LastActiveWhisperTarget { get; set; }
@@ -140,7 +141,6 @@ public class Configuration : IPluginConfiguration
 
     public bool ShowSenderStatusIcons { get; set; } = true;
 
-    /// <summary>Off by default, Phase 1 (see EstateTeleportService) - shows an "Estate Teleportation" entry in a chat message's right-click menu when the sender is a friend. Not wired up to actually teleport yet.</summary>
     public bool EstateTeleportContextMenuEnabled { get; set; }
 
     public Vector4 ValidCommandColor { get; set; } = new(0.8830769f, 0.44017988f, 0f, 1f);
@@ -212,22 +212,8 @@ public class Configuration : IPluginConfiguration
 
     public int MentionSoundEffect { get; set; } = 6;
 
-    /// <summary>
-    /// Per-channel sound notifications beyond the two dedicated Whisper/Mention settings above (kept
-    /// separate rather than folded into this dictionary, so nothing changes for users who already
-    /// have those configured). Keyed by ChatCategory rather than XivChatType so all of a linkshell's
-    /// numbered variants (or any other multi-XivChatType category) share one setting. Off (no entry)
-    /// for every channel by default - a user specifically asked for "Say" to get a sound, but that's
-    /// a preference most people would not want turned on for them by default.
-    /// </summary>
     public Dictionary<ChatCategory, ChannelSoundSetting> ChannelSounds { get; set; } = new();
 
-    /// <summary>
-    /// Channels where */emote/ and ((OOC)) text gets its own color instead of rendering as plain
-    /// default-colored text - defaults to the channels people actually roleplay in (say, party,
-    /// linkshells, whispers), not system/notice/combat-log categories a plugin or the game itself
-    /// posts into, where a coincidental "((" or "*" in unrelated text isn't RP formatting at all.
-    /// </summary>
     public HashSet<ChatCategory> RpFormattingCategories { get; set; } = new()
     {
         ChatCategory.Say,
@@ -237,9 +223,6 @@ public class Configuration : IPluginConfiguration
         ChatCategory.CrossWorldLinkshell,
     };
 
-    // Same "empty set means every slot" convention as ChatTab.IncludedLinkshellNumbers - a linkshell
-    // used for RP and one used for, say, a crafting-log-in/out FC alert are both just "Linkshell",
-    // and only the numbered slot tells them apart.
     public HashSet<int> RpFormattingLinkshellNumbers { get; set; } = new();
 
     public HashSet<int> RpFormattingCrossWorldLinkshellNumbers { get; set; } = new();
@@ -264,7 +247,6 @@ public class Configuration : IPluginConfiguration
         return true;
     }
 
-    /// <summary>Superseded by the separate ChatWindowLockPosition/ChatWindowLockSize below - kept only so Plugin's constructor can migrate an existing "fully locked" user into both of those the first time they load post-split, instead of silently unlocking the window on them.</summary>
     public bool ChatWindowLocked { get; set; }
 
     public bool ChatWindowLockPosition { get; set; }
@@ -289,10 +271,8 @@ public class Configuration : IPluginConfiguration
 
     public ChatDesign Design { get; set; } = ChatDesign.Standard;
 
-    /// <summary>C4T designs only: small logo at the start of the tab row.</summary>
     public bool ShowC4tLogo { get; set; } = true;
 
-    /// <summary>C4T designs only: faint logo centred behind the chat log.</summary>
     public bool ShowC4tWatermark { get; set; } = true;
 
     public ToolbarIconPack ToolbarIconPack { get; set; } = ToolbarIconPack.Classic;
@@ -309,10 +289,8 @@ public class Configuration : IPluginConfiguration
 
     public float ChatLogBackgroundOpacity { get; set; } = 0.496f;
 
-    /// <summary>Superseded by the separate TabStripBackgroundOpacity below - kept only so Plugin's constructor can migrate whatever value existing users already had into it the first time they load post-split, instead of silently resetting it to off.</summary>
     public float ChromeBackgroundOpacity { get; set; }
 
-    /// <summary>Off (fully transparent) by default - background fill behind the tab strip row, independent of TabStripBackgroundColor (which only tints individual tab buttons, not the strip itself) and of the main window opacity.</summary>
     public float TabStripBackgroundOpacity { get; set; } = -1f;
 
     public PreviewPosition PreviewPosition { get; set; } = PreviewPosition.Window;
@@ -335,83 +313,100 @@ public class Configuration : IPluginConfiguration
 
     public string WebClientAuthCode { get; set; } = string.Empty;
 
-    /// <summary>Superseded by WebClientSessions (tokens with a last-used time, so they can expire) - only read once to migrate existing logins.</summary>
     public HashSet<string> WebClientAuthStore { get; set; } = new();
 
-    /// <summary>Web client login token -> when it was last used (UTC). Unused for WebClientSessionDays and it expires.</summary>
     public Dictionary<string, DateTime> WebClientSessions { get; set; } = new();
 
     public int WebClientSessionDays { get; set; } = 30;
 
-    /// <summary>Extra words/names (nicknames, RP names, FC name, ...) that count as a mention, on top of the character's first name.</summary>
     public List<string> MentionKeywords { get; set; } = new();
 
-    /// <summary>Flash the game's taskbar button on an incoming whisper while the game isn't the active window.</summary>
     public bool FlashTaskbarOnWhisper { get; set; } = true;
 
-    /// <summary>Same, for a mention (first name or MentionKeywords).</summary>
     public bool FlashTaskbarOnMention { get; set; } = true;
 
-    /// <summary>Players hidden from this plugin's chat only ("Name@World", or "Name" for entries without a known world) - unlike the game's blacklist, nothing is sent to the server.</summary>
     public HashSet<string> HiddenPlayers { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>A "new messages" line where a tab's unread messages begin, when switching back to it.</summary>
     public bool ShowNewMessagesDivider { get; set; } = true;
 
-    /// <summary>A date line wherever the day changes between two messages in the log.</summary>
     public bool ShowDateSeparators { get; set; } = true;
 
-    /// <summary>Messages containing one of these words are hidden (per rule: all channels or only some).</summary>
     public List<WordFilterRule> WordFilters { get; set; } = new();
 
-    /// <summary>The same message from the same sender several times in a row is shown once, with "×N".</summary>
     public bool CollapseRepeatedMessages { get; set; } = true;
 
-    /// <summary>Consecutive messages from the same sender (within a few minutes) show the name only once.</summary>
     public bool GroupConsecutiveMessages { get; set; } = true;
 
-    /// <summary>Gap between wrapped lines of one message in px; -1 = the normal ImGui spacing.</summary>
     public float LineSpacing { get; set; } = -1f;
 
-    /// <summary>Extra gap between two messages in px; -1 = the normal spacing.</summary>
     public float MessageSpacing { get; set; } = -1f;
 
-    /// <summary>Private notes about players, keyed like HiddenPlayers ("Name@World" or "Name"). Shown when hovering the name.</summary>
     public Dictionary<string, string> PlayerNotes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>Messages the user bookmarked (a copy of the text - they outlive the chat log).</summary>
     public List<ChatBookmark> Bookmarks { get; set; } = new();
 
-    /// <summary>After being away (game in the background or /afk), a summary of whispers/mentions that came in meanwhile.</summary>
     public bool AwaySummaryEnabled { get; set; } = true;
 
-    /// <summary>How long away counts as "away" for the summary.</summary>
     public int AwaySummaryMinutes { get; set; } = 2;
 
-    /// <summary>Friends' names in their own colour.</summary>
     public bool HighlightFriends { get; set; } = true;
 
     public Vector4 FriendNameColor { get; set; } = new(0.55f, 0.78f, 1f, 1f);
 
-    /// <summary>FC members' names in their own colour (recognised once they've written in the FC chat).</summary>
     public bool HighlightFcMembers { get; set; } = true;
 
     public Vector4 FcMemberNameColor { get; set; } = new(0.55f, 0.88f, 0.6f, 1f);
 
-    /// <summary>A small symbol in front of the name: heart (favourite), people (friend), shield (FC member).</summary>
     public bool ShowRelationIcons { get; set; } = true;
 
-    /// <summary>Players the user marked as favourite ("Name@World" or "Name") - shown with a heart.</summary>
     public HashSet<string> FavoritePlayers { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     public bool HighlightFavorites { get; set; } = true;
 
+    public List<int> RelationPriority { get; set; } = new();
+
     public Vector4 FavoriteNameColor { get; set; } = new(1f, 0.55f, 0.78f, 1f);
 
-    /// <summary>
-    /// After an import (JsonConvert.PopulateObject with ObjectCreationHandling.Replace) the sets and
-    /// dictionaries come back with the default, case-sensitive comparer - put the intended one back.
-    /// </summary>
+    public bool SentHistoryPerChannel { get; set; } = true;
+
+    public bool SnippetShortcutsEnabled { get; set; } = true;
+
+    public bool ReplyHotkeyEnabled { get; set; } = true;
+
+    public bool PlayerCardOnClick { get; set; } = true;
+
+    public int LogArchiveAfterDays { get; set; }
+
+    public int LogDeleteAfterDays { get; set; }
+
+    public bool DiscordModeWhispers { get; set; }
+
+    public bool LodestoneAvatars { get; set; } = true;
+
+    public Dictionary<string, string> CustomAvatars { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public Dictionary<string, string> PlayerNicknames { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public bool SocialCardView { get; set; } = true;
+
+    public float SocialWindowOpacity { get; set; } = 0.92f;
+
+    public bool SocialGreyOffline { get; set; } = true;
+
+    public bool SocialOfflineCollapsed { get; set; }
+
+    public bool ReplaceSocialWindow { get; set; }
+
+    public bool PlayerCardInGameMenus { get; set; } = true;
+
+    public bool ShowNicknames { get; set; } = true;
+
+    public bool DetectNameChanges { get; set; } = true;
+
+    public Dictionary<ulong, KnownCharacter> KnownCharacters { get; set; } = new();
+
+    public bool ShowPerformanceOverlay { get; set; }
+
     internal void RestoreComparers()
     {
         WhisperColours = new Dictionary<string, Vector4>(WhisperColours, StringComparer.OrdinalIgnoreCase);
@@ -420,6 +415,8 @@ public class Configuration : IPluginConfiguration
         HiddenPlayers = new HashSet<string>(HiddenPlayers, StringComparer.OrdinalIgnoreCase);
         PlayerNotes = new Dictionary<string, string>(PlayerNotes, StringComparer.OrdinalIgnoreCase);
         FavoritePlayers = new HashSet<string>(FavoritePlayers, StringComparer.OrdinalIgnoreCase);
+        CustomAvatars = new Dictionary<string, string>(CustomAvatars, StringComparer.OrdinalIgnoreCase);
+        PlayerNicknames = new Dictionary<string, string>(PlayerNicknames, StringComparer.OrdinalIgnoreCase);
         foreach (var character in Characters.Values)
         {
             character.LockedWhisperTargets = new HashSet<string>(character.LockedWhisperTargets, StringComparer.OrdinalIgnoreCase);
@@ -429,13 +426,48 @@ public class Configuration : IPluginConfiguration
     }
 }
 
+public class CachedFriend
+{
+    public ulong ContentId { get; set; }
+
+    public string Name { get; set; } = string.Empty;
+
+    public ushort HomeWorld { get; set; }
+
+    public ushort CurrentWorld { get; set; }
+
+    public ushort Location { get; set; }
+
+    public byte Job { get; set; }
+
+    public ulong State { get; set; }
+
+    public string FcTag { get; set; } = string.Empty;
+
+    public byte Languages { get; set; }
+
+    public byte MainLanguage { get; set; }
+
+    public sbyte Group { get; set; }
+}
+
+public class KnownCharacter
+{
+    public string Name { get; set; } = string.Empty;
+
+    public string? World { get; set; }
+
+    public List<string> PreviousNames { get; set; } = new();
+
+    public DateTime? ChangedAt { get; set; }
+}
+
 public class WordFilterRule
 {
     public string Text { get; set; } = string.Empty;
 
     public bool Enabled { get; set; } = true;
 
-    /// <summary>Only these channels; empty = every channel.</summary>
     public HashSet<ChatCategory> Categories { get; set; } = new();
 }
 
@@ -451,7 +483,6 @@ public class ChatBookmark
 
     public string Text { get; set; } = string.Empty;
 
-    /// <summary>Identifies the message in the live log / history files (second precision - log files have no milliseconds).</summary>
     internal string Key => KeyOf(Timestamp, Sender, Text);
 
     internal static string KeyOf(DateTime timestamp, string sender, string text) =>

@@ -219,6 +219,20 @@ internal sealed class TabsPage
             plugin.SaveConfiguration();
         }
 
+        plugin.ChatWindowInstance.DrawTabNotifyModeCombo(tab);
+
+        var discordMode = tab.DiscordMode;
+        if (ImGui.Checkbox(Loc.T("Tabs.DiscordMode") + "##discord", ref discordMode))
+        {
+            tab.DiscordMode = discordMode;
+            plugin.SaveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Tabs.DiscordModeTooltip"));
+        }
+
         ImGui.Spacing();
 
         var searching = !string.IsNullOrWhiteSpace(search);
@@ -293,9 +307,6 @@ internal sealed class TabsPage
                 var category = gridCategories[i];
                 var included = tab.IncludedChannels.Contains(category);
 
-                // Color-matched to the channel's own chat color (same as vanilla's channel config
-                // list), so this long checkbox grid reads more like a legend and less like an
-                // undifferentiated wall of identical-looking labels.
                 bool toggled;
                 using (ImRaii.PushColor(ImGuiCol.Text, ChannelDisplay.Color(category, plugin.Configuration)))
                 {

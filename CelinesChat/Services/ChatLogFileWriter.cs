@@ -8,12 +8,6 @@ using Dalamud.Plugin.Services;
 
 namespace CelinesChat.Services;
 
-/// <summary>
-/// Batches log lines and appends them to disk from a background timer. Chat messages arrive on
-/// the game's main thread; opening, writing and closing the log file for every single one of
-/// them right there (busy /say or /shout areas easily do several per second) is a steady source
-/// of frame-time spikes.
-/// </summary>
 internal sealed class ChatLogFileWriter : IDisposable
 {
     private const int FlushIntervalMs = 1000;
@@ -29,7 +23,6 @@ internal sealed class ChatLogFileWriter : IDisposable
         timer = new Timer(_ => FlushFromTimer(), null, FlushIntervalMs, FlushIntervalMs);
     }
 
-    // An exception escaping a timer callback would terminate the whole game process.
     private void FlushFromTimer()
     {
         try
@@ -44,7 +37,6 @@ internal sealed class ChatLogFileWriter : IDisposable
 
     public void Enqueue(string path, string line) => pending.Enqueue((path, line));
 
-    /// <summary>Writes everything queued so far. Safe to call from any thread.</summary>
     public void Flush()
     {
         lock (flushLock)
@@ -54,8 +46,6 @@ internal sealed class ChatLogFileWriter : IDisposable
                 return;
             }
 
-            // Grouped per file so a flush is one append per file, not one per line - while
-            // keeping each file's lines in arrival order.
             var byFile = new Dictionary<string, StringBuilder>();
             var order = new List<string>();
             while (pending.TryDequeue(out var item))
@@ -87,8 +77,6 @@ internal sealed class ChatLogFileWriter : IDisposable
 
     public void Dispose()
     {
-        // Wait for a timer callback that might already be running, so nothing touches the files
-        // after the plugin is unloaded - then write whatever is still queued.
         using (var done = new ManualResetEvent(false))
         {
             if (timer.Dispose(done))

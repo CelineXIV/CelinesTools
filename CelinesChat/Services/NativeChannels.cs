@@ -5,10 +5,6 @@ namespace CelinesChat.Services;
 
 internal static class NativeChannels
 {
-    // The footer's channel label asks for these on every frame while a (CW)LS is the active
-    // channel - re-reading every slot's name out of game memory (and allocating fresh lists and
-    // strings) 60 times a second for something that changes maybe once a session isn't needed.
-    // Only ever used from the framework thread. Callers must treat the returned lists as read-only.
     private const long CacheLifetimeMs = 1000;
 
     private static List<(int Number, string Name)>? cachedLinkshells;

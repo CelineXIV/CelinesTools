@@ -3,16 +3,10 @@ using Dalamud.Game.Text;
 
 namespace CelinesChat.Services;
 
-/// <summary>
-/// Everything that keeps a message out of the chat views: players hidden by the user
-/// (Configuration.HiddenPlayers) and word filters (Configuration.WordFilters). Purely local -
-/// messages are still received and logged, just not shown (and they make no sound).
-/// </summary>
 internal static class MessageFilter
 {
     public static bool IsFilteredOut(ChatLogEntry entry, Configuration config, string? ownCharacterName)
     {
-        // Own messages are never hidden - they're what you just typed.
         if (entry.ChatType == XivChatType.TellOutgoing
             || (!string.IsNullOrEmpty(ownCharacterName) && string.Equals(entry.Sender, ownCharacterName, StringComparison.OrdinalIgnoreCase)))
         {

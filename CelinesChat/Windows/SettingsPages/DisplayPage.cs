@@ -225,7 +225,6 @@ internal sealed class DisplayPage
         Loc.T("Settings.ToolbarIconPack.FrostedGlass"),
     };
 
-    // -1 = "normal" (ImGui's own spacing); the slider shows the current value, the button returns to normal.
     private void DrawSpacingSlider(string label, float value, float min, float max, System.Action<float> set)
     {
         using var id = ImRaii.PushId(label);

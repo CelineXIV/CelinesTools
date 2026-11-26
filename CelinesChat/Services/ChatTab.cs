@@ -34,7 +34,10 @@ public sealed class ChatTab
 
     public bool Muted { get; set; }
 
-    /// <summary>Show each message's time in this tab.</summary>
+    public TabNotifyMode NotifyMode { get; set; } = TabNotifyMode.All;
+
+    public bool DiscordMode { get; set; }
+
     public bool ShowTimestamps { get; set; } = true;
 
     public bool Matches(XivChatType type)
