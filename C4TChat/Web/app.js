@@ -402,7 +402,7 @@ function setConnected(connected) {
 function appendMessage(msg) {
   const list = el("message-list");
   const wasAtBottom = list.scrollTop + list.clientHeight >= list.scrollHeight - 40;
-  const row = buildMessageRow(msg);
+  const row = buildMessageRow(msg, list.lastElementChild);
   list.appendChild(row);
 
   while (list.childElementCount > MAX_RENDERED_MESSAGES) {
@@ -415,7 +415,124 @@ function appendMessage(msg) {
   }
 }
 
-function buildMessageRow(msg) {
+const GROUP_WINDOW_MS = 5 * 60 * 1000;
+
+function buildAvatar(msg) {
+  const avatar = document.createElement("div");
+  avatar.className = "avatar";
+  const name = msg.displayName || msg.sender || msg.channelTag || "?";
+  const initial = document.createElement("span");
+  initial.className = "avatar-initial";
+  initial.textContent = name.replace(/[^\p{L}\p{N}]/gu, "").slice(0, 1).toUpperCase() || "\u2139";
+  avatar.appendChild(initial);
+
+  if (msg.avatarKey) {
+    const img = document.createElement("img");
+    img.alt = "";
+    img.loading = "lazy";
+    img.src = "/api/avatar?key=" + encodeURIComponent(msg.avatarKey) + "&v=" + encodeURIComponent(msg.avatarVersion || "");
+    if (msg.avatarCrop) {
+      const [u0, v0, u1, v1] = msg.avatarCrop.split(",").map(Number);
+      const w = Math.max(0.01, u1 - u0);
+      const h = Math.max(0.01, v1 - v0);
+      img.classList.add("cropped");
+      img.style.width = (100 / w) + "%";
+      img.style.height = (100 / h) + "%";
+      img.style.left = (-u0 / w * 100) + "%";
+      img.style.top = (-v0 / h * 100) + "%";
+    }
+
+    img.addEventListener("load", () => avatar.classList.add("has-image"));
+    img.addEventListener("error", () => img.remove());
+    avatar.appendChild(img);
+  }
+
+  return avatar;
+}
+
+function appendSegments(container, msg) {
+  for (const segment of msg.segments) {
+    const span = document.createElement("span");
+    span.className = "segment" + (segment.linkIndex !== null && segment.linkIndex !== undefined ? " link" : "");
+    span.style.color = segment.colorCss;
+    span.textContent = segment.text + " ";
+    if (segment.linkIndex !== null && segment.linkIndex !== undefined) {
+      span.addEventListener("click", () => clickLink(msg.sequence, segment.linkIndex));
+    }
+
+    container.appendChild(span);
+  }
+}
+
+function buildMessengerRow(msg, previous) {
+  const row = document.createElement("div");
+  row.className = "msg messenger" + (msg.bookmarked ? " bookmarked" : "");
+  row.dataset.sequence = String(msg.sequence);
+  row.dataset.author = msg.avatarKey || msg.channelTag || "";
+  row.dataset.ts = String(msg.timestampMs || 0);
+
+  const continuation = previous
+    && previous.classList.contains("messenger")
+    && previous.dataset.author === row.dataset.author
+    && row.dataset.author !== ""
+    && (msg.timestampMs || 0) - Number(previous.dataset.ts || 0) < GROUP_WINDOW_MS;
+  if (continuation) {
+    row.classList.add("cont");
+  }
+
+  row.appendChild(buildAvatar(msg));
+
+  const body = document.createElement("div");
+  body.className = "body";
+  if (!continuation) {
+    const head = document.createElement("div");
+    head.className = "head";
+    const name = document.createElement("span");
+    name.className = "name";
+    name.style.color = msg.senderColorCss;
+    name.textContent = msg.displayName || msg.sender || msg.channelTag;
+    if (msg.displayName && msg.sender && msg.displayName !== msg.sender) {
+      name.title = msg.sender;
+    }
+
+    head.appendChild(name);
+    if (msg.channelTag) {
+      const pill = document.createElement("span");
+      pill.className = "pill";
+      pill.style.color = msg.channelColorCss;
+      pill.textContent = msg.channelTag.replace(/[\[\]]/g, "");
+      head.appendChild(pill);
+    }
+
+    const time = document.createElement("span");
+    time.className = "time";
+    time.textContent = msg.time;
+    head.appendChild(time);
+    body.appendChild(head);
+  }
+
+  const text = document.createElement("div");
+  text.className = "text";
+  appendSegments(text, msg);
+  body.appendChild(text);
+  row.appendChild(body);
+
+  row.addEventListener("click", (ev) => {
+    if (ev.target.closest(".link")) {
+      return;
+    }
+
+    openMessageSheet(msg, row);
+  });
+
+  return row;
+}
+
+function buildMessageRow(msg, previous) {
+  if (state.view && state.view.messenger) {
+    return buildMessengerRow(msg, previous);
+  }
+
   const row = document.createElement("div");
   row.className = "msg" + (msg.bookmarked ? " bookmarked" : "");
   row.dataset.sequence = String(msg.sequence);
@@ -446,7 +563,10 @@ function buildMessageRow(msg) {
     const sender = document.createElement("span");
     sender.className = "sender";
     sender.style.color = msg.senderColorCss;
-    sender.textContent = msg.sender + ":";
+    sender.textContent = (msg.displayName || msg.sender) + ":";
+    if (msg.displayName && msg.displayName !== msg.sender) {
+      sender.title = msg.sender;
+    }
     if (msg.note) {
       sender.title = msg.note;
       const noteMark = document.createElement("span");

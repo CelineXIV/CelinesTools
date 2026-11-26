@@ -101,7 +101,7 @@ internal static class TabIconPicker
 
     internal static void DrawMenu(ChatTab tab, Plugin plugin)
     {
-        using var menu = ImRaii.Menu(Loc.T("Tabs.Icon") + "##iconMenu" + tab.Id);
+        using var menu = ChatWindow.AccentMenu(Loc.T("Tabs.Icon") + "##iconMenu" + tab.Id, plugin.Configuration);
         if (menu.Success)
         {
             DrawGrid(tab, plugin);

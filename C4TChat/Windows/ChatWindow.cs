@@ -57,6 +57,8 @@ internal sealed class ChatWindow : Window
     private int? pendingCursorCharIndex;
     private int? stashedCursorCharIndex;
     private int pinToBottomFramesRemaining;
+    private bool stickToBottom = true;
+    private readonly HashSet<string> viewsLeftAtBottom = new();
     private string cachedInput = string.Empty;
     private int cachedMaxLength = -1;
     private int cachedPrefixBytes = -1;
@@ -66,6 +68,11 @@ internal sealed class ChatWindow : Window
     private int historyBrowseIndex = -1;
 
     private bool pendingSnippetExpand;
+    private bool pendingTab;
+    private int completionStart = -1;
+    private int completionEnd = -1;
+    private List<string> completionCandidates = new();
+    private int completionIndex;
 
     private readonly Dictionary<Guid, int> fixedTabMentionCounts = new();
 
@@ -172,6 +179,7 @@ internal sealed class ChatWindow : Window
     private float currentOpacity = 1f;
 
     private long? newMessagesDividerSequence;
+    private bool dividerCheckPending;
 
     private readonly Dictionary<string, long> bottomSeenSequenceByView = new();
     private int newBelowCountLastFrame;
@@ -672,7 +680,7 @@ internal sealed class ChatWindow : Window
 
     private void DrawWhisperChannelMenu(CharacterState state)
     {
-        using var menu = ImRaii.Menu(Loc.T("Channel.Whisper"));
+        using var menu = AccentMenu(Loc.T("Channel.Whisper"), plugin.Configuration);
         if (!menu.Success)
         {
             return;
@@ -1289,6 +1297,14 @@ internal sealed class ChatWindow : Window
         if (viewChanged && lastViewKey.Length > 0)
         {
             viewScrollPositions[lastViewKey] = ImGui.GetScrollY();
+            if (stickToBottom)
+            {
+                viewsLeftAtBottom.Add(lastViewKey);
+            }
+            else
+            {
+                viewsLeftAtBottom.Remove(lastViewKey);
+            }
         }
 
         lastViewKey = viewKey;
@@ -1298,6 +1314,7 @@ internal sealed class ChatWindow : Window
             newMessagesDividerSequence = config.ShowNewMessagesDivider && !viewingHistory
                 ? lastSeenSequenceByView.GetValueOrDefault(viewKey, initialSeenSequence)
                 : null;
+            dividerCheckPending = newMessagesDividerSequence != null;
             showJumpButtonLastFrame = false;
             newBelowCountLastFrame = 0;
         }
@@ -1315,6 +1332,13 @@ internal sealed class ChatWindow : Window
                 : noviceNetworkTabActive ? "NoviceNetwork" : GetActiveFixedTab(config)?.Name ?? "chat";
 
         var nearBottomBeforeDraw = ImGui.GetScrollMaxY() - ImGui.GetScrollY() <= BottomToleranceForNewMessagePx;
+        var io = ImGui.GetIO();
+        var userScrolling = ImGui.IsWindowHovered(ImGuiHoveredFlags.ChildWindows)
+            && (io.MouseWheel != 0f || ImGui.IsMouseDown(ImGuiMouseButton.Left));
+        if (userScrolling || ImGui.IsWindowFocused() && (ImGui.IsKeyDown(ImGuiKey.PageUp) || ImGui.IsKeyDown(ImGuiKey.UpArrow) || ImGui.IsKeyDown(ImGuiKey.Home)))
+        {
+            stickToBottom = nearBottomBeforeDraw;
+        }
         var mentionTerm = plugin.MentionTerms;
 
         var availableWidth = ImGui.GetContentRegionAvail().X;
@@ -1324,6 +1348,8 @@ internal sealed class ChatWindow : Window
         var activeTab = showingWhisper || showingNoviceNetwork ? null : GetActiveFixedTab(config);
 
         var discord = showingWhisper ? config.DiscordModeWhispers : activeTab?.DiscordMode == true;
+        var showMedia = config.ImageLinkPreviews
+            && (showingWhisper ? !config.WhisperMediaHidden.Contains(activeWhisperTabTarget) : activeTab?.ShowMedia ?? true);
         var grouping = config.GroupConsecutiveMessages || discord;
 
         var hasNewEntries = false;
@@ -1535,6 +1561,7 @@ internal sealed class ChatWindow : Window
                 ImGui.SetScrollHereY(0.3f);
                 pendingScrollSequence = null;
                 pinToBottomFramesRemaining = 0;
+                stickToBottom = false;
             }
 
             if (pendingScrollBookmarkKey != null && !viewChanged && entry.BookmarkKey == pendingScrollBookmarkKey)
@@ -1542,6 +1569,7 @@ internal sealed class ChatWindow : Window
                 ImGui.SetScrollHereY(0.3f);
                 pendingScrollBookmarkKey = null;
                 pinToBottomFramesRemaining = 0;
+                stickToBottom = false;
             }
 
             var hadCache = entryHeightCache.TryGetValue(entry.Sequence, out var cachedHeight)
@@ -1562,6 +1590,16 @@ internal sealed class ChatWindow : Window
 
             var entryTop = ImGui.GetCursorPosY();
             DrawLogEntry(entry, config, mentionTerm, availableWidth, showingWhisper, showTimestamps, repeatCount, continuation, trailingSpacing, discord);
+            if (showMedia)
+            {
+                DrawImagePreviews(entry, availableWidth, discord);
+            }
+
+            if (showMedia && config.VideoCards)
+            {
+                DrawLinkCards(entry, availableWidth, discord);
+            }
+
             var newHeight = ImGui.GetCursorPosY() - entryTop;
 
             if (hadCache && MathF.Abs(newHeight - cachedHeight) > 0.5f)
@@ -1657,17 +1695,19 @@ internal sealed class ChatWindow : Window
 
         if (viewChanged)
         {
-            if (forceScrollToBottomOnNextViewChange || config.ScrollToBottomOnTabSwitch || !viewScrollPositions.TryGetValue(viewKey, out var savedScrollY))
+            if (forceScrollToBottomOnNextViewChange || config.ScrollToBottomOnTabSwitch || viewsLeftAtBottom.Contains(viewKey) || !viewScrollPositions.TryGetValue(viewKey, out var savedScrollY))
             {
                 forceScrollToBottomOnNextViewChange = false;
                 ImGui.SetScrollHereY(1f);
 
                 pinToBottomFramesRemaining = 5;
+                stickToBottom = !viewingHistory;
             }
             else
             {
                 ImGui.SetScrollY(savedScrollY);
                 pinToBottomFramesRemaining = 0;
+                stickToBottom = false;
             }
         }
         else if (pinToBottomFramesRemaining > 0)
@@ -1679,9 +1719,10 @@ internal sealed class ChatWindow : Window
         {
             ImGui.SetScrollY(MathF.Max(0f, ImGui.GetScrollY() - heightLostFromViewShrink));
         }
-        else if (hasNewOwnMessageInView || (!viewingHistory && hasNewEntries && nearBottomBeforeDraw))
+        else if (hasNewOwnMessageInView || (!viewingHistory && ((hasNewEntries && nearBottomBeforeDraw) || stickToBottom)))
         {
             ImGui.SetScrollHereY(1f);
+            stickToBottom = !viewingHistory;
         }
 
         if (!viewingHistory && liveEntries.Count > 0)
@@ -1692,6 +1733,15 @@ internal sealed class ChatWindow : Window
         if (!viewingHistory)
         {
             lastSeenSequenceByView[viewKey] = viewSeenMax;
+        }
+
+        if (dividerCheckPending)
+        {
+            dividerCheckPending = false;
+            if (!dividerDrawn)
+            {
+                newMessagesDividerSequence = null;
+            }
         }
 
         var distanceFromBottom = ImGui.GetScrollMaxY() - ImGui.GetScrollY();
@@ -1705,6 +1755,7 @@ internal sealed class ChatWindow : Window
         {
             ImGui.SetScrollY(ImGui.GetScrollMaxY());
             pinToBottomFramesRemaining = 3;
+            stickToBottom = !viewingHistory;
         }
 
         if (showJumpButtonLastFrame)
@@ -1817,6 +1868,294 @@ internal sealed class ChatWindow : Window
     }
 
     private const float DiscordAvatarGap = 10f;
+
+    private void DrawImagePreviews(ChatLogEntry entry, float availableWidth, bool discord)
+    {
+        var urls = plugin.ImagePreviews.ImageUrls(entry);
+        if (urls.Length == 0)
+        {
+            return;
+        }
+
+        var scale = ImGuiHelpers.GlobalScale;
+        var indent = discord ? DiscordAvatarSize() + (DiscordAvatarGap * scale) : 0f;
+        var maxSize = new Vector2(MathF.Min(260f * scale, availableWidth - indent), 170f * scale);
+        foreach (var url in urls)
+        {
+            var wrap = plugin.ImagePreviews.Get(url, out var state);
+            if (indent > 0f)
+            {
+                ImGui.SetCursorPosX(ImGui.GetCursorPosX() + indent);
+            }
+
+            if (wrap == null)
+            {
+                if (state == Services.ImagePreviewService.PreviewState.Loading)
+                {
+                    ImGui.TextDisabled(Loc.T("ImagePreview.Loading"));
+                }
+
+                continue;
+            }
+
+            var fit = MathF.Min(1f, MathF.Min(maxSize.X / wrap.Width, maxSize.Y / wrap.Height));
+            var size = new Vector2(wrap.Width, wrap.Height) * fit;
+            var min = ImGui.GetCursorScreenPos();
+            ImGui.InvisibleButton("##img" + entry.Sequence + url.GetHashCode(), size);
+            ImGui.GetWindowDrawList().AddImageRounded(wrap.Handle, min, min + size, Vector2.Zero, Vector2.One, ImGui.GetColorU32(Vector4.One), 6f * scale);
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
+                ImGui.SetTooltip(Loc.T("ImagePreview.ClickToEnlarge"));
+            }
+
+            if (ImGui.IsItemClicked())
+            {
+                plugin.OpenImagePreview(url);
+            }
+        }
+    }
+
+    private static readonly Vector4 YouTubeColor = new(1f, 0.2f, 0.25f, 1f);
+    private static readonly Vector4 TwitchColor = new(0.62f, 0.4f, 1f, 1f);
+    private static readonly Vector4 SpotifyColor = new(0.11f, 0.84f, 0.38f, 1f);
+
+    private void DrawLinkCards(ChatLogEntry entry, float availableWidth, bool discord)
+    {
+        var urls = plugin.LinkCards.CardUrls(entry);
+        if (urls.Length == 0)
+        {
+            return;
+        }
+
+        var scale = ImGuiHelpers.GlobalScale;
+        var indent = discord ? DiscordAvatarSize() + (DiscordAvatarGap * scale) : 0f;
+        var width = MathF.Min(380f * scale, availableWidth - indent);
+        if (width < 140f * scale)
+        {
+            return;
+        }
+
+        var style = ImGui.GetStyle();
+        var lineHeight = ImGui.GetTextLineHeight();
+        var pad = 8f * scale;
+        var height = MathF.Max(72f * scale, (lineHeight * 3f) + (pad * 2f) + (4f * scale));
+        foreach (var url in urls)
+        {
+            var card = plugin.LinkCards.Get(url, out var loading);
+            if (indent > 0f)
+            {
+                ImGui.SetCursorPosX(ImGui.GetCursorPosX() + indent);
+            }
+
+            if (card == null)
+            {
+                if (loading)
+                {
+                    ImGui.TextDisabled(Loc.T("LinkCard.Loading"));
+                }
+
+                continue;
+            }
+
+            var brand = card.Provider switch
+            {
+                Services.LinkCardService.Provider.YouTube => YouTubeColor,
+                Services.LinkCardService.Provider.Spotify => SpotifyColor,
+                _ => TwitchColor,
+            };
+            var min = ImGui.GetCursorScreenPos();
+            var max = min + new Vector2(width, height);
+            ImGui.InvisibleButton("##card" + entry.Sequence + url.GetHashCode(), new Vector2(width, height));
+            var hovered = ImGui.IsItemHovered();
+            var clicked = ImGui.IsItemClicked();
+            var drawList = ImGui.GetWindowDrawList();
+            var rounding = 8f * scale;
+            var bg = style.Colors[(int)ImGuiCol.FrameBg];
+            drawList.AddRectFilled(min, max, ImGui.GetColorU32(bg with { W = MathF.Max(bg.W, 0.55f) }), rounding);
+            drawList.AddRectFilled(min, new Vector2(min.X + (3f * scale), max.Y), ImGui.GetColorU32(brand), rounding, ImDrawFlags.RoundCornersLeft);
+            if (hovered)
+            {
+                drawList.AddRect(min, max, ImGui.GetColorU32(brand with { W = 0.75f }), rounding, ImDrawFlags.None, 1.5f * scale);
+            }
+
+            var thumbH = height - (pad * 2f);
+            var thumbW = thumbH * 16f / 9f;
+            var thumbMin = new Vector2(min.X + pad + (3f * scale), min.Y + pad);
+            var wrap = card.ThumbnailUrl != null ? plugin.ImagePreviews.Get(card.ThumbnailUrl, out _) : null;
+            if (wrap != null && wrap.Height > 0)
+            {
+                var imageAspect = wrap.Width / (float)wrap.Height;
+                if (MathF.Abs(imageAspect - 1f) < 0.15f)
+                {
+                    thumbW = thumbH;
+                }
+
+                var boxAspect = thumbW / thumbH;
+                var uv0 = Vector2.Zero;
+                var uv1 = Vector2.One;
+                if (imageAspect > boxAspect)
+                {
+                    var keep = boxAspect / imageAspect;
+                    uv0.X = (1f - keep) / 2f;
+                    uv1.X = 1f - uv0.X;
+                }
+                else if (imageAspect < boxAspect)
+                {
+                    var keep = imageAspect / boxAspect;
+                    uv0.Y = (1f - keep) / 2f;
+                    uv1.Y = 1f - uv0.Y;
+                }
+
+                var thumbMax = thumbMin + new Vector2(thumbW, thumbH);
+                drawList.AddImageRounded(wrap.Handle, thumbMin, thumbMax, uv0, uv1, ImGui.GetColorU32(Vector4.One), 6f * scale);
+                if (card.Provider != Services.LinkCardService.Provider.Twitch)
+                {
+                    var center = (thumbMin + thumbMax) / 2f;
+                    var radius = 11f * scale;
+                    var circle = card.Provider == Services.LinkCardService.Provider.Spotify
+                        ? SpotifyColor with { W = hovered ? 1f : 0.85f }
+                        : new Vector4(0f, 0f, 0f, hovered ? 0.8f : 0.6f);
+                    drawList.AddCircleFilled(center, radius, ImGui.GetColorU32(circle));
+                    var tri = radius * 0.45f;
+                    drawList.AddTriangleFilled(
+                        center + new Vector2(-tri * 0.7f, -tri),
+                        center + new Vector2(-tri * 0.7f, tri),
+                        center + new Vector2(tri, 0f),
+                        ImGui.GetColorU32(Vector4.One));
+                }
+            }
+            else
+            {
+                drawList.AddRectFilled(thumbMin, thumbMin + new Vector2(thumbW, thumbH), ImGui.GetColorU32(brand with { W = 0.18f }), 6f * scale);
+            }
+
+            var textX = thumbMin.X + thumbW + (10f * scale);
+            var textWidth = max.X - pad - textX;
+            var provider = card.Provider.ToString();
+            var header = string.IsNullOrEmpty(card.Author) ? provider : provider + " \u00b7 " + card.Author;
+            var y = min.Y + pad;
+            drawList.AddText(new Vector2(textX, y), ImGui.GetColorU32(brand), FitText(header, textWidth));
+            y += lineHeight + (3f * scale);
+            foreach (var line in WrapTwoLines(card.Title, textWidth))
+            {
+                drawList.AddText(new Vector2(textX, y), ImGui.GetColorU32(ImGuiCol.Text), line);
+                y += lineHeight;
+            }
+
+            if (hovered)
+            {
+                ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
+                var hint = card.AppUri != null && SpotifyInstalled() ? Loc.T("LinkCard.OpenSpotify") : Loc.T("LinkCard.Open");
+                ImGui.SetTooltip(card.Title + "\n" + hint);
+            }
+
+            if (clicked)
+            {
+                if (card.AppUri != null && SpotifyInstalled())
+                {
+                    OpenUrl(card.AppUri, plugin);
+                }
+                else
+                {
+                    plugin.RequestOpenUrl(url);
+                }
+            }
+        }
+    }
+
+    private bool DrawMediaCheckbox(string id, ref bool value)
+    {
+        var globalOn = plugin.Configuration.ImageLinkPreviews;
+        bool changed;
+        using (ImRaii.Disabled(!globalOn))
+        {
+            changed = ImGui.Checkbox(Loc.T("Tabs.ShowMedia") + id, ref value);
+        }
+
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+        {
+            ImGui.SetTooltip(Loc.T(globalOn ? "Tabs.ShowMediaTooltip" : "Tabs.ShowMediaDisabled"));
+        }
+
+        return changed;
+    }
+
+    private static bool? spotifyInstalled;
+
+    private static bool SpotifyInstalled()
+    {
+        if (spotifyInstalled is { } known)
+        {
+            return known;
+        }
+
+        try
+        {
+            using var key = Microsoft.Win32.Registry.ClassesRoot.OpenSubKey(@"spotify\shell\open\command");
+            spotifyInstalled = key != null;
+        }
+        catch (Exception)
+        {
+            spotifyInstalled = false;
+        }
+
+        return spotifyInstalled.Value;
+    }
+
+    private static string FitText(string text, float width)
+    {
+        if (ImGui.CalcTextSize(text).X <= width)
+        {
+            return text;
+        }
+
+        var end = text.Length;
+        while (end > 1 && ImGui.CalcTextSize(text[..end] + "\u2026").X > width)
+        {
+            end--;
+        }
+
+        return text[..end].TrimEnd() + "\u2026";
+    }
+
+    private static List<string> WrapTwoLines(string text, float width)
+    {
+        var lines = new List<string>(2);
+        var words = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var current = string.Empty;
+        var index = 0;
+        while (index < words.Length)
+        {
+            var candidate = current.Length == 0 ? words[index] : current + " " + words[index];
+            if (ImGui.CalcTextSize(candidate).X <= width || current.Length == 0)
+            {
+                current = candidate;
+                index++;
+                continue;
+            }
+
+            lines.Add(FitText(current, width));
+            current = string.Empty;
+            if (lines.Count == 1)
+            {
+                continue;
+            }
+
+            break;
+        }
+
+        if (lines.Count < 2 && current.Length > 0)
+        {
+            lines.Add(FitText(index < words.Length ? current + "\u2026" : current, width));
+        }
+        else if (lines.Count == 2 && index < words.Length)
+        {
+            lines[1] = FitText(lines[1] + " " + string.Join(' ', words[index..]), width);
+        }
+
+        return lines;
+    }
 
     private static float DiscordAvatarSize() => MathF.Round((ImGui.GetTextLineHeight() * 2f) + ImGui.GetStyle().ItemSpacing.Y);
 
@@ -1961,7 +2300,7 @@ internal sealed class ChatWindow : Window
             {
                 if (target.Url != null)
                 {
-                    OpenUrl(target.Url, plugin);
+                    plugin.RequestOpenUrl(target.Url);
                 }
                 else if (target.Payload != null && entry.Payloads != null)
                 {
@@ -2121,12 +2460,12 @@ internal sealed class ChatWindow : Window
 
         ImGui.Separator();
 
-        if (ImGui.Selectable(Loc.T(plugin.IsFavorite(entry) ? "ChatLog.RemoveFavorite" : "ChatLog.AddFavorite")))
+        if (MenuItem(Loc.T(plugin.IsFavorite(entry) ? "ChatLog.RemoveFavorite" : "ChatLog.AddFavorite"), plugin.Configuration))
         {
             plugin.ToggleFavorite(entry);
         }
 
-        if (ImGui.Selectable(Loc.T(plugin.GetPlayerNote(entry) != null ? "ChatLog.EditNoteAction" : "ChatLog.AddNoteAction")))
+        if (MenuItem(Loc.T(plugin.GetPlayerNote(entry) != null ? "ChatLog.EditNoteAction" : "ChatLog.AddNoteAction"), plugin.Configuration))
         {
             noteEditorKey = entry.SenderKey;
             noteEditorText = plugin.GetPlayerNote(entry) ?? string.Empty;
@@ -2177,7 +2516,7 @@ internal sealed class ChatWindow : Window
             ImGui.SetClipboardText($"{entry.Sender}: {entry.Text}");
         }
 
-        if (ImGui.Selectable(Loc.T(plugin.IsBookmarked(entry) ? "ChatLog.RemoveBookmark" : "ChatLog.AddBookmark")))
+        if (MenuItem(Loc.T(plugin.IsBookmarked(entry) ? "ChatLog.RemoveBookmark" : "ChatLog.AddBookmark"), plugin.Configuration))
         {
             plugin.ToggleBookmark(entry);
         }
@@ -2213,13 +2552,13 @@ internal sealed class ChatWindow : Window
                 ImGui.Separator();
             }
 
-            using var itemMenu = ImRaii.Menu(Loc.T("ChatLog.ItemMenu", SafeLabel(name)) + "##item" + i);
+            using var itemMenu = AccentMenu(Loc.T("ChatLog.ItemMenu", SafeLabel(name)) + "##item" + i, plugin.Configuration);
             if (!itemMenu.Success)
             {
                 continue;
             }
 
-            if (ImGui.MenuItem(Loc.T("ChatLog.ItemRelink")))
+            if (AccentMenuItem(Loc.T("ChatLog.ItemRelink"), false, plugin.Configuration))
             {
                 var state = plugin.GetCharacterState();
                 InsertMarkerAtCursor(state, MessageMarkerEncoder.BuildItemMarker(name, item.ItemId, item.Kind) + " ");
@@ -2233,22 +2572,22 @@ internal sealed class ChatWindow : Window
 
             ImGui.Separator();
 
-            if (ImGui.MenuItem(Loc.T("ChatLog.ItemFind")))
+            if (AccentMenuItem(Loc.T("ChatLog.ItemFind"), false, plugin.Configuration))
             {
                 plugin.HandleChatLinkClicked(item, entry.Payloads);
             }
 
-            if (ImGui.MenuItem(Loc.T("ChatLog.ItemUniversalis")))
+            if (AccentMenuItem(Loc.T("ChatLog.ItemUniversalis"), false, plugin.Configuration))
             {
                 OpenUrl("https://universalis.app/market/" + item.ItemId, plugin);
             }
 
-            if (ImGui.MenuItem(Loc.T("ChatLog.ItemGarland")))
+            if (AccentMenuItem(Loc.T("ChatLog.ItemGarland"), false, plugin.Configuration))
             {
                 OpenUrl("https://www.garlandtools.org/db/#item/" + item.ItemId, plugin);
             }
 
-            if (ImGui.MenuItem(Loc.T("ChatLog.ItemCopyName")))
+            if (AccentMenuItem(Loc.T("ChatLog.ItemCopyName"), false, plugin.Configuration))
             {
                 ImGui.SetClipboardText(name);
             }
@@ -2699,7 +3038,7 @@ internal sealed class ChatWindow : Window
                     {
                         if (target.Url != null)
                         {
-                            OpenUrl(target.Url, plugin);
+                            plugin.RequestOpenUrl(target.Url);
                         }
                         else if (target.Payload != null && entry.Payloads != null)
                         {
@@ -2789,7 +3128,7 @@ internal sealed class ChatWindow : Window
                     playerCard.Open(entry);
                 }
 
-                using (var playerMenu = ImRaii.Menu(Loc.T("ChatLog.PlayerMenu")))
+                using (var playerMenu = AccentMenu(Loc.T("ChatLog.PlayerMenu"), plugin.Configuration))
                 {
                     if (playerMenu.Success)
                     {
@@ -2797,7 +3136,7 @@ internal sealed class ChatWindow : Window
                     }
                 }
 
-                using (var blockMenu = ImRaii.Menu(Loc.T("ChatLog.BlockFunctionsMenu")))
+                using (var blockMenu = AccentMenu(Loc.T("ChatLog.BlockFunctionsMenu"), plugin.Configuration))
                 {
                     if (blockMenu.Success)
                     {
@@ -2806,7 +3145,7 @@ internal sealed class ChatWindow : Window
                 }
 
                 ImGui.Separator();
-                using (var messageMenu = ImRaii.Menu(Loc.T("ChatLog.MessageMenu")))
+                using (var messageMenu = AccentMenu(Loc.T("ChatLog.MessageMenu"), plugin.Configuration))
                 {
                     if (messageMenu.Success)
                     {
@@ -2921,7 +3260,7 @@ internal sealed class ChatWindow : Window
             {
                 if (ImGui.IsKeyPressed(ImGuiKey.Tab))
                 {
-                    pendingAutoTranslatePopup = true;
+                    pendingTab = true;
                     return 1;
                 }
 
@@ -2940,6 +3279,22 @@ internal sealed class ChatWindow : Window
         {
             pendingSnippetExpand = false;
             TryExpandSnippetBeforeCursor(ref data, FindSnippetByShortcut);
+        }
+
+        if (pendingTab)
+        {
+            pendingTab = false;
+            if (!TryCompleteName(ref data))
+            {
+                pendingAutoTranslatePopup = true;
+            }
+
+            return 0;
+        }
+
+        if (completionStart >= 0 && data.CursorPos != completionEnd)
+        {
+            completionStart = -1;
         }
 
         if (data.CursorPos == 0 && ImGui.IsKeyPressed(ImGuiKey.UpArrow))
@@ -3309,7 +3664,62 @@ internal sealed class ChatWindow : Window
 
     private static string ComposePlaceholder(CharacterState state) => Loc.T("Compose.Placeholder", CurrentChannelLabel(state));
 
-    private bool DrawSendButton(Configuration config, float width, bool disabled)
+    internal static string ShortTag(ChatChannel channel, int linkshell, int crossWorldLinkshell, string whisperTarget) => channel switch
+    {
+        ChatChannel.Say => "[S]",
+        ChatChannel.Party => "[P]",
+        ChatChannel.Whisper => string.IsNullOrEmpty(whisperTarget) ? "[T]" : "[T] " + FirstName(whisperTarget),
+        ChatChannel.Yell => "[Y]",
+        ChatChannel.Shout => "[Sh]",
+        ChatChannel.FreeCompany => "[FC]",
+        ChatChannel.Alliance => "[A]",
+        ChatChannel.PvpTeam => "[PT]",
+        ChatChannel.NoviceNetwork => "[NN]",
+        ChatChannel.Linkshell => "[LS" + linkshell + "]",
+        ChatChannel.CrossWorldLinkshell => "[CWLS" + crossWorldLinkshell + "]",
+        _ => "[" + channel + "]",
+    };
+
+    internal static Vector4 ChannelColorFor(Configuration config, ChatChannel channel, int linkshell, int crossWorldLinkshell) => channel switch
+    {
+        ChatChannel.Linkshell => ChannelDisplay.LinkshellColor(linkshell, config),
+        ChatChannel.CrossWorldLinkshell => ChannelDisplay.CrossWorldLinkshellColor(crossWorldLinkshell, config),
+        _ => ChannelDisplay.Color(CategoryForChannel(channel), config),
+    };
+
+    internal static bool DrawChannelTagButton(string id, string tag, Vector4 color)
+    {
+        var chevron = FontAwesomeIcon.ChevronDown.ToIconString();
+        var style = ImGui.GetStyle();
+        Vector2 chevronSize;
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            chevronSize = ImGui.CalcTextSize(chevron) * 0.7f;
+        }
+
+        var tagSize = ImGui.CalcTextSize(tag);
+        var size = new Vector2(tagSize.X + chevronSize.X + (style.FramePadding.X * 2f) + 6f, ImGui.GetFrameHeight());
+        var min = ImGui.GetCursorScreenPos();
+        bool pressed;
+        using (ImRaii.PushColor(ImGuiCol.Button, style.Colors[(int)ImGuiCol.FrameBg])
+                   .Push(ImGuiCol.ButtonHovered, style.Colors[(int)ImGuiCol.FrameBgHovered])
+                   .Push(ImGuiCol.ButtonActive, style.Colors[(int)ImGuiCol.FrameBgActive]))
+        {
+            pressed = ImGui.Button(id, size);
+        }
+
+        var drawList = ImGui.GetWindowDrawList();
+        drawList.AddText(new Vector2(min.X + style.FramePadding.X, min.Y + ((size.Y - tagSize.Y) / 2f)), ImGui.GetColorU32(color), tag);
+        drawList.AddText(
+            UiBuilder.IconFont,
+            ImGui.GetFontSize() * 0.7f,
+            new Vector2(min.X + style.FramePadding.X + tagSize.X + 6f, min.Y + ((size.Y - chevronSize.Y) / 2f)),
+            ImGui.GetColorU32(color with { W = 0.8f }),
+            chevron);
+        return pressed;
+    }
+
+    internal static bool DrawSendButton(Configuration config, float width, bool disabled)
     {
         var size = new Vector2(width, ImGui.GetFrameHeight());
         var min = ImGui.GetCursorScreenPos();
@@ -3499,7 +3909,7 @@ internal sealed class ChatWindow : Window
 
         ImGui.Separator();
 
-        using (var snippetsMenu = ImRaii.Menu(Loc.T("Compose.Snippets")))
+        using (var snippetsMenu = AccentMenu(Loc.T("Compose.Snippets"), plugin.Configuration))
         {
             if (snippetsMenu.Success)
             {
@@ -3507,7 +3917,7 @@ internal sealed class ChatWindow : Window
             }
         }
 
-        using (var historyMenu = ImRaii.Menu(Loc.T("Compose.History")))
+        using (var historyMenu = AccentMenu(Loc.T("Compose.History"), plugin.Configuration))
         {
             if (historyMenu.Success)
             {
@@ -3720,6 +4130,56 @@ internal sealed class ChatWindow : Window
         }
 
         return builder.ToString();
+    }
+
+    private unsafe bool TryCompleteName(ref ImGuiInputTextCallbackData data)
+    {
+        var cursorBytes = Math.Clamp(data.CursorPos, 0, data.BufTextLen);
+        var before = Encoding.UTF8.GetString(data.Buf, cursorBytes);
+
+        if (completionStart >= 0 && cursorBytes == completionEnd && completionCandidates.Count > 1)
+        {
+            completionIndex = (completionIndex + 1) % completionCandidates.Count;
+            ReplaceCompletion(ref data, completionStart, completionEnd - completionStart, completionCandidates[completionIndex]);
+            return true;
+        }
+
+        var start = before.Length;
+        while (start > 0 && (char.IsLetter(before[start - 1]) || before[start - 1] is '\'' or '-'))
+        {
+            start--;
+        }
+
+        var prefix = before[start..];
+        if (prefix.Length < 2)
+        {
+            return false;
+        }
+
+        var candidates = plugin.GetNameCandidates()
+            .Where(n => n.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+                || n.Split(' ').Skip(1).Any(part => part.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+        if (candidates.Count == 0)
+        {
+            return false;
+        }
+
+        completionCandidates = candidates;
+        completionIndex = 0;
+        completionStart = Encoding.UTF8.GetByteCount(before[..start]);
+        ReplaceCompletion(ref data, completionStart, cursorBytes - completionStart, candidates[0]);
+        return true;
+    }
+
+    private unsafe void ReplaceCompletion(ref ImGuiInputTextCallbackData data, int byteStart, int byteLength, string name)
+    {
+        data.DeleteChars(byteStart, byteLength);
+        data.InsertChars(byteStart, name);
+        completionEnd = byteStart + Encoding.UTF8.GetByteCount(name);
+        data.CursorPos = completionEnd;
+        data.SelectionStart = completionEnd;
+        data.SelectionEnd = completionEnd;
     }
 
     private static unsafe void TryExpandSnippetBeforeCursor(ref ImGuiInputTextCallbackData data, Func<string, Snippet?> find)
@@ -4473,6 +4933,54 @@ internal sealed class ChatWindow : Window
 
     private const float StripTabIconGap = 6f;
 
+    internal static ImRaii.MenuDisposable AccentMenu(string label, Configuration config)
+    {
+        var accent = C4tTheme.ActiveMarkerColor(config);
+        var drawList = ImGui.GetWindowDrawList();
+        var min = ImGui.GetCursorScreenPos();
+        var max = min + new Vector2(ImGui.GetContentRegionAvail().X, ImGui.GetTextLineHeight());
+        ImRaii.MenuDisposable menu;
+        using (ImRaii.PushColor(ImGuiCol.HeaderHovered, accent with { W = 0.16f })
+                   .Push(ImGuiCol.HeaderActive, accent with { W = 0.3f })
+                   .Push(ImGuiCol.Header, accent with { W = 0.16f }))
+        {
+            menu = ImRaii.Menu(label);
+        }
+
+        var pad = new Vector2(3f, 1f + (ImGui.GetStyle().ItemSpacing.Y / 2f)) * ImGuiHelpers.GlobalScale;
+        if (menu.Success || ImGui.IsMouseHoveringRect(min - pad, max + pad))
+        {
+            drawList.AddRect(min - pad, max + pad, ImGui.GetColorU32(accent with { W = 0.85f }), 4f * ImGuiHelpers.GlobalScale, ImDrawFlags.None, 1.5f * ImGuiHelpers.GlobalScale);
+        }
+
+        return menu;
+    }
+
+    internal static bool AccentMenuItem(string label, bool check, Configuration config)
+    {
+        var accent = C4tTheme.ActiveMarkerColor(config);
+        bool clicked;
+        using (ImRaii.PushColor(ImGuiCol.HeaderHovered, accent with { W = 0.16f })
+                   .Push(ImGuiCol.HeaderActive, accent with { W = 0.3f }))
+        {
+            clicked = ImGui.MenuItem(label, string.Empty, check);
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            var pad = new Vector2(3f, 1f) * ImGuiHelpers.GlobalScale;
+            ImGui.GetWindowDrawList().AddRect(
+                ImGui.GetItemRectMin() - pad,
+                ImGui.GetItemRectMax() + pad,
+                ImGui.GetColorU32(accent with { W = 0.85f }),
+                4f * ImGuiHelpers.GlobalScale,
+                ImDrawFlags.None,
+                1.5f * ImGuiHelpers.GlobalScale);
+        }
+
+        return clicked;
+    }
+
     internal static bool MenuItem(string label, Configuration config, Vector4? textColor = null, bool selected = false)
     {
         var accent = C4tTheme.ActiveMarkerColor(config);
@@ -4825,6 +5333,14 @@ internal sealed class ChatWindow : Window
             ImGui.SetTooltip(Loc.T("Tabs.DiscordModeTooltip"));
         }
 
+        var showMedia = tab.ShowMedia;
+        if (DrawMediaCheckbox("##media" + tab.Id, ref showMedia))
+        {
+            tab.ShowMedia = showMedia;
+            plugin.InvalidateChatLayout();
+            plugin.SaveConfiguration();
+        }
+
         var group = plugin.Configuration.GroupConsecutiveMessages;
         if (ImGui.Checkbox(Loc.T("Tabs.GroupMessages") + "##group" + tab.Id, ref group))
         {
@@ -4893,7 +5409,7 @@ internal sealed class ChatWindow : Window
 
     private void DrawTabChannelMenu(ChatTab tab)
     {
-        using var menu = ImRaii.Menu(Loc.T("Tabs.ChannelsMenu", tab.IncludedChannels.Count) + "##channels" + tab.Id);
+        using var menu = AccentMenu(Loc.T("Tabs.ChannelsMenu", tab.IncludedChannels.Count) + "##channels" + tab.Id, plugin.Configuration);
         if (!menu.Success)
         {
             return;
@@ -4901,7 +5417,7 @@ internal sealed class ChatWindow : Window
 
         foreach (var group in ChannelDisplay.AllGroups)
         {
-            using var groupMenu = ImRaii.Menu(ChannelDisplay.GroupName(group) + "##group" + group);
+            using var groupMenu = AccentMenu(ChannelDisplay.GroupName(group) + "##group" + group, plugin.Configuration);
             if (!groupMenu.Success)
             {
                 continue;
@@ -4918,7 +5434,7 @@ internal sealed class ChatWindow : Window
                 bool toggled;
                 using (ImRaii.PushColor(ImGuiCol.Text, ChannelDisplay.Color(category, plugin.Configuration)))
                 {
-                    toggled = ImGui.MenuItem(ChannelDisplay.CategoryName(category) + "##menuCat" + category, string.Empty, included);
+                    toggled = AccentMenuItem(ChannelDisplay.CategoryName(category) + "##menuCat" + category, included, plugin.Configuration);
                 }
 
                 if (toggled)
@@ -4947,7 +5463,7 @@ internal sealed class ChatWindow : Window
         }
 
         ImGui.Separator();
-        if (ImGui.MenuItem(Loc.T("Tabs.ChannelsMoreSettings")))
+        if (AccentMenuItem(Loc.T("Tabs.ChannelsMoreSettings"), false, plugin.Configuration))
         {
             plugin.OpenSettingsPage(SettingsPage.Tabs);
         }
@@ -4960,7 +5476,7 @@ internal sealed class ChatWindow : Window
         {
             var label = name.Length > 0 ? $"{prefix}{number}: {name}" : $"{prefix}{number}";
             var isChecked = included.Count == 0 || included.Contains(number);
-            if (ImGui.MenuItem(label + "##menu" + prefix + number, string.Empty, isChecked))
+            if (AccentMenuItem(label + "##menu" + prefix + number, isChecked, plugin.Configuration))
             {
                 if (included.Count == 0)
                 {
@@ -4993,7 +5509,7 @@ internal sealed class ChatWindow : Window
         }
 
         var closeRequested = false;
-        if (ImGui.Selectable(Loc.T("Tabs.CloseConversation") + "##closeWhisper" + targetName))
+        if (MenuItem(Loc.T("Tabs.CloseConversation") + "##closeWhisper" + targetName, plugin.Configuration))
         {
             closeRequested = true;
             ImGui.CloseCurrentPopup();
@@ -5048,6 +5564,22 @@ internal sealed class ChatWindow : Window
         if (ImGui.IsItemHovered())
         {
             ImGui.SetTooltip(Loc.T("Tabs.DiscordModeTooltip"));
+        }
+
+        var whisperMedia = !config.WhisperMediaHidden.Contains(targetName);
+        if (DrawMediaCheckbox("##mediaWhisper" + targetName, ref whisperMedia))
+        {
+            if (whisperMedia)
+            {
+                config.WhisperMediaHidden.Remove(targetName);
+            }
+            else
+            {
+                config.WhisperMediaHidden.Add(targetName);
+            }
+
+            plugin.InvalidateChatLayout();
+            plugin.SaveConfiguration();
         }
 
         var color = ChannelDisplay.WhisperColor(targetName, config);
@@ -5345,7 +5877,7 @@ internal sealed class ChatWindow : Window
         return spaceIndex >= 0 ? namePart[..spaceIndex] : namePart;
     }
 
-    private static ChatCategory CategoryForChannel(ChatChannel channel) => channel switch
+    internal static ChatCategory CategoryForChannel(ChatChannel channel) => channel switch
     {
         ChatChannel.Say => ChatCategory.Say,
         ChatChannel.Party => ChatCategory.Party,

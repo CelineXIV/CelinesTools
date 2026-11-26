@@ -81,6 +81,7 @@ internal sealed class WebRoutes : IDisposable
         host.Routes.PostAuthentication.Static.Add(HttpMethod.POST, "/api/bookmark/remove", HandleBookmarkRemove, OnException);
         host.Routes.PostAuthentication.Static.Add(HttpMethod.POST, "/api/reply", HandleReply, OnException);
         host.Routes.PostAuthentication.Static.Add(HttpMethod.POST, "/api/history/older", HandleOlderHistory, OnException);
+        host.Routes.PostAuthentication.Static.Add(HttpMethod.GET, "/api/avatar", HandleAvatar, OnException);
 
         plugin.ChatLog.EntryAdded += OnEntryAdded;
         plugin.ChatWindowInstance.ViewChanged += OnViewChanged;
@@ -744,6 +745,44 @@ internal sealed class WebRoutes : IDisposable
         return MergeByTimestamp(deduped, liveTail).ToList();
     }
 
+    private async Task HandleAvatar(HttpContext ctx)
+    {
+        var key = ctx.Request.RetrieveQueryValue("key") ?? string.Empty;
+        if (key.Length == 0 || key.Length > 80)
+        {
+            await SendBinary(ctx, null, "text/plain");
+            return;
+        }
+
+        var path = await plugin.Framework.RunOnFrameworkThread(() =>
+        {
+            var config = plugin.Configuration;
+            config.CustomAvatars.TryGetValue(key, out var custom);
+            var at = key.IndexOf('@');
+            var name = at > 0 ? key[..at] : key;
+            var world = at > 0 ? key[(at + 1)..] : null;
+            return plugin.Avatars.PathFor(key, custom, config.LodestoneAvatars, name, world);
+        });
+
+        var bytes = path != null ? ReadFile(path) : null;
+        var type = path?.EndsWith(".png", StringComparison.OrdinalIgnoreCase) == true ? "image/png"
+            : path?.EndsWith(".gif", StringComparison.OrdinalIgnoreCase) == true ? "image/gif"
+            : "image/jpeg";
+        await SendBinary(ctx, bytes, type);
+    }
+
+    private static byte[]? ReadFile(string path)
+    {
+        try
+        {
+            return File.Exists(path) ? File.ReadAllBytes(path) : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
     private async Task HandleOlderHistory(HttpContext ctx)
     {
         var body = TryDeserialize<WebOlderHistoryRequest>(ctx.Request.DataAsString);
@@ -858,6 +897,9 @@ internal sealed class WebRoutes : IDisposable
             Channel = state.LastChannel.ToString(),
             LinkshellNumber = state.LinkshellNumber,
             CrossWorldLinkshellNumber = state.CrossWorldLinkshellNumber,
+            Messenger = !string.IsNullOrEmpty(chatWindow.ActiveWhisperTabTarget)
+                ? config.DiscordModeWhispers
+                : config.ChatTabs.Find(t => t.Id == chatWindow.ActiveTabId)?.DiscordMode == true,
         };
     }
 
@@ -919,6 +961,13 @@ internal sealed class WebRoutes : IDisposable
                 && !string.Equals(entry.Sender, plugin.OwnCharacterName, StringComparison.OrdinalIgnoreCase)
                 ? displayName
                 : null,
+            DisplayName = isOutgoingTell
+                ? plugin.OwnCharacterName
+                : plugin.GetNickname(entry) ?? (entry.Sender.Length > 0 ? entry.Sender : string.Empty),
+            AvatarKey = AvatarKeyFor(entry, isOutgoingTell),
+            AvatarVersion = AvatarVersionFor(entry, isOutgoingTell, config),
+            AvatarCrop = AvatarCropFor(entry, isOutgoingTell, config),
+            TimestampMs = new DateTimeOffset(entry.Timestamp).ToUnixTimeMilliseconds(),
             RelationIcon = relation == 0 || !config.ShowRelationIcons
                 ? null
                 : relation switch
@@ -928,6 +977,34 @@ internal sealed class WebRoutes : IDisposable
                     _ => "fc",
                 },
         };
+    }
+
+    private string? AvatarKeyFor(ChatLogEntry entry, bool outgoing)
+    {
+        if (outgoing)
+        {
+            var own = plugin.OwnCharacterName;
+            return string.IsNullOrEmpty(own) ? null : plugin.PlayerKey(own, plugin.OwnHomeWorld);
+        }
+
+        return entry.Sender.Length > 0 && entry.IsRealPlayer ? plugin.PlayerKey(entry.Sender, plugin.ResolveWorld(entry)) : null;
+    }
+
+    private string? AvatarVersionFor(ChatLogEntry entry, bool outgoing, Configuration config)
+    {
+        var key = AvatarKeyFor(entry, outgoing);
+        return key != null && config.CustomAvatars.TryGetValue(key, out var file) ? file : key != null ? "l" : null;
+    }
+
+    private string? AvatarCropFor(ChatLogEntry entry, bool outgoing, Configuration config)
+    {
+        var key = AvatarKeyFor(entry, outgoing);
+        if (key == null || !config.CustomAvatars.TryGetValue(key, out var file) || !config.CustomAvatarCrops.TryGetValue(file, out var crop))
+        {
+            return null;
+        }
+
+        return string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0:0.####},{1:0.####},{2:0.####},{3:0.####}", crop.X, crop.Y, crop.Z, crop.W);
     }
 
     private static string ToCssColor(Vector4 color)

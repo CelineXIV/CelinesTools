@@ -320,6 +320,9 @@ internal sealed class AvatarService : IDisposable
 
     internal string CustomPath(string fileName) => Path.Combine(customFolder, fileName);
 
+    internal string? PathFor(string key, string? customFileName, bool allowLodestone, string name, string? world) =>
+        Resolve(key, customFileName, allowLodestone, name, world, out _);
+
     internal (Vector2 Uv0, Vector2 Uv1) UvFor(string key, string? customFile, Dictionary<string, Vector4> crops)
     {
         if (customFile != null && crops.TryGetValue(customFile, out var crop))

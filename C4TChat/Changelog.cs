@@ -6,5 +6,6 @@ internal static class Changelog
     {
         ("1.0.0", "Rebrand and 1.0 Beta"),
         ("1.0.1", "Ui Changes + Item Relink"),
+        ("1.0.2", "Media Update"),
     };
 }

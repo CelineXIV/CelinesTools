@@ -720,3 +720,90 @@ html[data-theme="c4t-lila"] .c4t-logo-purple {
   opacity: 0.6;
   padding: 6px 0;
 }
+
+.msg.messenger {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 8px 12px 2px;
+}
+
+.msg.messenger.cont {
+  padding-top: 0;
+}
+
+.msg.messenger .avatar {
+  position: relative;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.msg.messenger.cont .avatar {
+  height: 1px;
+  visibility: hidden;
+}
+
+.msg.messenger .avatar img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.msg.messenger .avatar img.cropped {
+  inset: auto;
+  object-fit: fill;
+}
+
+.msg.messenger .avatar.has-image .avatar-initial {
+  display: none;
+}
+
+.msg.messenger .avatar-initial {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.msg.messenger .body {
+  min-width: 0;
+  flex: 1;
+}
+
+.msg.messenger .head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 2px;
+}
+
+.msg.messenger .name {
+  font-weight: 600;
+}
+
+.msg.messenger .pill {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: color-mix(in srgb, currentColor 16%, transparent);
+}
+
+.msg.messenger .time {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.msg.messenger .text {
+  line-height: 1.4;
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+}

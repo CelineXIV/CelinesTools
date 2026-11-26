@@ -1,5 +1,10 @@
+using System;
+using System.IO;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface.ImGuiFileDialog;
+using C4TChat.Services;
+using Newtonsoft.Json.Linq;
 using Dalamud.Interface;
 using Dalamud.Interface.Components;
 using Dalamud.Interface.Utility.Raii;
@@ -9,6 +14,10 @@ namespace C4TChat.Windows.SettingsPages;
 internal sealed class DisplayPage
 {
     private readonly Plugin plugin;
+    private readonly FileDialogManager fileDialog = new();
+    private JObject? undoTheme;
+    private string? themeStatus;
+    private bool themeStatusError;
 
     public DisplayPage(Plugin plugin)
     {
@@ -18,6 +27,7 @@ internal sealed class DisplayPage
     public void Draw()
     {
         var config = plugin.Configuration;
+        fileDialog.Draw();
 
         ImGui.SetNextItemWidth(180);
         var designIndex = (int)config.Design;
@@ -215,6 +225,135 @@ internal sealed class DisplayPage
             GlassIconButton.Draw(FontAwesomeIcon.Wifi, config.ToolbarIconPack, iconBgColor, previewIconColor, "##preview2");
             ImGui.SameLine();
             GlassIconButton.Draw(FontAwesomeIcon.Users, config.ToolbarIconPack, iconBgColor, previewIconColor, "##preview3");
+        }
+
+        DrawThemeSharing();
+    }
+
+    private void ApplyTheme(Action<Configuration> apply, string status)
+    {
+        undoTheme = ThemeTransfer.Parse(ThemeTransfer.Export(plugin.Configuration));
+        apply(plugin.Configuration);
+        plugin.InvalidateChatLayout();
+        plugin.SaveConfiguration();
+        themeStatus = status;
+        themeStatusError = false;
+    }
+
+    private void ImportTheme(string text)
+    {
+        if (ThemeTransfer.Parse(text) is { } theme)
+        {
+            ApplyTheme(c => ThemeTransfer.Apply(c, theme), Loc.T("Theme.Imported"));
+        }
+        else
+        {
+            themeStatus = Loc.T("Theme.Invalid");
+            themeStatusError = true;
+        }
+    }
+
+    private void DrawThemeSharing()
+    {
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.TextUnformatted(Loc.T("Theme.Header"));
+        using (ImRaii.PushColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]))
+        {
+            ImGui.TextWrapped(Loc.T("Theme.Hint"));
+        }
+
+        ImGui.TextUnformatted(Loc.T("Theme.Presets"));
+        for (var i = 0; i < ThemeTransfer.Presets.Length; i++)
+        {
+            var preset = ThemeTransfer.Presets[i];
+            if (i > 0)
+            {
+                ImGui.SameLine();
+            }
+
+            if (ImGui.Button(Loc.T(preset.NameKey) + "##preset" + i))
+            {
+                ApplyTheme(preset.Apply, Loc.T("Theme.PresetApplied", Loc.T(preset.NameKey)));
+            }
+        }
+
+        if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.Copy, Loc.T("Theme.CopyToClipboard")))
+        {
+            ImGui.SetClipboardText(ThemeTransfer.Export(plugin.Configuration));
+            themeStatus = Loc.T("Theme.Copied");
+            themeStatusError = false;
+        }
+
+        ImGui.SameLine();
+        if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.Paste, Loc.T("Theme.PasteFromClipboard")))
+        {
+            ImportTheme(ImGui.GetClipboardText() ?? string.Empty);
+        }
+
+        if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.Save, Loc.T("Theme.SaveFile")))
+        {
+            fileDialog.SaveFileDialog(Loc.T("Theme.SaveFile"), ".c4ttheme", "C4T-Design", ".c4ttheme", (ok, path) =>
+            {
+                if (!ok)
+                {
+                    return;
+                }
+
+                try
+                {
+                    File.WriteAllText(path, ThemeTransfer.Export(plugin.Configuration));
+                    themeStatus = Loc.T("Theme.Saved");
+                    themeStatusError = false;
+                }
+                catch (Exception ex)
+                {
+                    themeStatus = ex.Message;
+                    themeStatusError = true;
+                }
+            });
+        }
+
+        ImGui.SameLine();
+        if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.FolderOpen, Loc.T("Theme.LoadFile")))
+        {
+            fileDialog.OpenFileDialog(Loc.T("Theme.LoadFile"), ".c4ttheme,.txt,.json", (ok, paths) =>
+            {
+                if (!ok || paths.Count == 0)
+                {
+                    return;
+                }
+
+                try
+                {
+                    ImportTheme(File.ReadAllText(paths[0]));
+                }
+                catch (Exception ex)
+                {
+                    themeStatus = ex.Message;
+                    themeStatusError = true;
+                }
+            }, 1, null, false);
+        }
+
+        if (undoTheme != null)
+        {
+            ImGui.SameLine();
+            if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.Undo, Loc.T("Theme.Undo")))
+            {
+                var previous = undoTheme;
+                undoTheme = null;
+                ThemeTransfer.Apply(plugin.Configuration, previous);
+                plugin.InvalidateChatLayout();
+                plugin.SaveConfiguration();
+                themeStatus = Loc.T("Theme.Undone");
+                themeStatusError = false;
+            }
+        }
+
+        if (themeStatus != null)
+        {
+            ImGui.TextColored(themeStatusError ? new Vector4(1f, 0.5f, 0.45f, 1f) : C4tTheme.ActiveMarkerColor(plugin.Configuration), themeStatus);
         }
     }
 

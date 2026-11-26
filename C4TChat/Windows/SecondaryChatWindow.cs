@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface.Utility;
+using Dalamud.Interface;
 using Dalamud.Game.Text;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
@@ -39,6 +41,7 @@ internal sealed class SecondaryChatWindow : Window
 
     private const long BoundsSaveDebounceMs = 400;
 
+    private bool stickToBottom = true;
     private int seenLayoutVersion = -1;
 
     private string composeText = string.Empty;
@@ -161,19 +164,45 @@ internal sealed class SecondaryChatWindow : Window
             return;
         }
 
-        var availableWidth = ImGui.GetContentRegionAvail().X;
-        var composeHeight = ImGui.GetFrameHeightWithSpacing() + (composeError != null ? ImGui.GetTextLineHeightWithSpacing() : 0f);
+        var composeHeight = ImGui.GetFrameHeightWithSpacing() + ImGui.GetStyle().ItemSpacing.Y + (composeError != null ? ImGui.GetTextLineHeightWithSpacing() : 0f);
+        var windowPos = ImGui.GetWindowPos();
+        var windowSize = ImGui.GetWindowSize();
+        var logTop = ImGui.GetCursorScreenPos().Y;
+        ImGui.PushClipRect(windowPos, windowPos + windowSize, false);
+        ImGui.SetCursorScreenPos(new Vector2(windowPos.X, logTop));
         using (ImRaii.PushColor(ImGuiCol.ChildBg, C4tTheme.LogBackground(config)))
-        using (ImRaii.Child("##secondaryChatLog", new Vector2(-1, -composeHeight), true, ImGuiWindowFlags.AlwaysVerticalScrollbar))
+        using (ImRaii.PushStyle(ImGuiStyleVar.WindowPadding, new Vector2(16f, 6f) * ImGuiHelpers.GlobalScale)
+                   .Push(ImGuiStyleVar.ChildBorderSize, 0f))
+        using (ImRaii.Child("##secondaryChatLog", new Vector2(windowSize.X, -composeHeight), true, ImGuiWindowFlags.AlwaysVerticalScrollbar))
         {
             ImGui.SetScrollX(0f);
             C4tTheme.DrawWatermark(plugin);
 
+            var wantedInset = 16f * ImGuiHelpers.GlobalScale;
+            var extraInset = MathF.Max(0f, wantedInset - (ImGui.GetCursorScreenPos().X - ImGui.GetWindowPos().X));
+            if (extraInset > 0f)
+            {
+                ImGui.Indent(extraInset);
+            }
+
+            var availableWidth = ImGui.GetContentRegionAvail().X;
             using (ImRaii.PushStyle(ImGuiStyleVar.ItemSpacing, new Vector2(ImGui.GetStyle().ItemSpacing.X, config.LineSpacing), config.LineSpacing >= 0f))
             {
                 DrawFilteredEntries(config, availableWidth);
             }
+
+            if (extraInset > 0f)
+            {
+                ImGui.Unindent(extraInset);
+            }
         }
+
+        var logBottom = ImGui.GetItemRectMax().Y;
+        var edgeLine = ImGui.GetColorU32(ImGuiCol.Separator, 0.8f);
+        ImGui.GetWindowDrawList().AddLine(new Vector2(windowPos.X, logTop), new Vector2(windowPos.X + windowSize.X, logTop), edgeLine);
+        ImGui.GetWindowDrawList().AddLine(new Vector2(windowPos.X, logBottom), new Vector2(windowPos.X + windowSize.X, logBottom), edgeLine);
+        ImGui.PopClipRect();
+        ImGui.Dummy(new Vector2(1f, 2f * ImGuiHelpers.GlobalScale));
 
         DrawCompose(config);
         TrackWindowBounds();
@@ -218,7 +247,7 @@ internal sealed class SecondaryChatWindow : Window
         ImGui.GetWindowDrawList().AddRectFilled(
             tabBarOrigin,
             tabBarOrigin + new Vector2(ImGui.GetContentRegionAvail().X, lineHeight),
-            ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, config.TabStripBackgroundOpacity)));
+            ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, config.TabStripBackgroundOpacity * 0.35f)));
 
         using (ImRaii.Child("##secondaryTabStrip", new Vector2(-1, lineHeight), false, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse))
         {
@@ -241,12 +270,20 @@ internal sealed class SecondaryChatWindow : Window
                     using var id = ImRaii.PushId(tab.Id.ToString());
 
                     var isSelected = string.IsNullOrEmpty(activeWhisperTarget) && activeTabId == tab.Id;
-                    var tabWidth = ImGui.CalcTextSize(tab.Name).X + ImGui.GetStyle().FramePadding.X * 2f;
+                    var tabWidth = ChatWindow.StripTabWidth(tab.Name, 0, false, tab.Icon);
                     var tabSize = new Vector2(tabWidth, lineHeight);
 
-                    ChatWindow.DrawTabBackgroundFill(tab.BackgroundColor ?? (config.TabStripBackgroundColorEnabled ? config.TabStripBackgroundColor : (Vector4?)null), tabSize);
-                    var clicked = ImGui.Selectable(tab.Name + "##secTab", isSelected, ImGuiSelectableFlags.None, tabSize);
-                    ChatWindow.DrawActiveTabUnderline(isSelected, config);
+                    var clicked = ChatWindow.DrawStripTab(
+                        tab.Name,
+                        "##secTab",
+                        isSelected,
+                        tabSize,
+                        0,
+                        false,
+                        null,
+                        tab.BackgroundColor ?? (config.TabStripBackgroundColorEnabled ? config.TabStripBackgroundColor : (Vector4?)null),
+                        config,
+                        tab.Icon);
                     DrawReturnToMainWindowContextMenu("##secTabQuickEdit", () => plugin.MoveTabToMainWindow(tab.Id));
 
                     TabDragHelper.HandleHoverAndTearOff(tab.Id.ToString(), tab.Name, _ => { });
@@ -282,15 +319,13 @@ internal sealed class SecondaryChatWindow : Window
 
                     var isSelected = activeWhisperTarget == target;
                     var label = ChatWindow.FirstName(target);
-                    var tabWidth = ImGui.CalcTextSize(label).X + ImGui.GetStyle().FramePadding.X * 2f;
+                    var tabWidth = ChatWindow.StripTabWidth(label, 0, false, FontAwesomeIcon.CommentDots);
                     var tabSize = new Vector2(tabWidth, lineHeight);
 
                     var whisperBg = config.WhisperTabBackgroundColours.TryGetValue(target, out var customBg)
                         ? customBg
                         : config.TabStripBackgroundColorEnabled ? config.TabStripBackgroundColor : (Vector4?)null;
-                    ChatWindow.DrawTabBackgroundFill(whisperBg, tabSize);
-                    var clicked = ImGui.Selectable(label + "##secWhisper", isSelected, ImGuiSelectableFlags.None, tabSize);
-                    ChatWindow.DrawActiveTabUnderline(isSelected, config);
+                    var clicked = ChatWindow.DrawStripTab(label, "##secWhisper", isSelected, tabSize, 0, false, null, whisperBg, config, FontAwesomeIcon.CommentDots);
                     DrawReturnToMainWindowContextMenu("##secWhisperQuickEdit", () => plugin.MoveWhisperToMainWindow(target));
 
                     TabDragHelper.HandleHoverAndTearOff(target, label, _ => { });
@@ -395,6 +430,11 @@ internal sealed class SecondaryChatWindow : Window
         lastViewKey = viewKey;
 
         var nearBottomBeforeDraw = ImGui.GetScrollMaxY() - ImGui.GetScrollY() <= BottomToleranceForNewMessagePx;
+        var io = ImGui.GetIO();
+        if (ImGui.IsWindowHovered(ImGuiHoveredFlags.ChildWindows) && (io.MouseWheel != 0f || ImGui.IsMouseDown(ImGuiMouseButton.Left)))
+        {
+            stickToBottom = nearBottomBeforeDraw;
+        }
 
         var hasNewEntries = false;
         var hasNewOwnMessageInView = false;
@@ -512,13 +552,10 @@ internal sealed class SecondaryChatWindow : Window
             entryVariantCache.Clear();
         }
 
-        if (viewChanged)
+        if (viewChanged || hasNewOwnMessageInView || (hasNewEntries && nearBottomBeforeDraw) || stickToBottom)
         {
             ImGui.SetScrollHereY(1f);
-        }
-        else if (hasNewOwnMessageInView || (hasNewEntries && nearBottomBeforeDraw))
-        {
-            ImGui.SetScrollHereY(1f);
+            stickToBottom = true;
         }
 
         lastSeenSequenceByView[viewKey] = viewSeenMax;
@@ -624,7 +661,7 @@ internal sealed class SecondaryChatWindow : Window
             {
                 if (target.Url != null)
                 {
-                    ChatWindow.OpenUrl(target.Url, plugin);
+                    plugin.RequestOpenUrl(target.Url);
                 }
                 else if (target.Payload != null && entry.Payloads != null)
                 {
@@ -666,19 +703,26 @@ internal sealed class SecondaryChatWindow : Window
             return;
         }
 
-        if (showingWhisper)
+        using var composeRounding = ImRaii.PushStyle(ImGuiStyleVar.FrameRounding, 5f * ImGuiHelpers.GlobalScale);
+        var tag = showingWhisper
+            ? ChatWindow.ShortTag(ChatChannel.Whisper, 1, 1, activeWhisperTarget)
+            : ChatWindow.ShortTag(tab!.LastChannel, tab.LinkshellNumber, tab.CrossWorldLinkshellNumber, string.Empty);
+        var tagColor = showingWhisper
+            ? ChatWindow.ChannelColorFor(config, ChatChannel.Whisper, 1, 1)
+            : ChatWindow.ChannelColorFor(config, tab!.LastChannel, tab.LinkshellNumber, tab.CrossWorldLinkshellNumber);
+        if (ChatWindow.DrawChannelTagButton("##secCompChannel", tag, tagColor) && !showingWhisper)
         {
-            ImGui.TextColored(config.SendAccentColor, channelLabel);
-            ImGui.SameLine();
+            ImGui.OpenPopup("##secComposeChannelPicker");
         }
-        else
-        {
-            if (ImGui.Button(channelLabel + "##secCompChannel"))
-            {
-                ImGui.OpenPopup("##secComposeChannelPicker");
-            }
 
-            ImGui.SameLine();
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(channelLabel);
+        }
+
+        ImGui.SameLine();
+        if (!showingWhisper)
+        {
             DrawChannelPicker(tab!);
         }
 
@@ -688,9 +732,15 @@ internal sealed class SecondaryChatWindow : Window
             refocusCompose = false;
         }
 
-        ImGui.SetNextItemWidth(-1);
-        var submitted = ImGui.InputTextWithHint("##secondaryCompose", Loc.T("SecondaryChat.ComposeHint"), ref composeText, 2000, ImGuiInputTextFlags.EnterReturnsTrue);
+        var sendWidth = ImGui.GetFrameHeight() * 1.25f;
+        ImGui.SetNextItemWidth(-(sendWidth + ImGui.GetStyle().ItemSpacing.X));
+        var submitted = ImGui.InputTextWithHint("##secondaryCompose", Loc.T("Compose.Placeholder", channelLabel), ref composeText, 2000, ImGuiInputTextFlags.EnterReturnsTrue);
         plugin.IsSecondaryChatInputActive = ImGui.IsItemActive();
+        ImGui.SameLine();
+        if (ChatWindow.DrawSendButton(config, sendWidth, string.IsNullOrWhiteSpace(composeText)))
+        {
+            submitted = true;
+        }
 
         if (submitted)
         {

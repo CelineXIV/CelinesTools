@@ -38,6 +38,16 @@ internal sealed class WebMessageDto
     public bool IsWhisper { get; set; }
 
     public string? WhisperTarget { get; set; }
+
+    public string DisplayName { get; set; } = string.Empty;
+
+    public string? AvatarKey { get; set; }
+
+    public string? AvatarVersion { get; set; }
+
+    public string? AvatarCrop { get; set; }
+
+    public long TimestampMs { get; set; }
 }
 
 internal sealed class WebBookmarkRequest
@@ -106,6 +116,8 @@ internal sealed class WebViewDto
     public int LinkshellNumber { get; set; }
 
     public int CrossWorldLinkshellNumber { get; set; }
+
+    public bool Messenger { get; set; }
 }
 
 internal sealed class WebNumberedChannelDto

@@ -46,6 +46,38 @@ internal static class ColoredTextRenderer
         return false;
     }
 
+    private static string ShortUrl(string word, string url)
+    {
+        const int MaxLength = 48;
+        if (word.Length <= MaxLength || !Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            return word;
+        }
+
+        var trailing = word[word.TrimEnd(UrlTrailingPunctuation).Length..];
+        var host = uri.Host.StartsWith("www.", StringComparison.OrdinalIgnoreCase) ? uri.Host[4..] : uri.Host;
+        var segments = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        var last = segments.Length > 0 ? Uri.UnescapeDataString(segments[^1]) : string.Empty;
+        if (last.Length > 32)
+        {
+            last = last[..14] + "…" + last[^14..];
+        }
+
+        var shortened = segments.Length switch
+        {
+            0 => host,
+            1 => host + "/" + last,
+            _ => host + "/…/" + last,
+        };
+
+        if (uri.Query.Length > 1 && segments.Length == 0)
+        {
+            shortened += "/…";
+        }
+
+        return shortened + trailing;
+    }
+
     public static void Draw(
         string text,
         Vector4 defaultColor,
@@ -72,7 +104,7 @@ internal static class ColoredTextRenderer
         foreach (var (word, kind) in Tokenize(text, mentionTerm, state, allowRpFormatting))
         {
             var link = TryGetUrl(word, out var url) ? new LinkTarget(url) : null;
-            yield return (word, kind, link, null);
+            yield return (link != null ? ShortUrl(word, url) : word, kind, link, null);
         }
     }
 
@@ -164,8 +196,9 @@ internal static class ColoredTextRenderer
                     var currentLinkTarget = currentLink != null ? new LinkTarget(currentLink) : null;
                     foreach (var (word, kind) in Tokenize(textProvider.Text, mentionTerm, state, allowRpFormatting))
                     {
-                        var link = currentLinkTarget ?? (TryGetUrl(word, out var url) ? new LinkTarget(url) : null);
-                        yield return (word, kind, link, currentForeground);
+                        var isUrl = TryGetUrl(word, out var url);
+                        var link = isUrl && currentLink is not (MapLinkPayload or ItemPayload) ? new LinkTarget(url) : currentLinkTarget;
+                        yield return (isUrl ? ShortUrl(word, url) : word, kind, link, currentForeground);
                     }
 
                     break;

@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
@@ -28,6 +30,16 @@ internal sealed class PlayerCard
     private readonly FileDialogManager fileDialog = new();
     private string? statusMessage;
     private string nicknameText = string.Empty;
+    private string? travelWorld;
+    private long integrationsCheckedAt;
+    private PluginIntegrations.HonorificTitle? title;
+    private List<PluginIntegrations.MoodleStatus> moodles = new();
+    private DateTime? extrasSeenAt;
+    private bool openDateEditor;
+    private PlayerDateKind editKind;
+    private int editDay = 1;
+    private int editMonth = 1;
+    private int editYear;
 
     public PlayerCard(Plugin plugin, Action<string> openWhisper, Action<ChatLogEntry> editNote)
     {
@@ -64,6 +76,13 @@ internal sealed class PlayerCard
             lastSeen = other.Timestamp;
             lastChannel = ChannelDisplay.DisplayTag(other.ChatType);
         }
+
+        integrationsCheckedAt = 0;
+        title = null;
+        moodles = new List<PluginIntegrations.MoodleStatus>();
+        var current = plugin.CurrentWorldName;
+        var where = plugin.FriendCurrentWorld(source.ContentIdKnown ? source.ContentId : 0, source.Sender) ?? avatarWorld;
+        travelWorld = where != null && !string.Equals(where, current, StringComparison.OrdinalIgnoreCase) ? where : null;
 
         var target = WhisperTarget(source);
         hasWhisperLog = plugin.ChatLog.GetWhisperLogTargets().Exists(t => string.Equals(t, target, StringComparison.OrdinalIgnoreCase));
@@ -122,6 +141,17 @@ internal sealed class PlayerCard
                 }), nameColor);
             }
 
+            RefreshIntegrations(e);
+            if (title != null)
+            {
+                var titleColor = title.Color ?? accent;
+                ImGui.TextColored(extrasSeenAt != null ? titleColor with { W = 0.55f } : titleColor, "\u00ab" + title.Text + "\u00bb");
+                if (ImGui.IsItemHovered())
+                {
+                    ImGui.SetTooltip(Loc.T("PlayerCard.HonorificTitle"));
+                }
+            }
+
             if (plugin.GetPreviousNames(e) is { Count: > 0 } previous)
             {
                 ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + width - ((AvatarSize + 12f) * scale));
@@ -148,10 +178,8 @@ internal sealed class PlayerCard
 
         var note = plugin.GetPlayerNote(e);
         DrawNoteBox(note, width, e);
+        DrawDates(e, muted, accent, width);
 
-        DrawStat(FontAwesomeIcon.Comments, messageCount > 0 && firstSeen is { } first
-            ? Loc.T("PlayerCard.Messages", messageCount, first.ToString("HH:mm"))
-            : Loc.T("PlayerCard.NoMessages"), muted, width);
         if (messageCount > 0 && lastSeen is { } last)
         {
             DrawStat(FontAwesomeIcon.Clock, Loc.T("PlayerCard.LastMessage", AgoText(last), lastChannel.Trim()), muted, width);
@@ -160,6 +188,16 @@ internal sealed class PlayerCard
         if (hasWhisperLog)
         {
             DrawStat(FontAwesomeIcon.EnvelopeOpen, Loc.T("PlayerCard.HasWhisperLog"), muted, width);
+        }
+
+        if (moodles.Count > 0)
+        {
+            DrawMoodles(width);
+        }
+
+        if (extrasSeenAt is { } seenAt)
+        {
+            DrawStat(FontAwesomeIcon.History, Loc.T("PlayerCard.ExtrasSeen", AgoText(seenAt)), muted, width);
         }
 
         var lineY = ImGui.GetCursorScreenPos().Y + (2f * scale);
@@ -195,6 +233,16 @@ internal sealed class PlayerCard
             ImGui.CloseCurrentPopup();
         }
 
+        if (travelWorld != null && plugin.Integrations.CanTravelTo(travelWorld))
+        {
+            ImGui.SameLine(0, 2f * scale);
+            if (IconAction("##travel", FontAwesomeIcon.PlaneDeparture, Loc.T("PlayerCard.Travel", travelWorld), null, iconWidth))
+            {
+                plugin.Integrations.TravelTo(travelWorld);
+                ImGui.CloseCurrentPopup();
+            }
+        }
+
         var favorite = plugin.IsFavorite(e);
         ImGui.SameLine(0, 2f * scale);
         if (IconAction("##favorite", FontAwesomeIcon.Heart, Loc.T(favorite ? "ChatLog.RemoveFavorite" : "ChatLog.AddFavorite"), favorite ? config.FavoriteNameColor : null, iconWidth))
@@ -207,6 +255,93 @@ internal sealed class PlayerCard
         {
             editNote(e);
             ImGui.CloseCurrentPopup();
+        }
+    }
+
+    private void RefreshIntegrations(ChatLogEntry e)
+    {
+        var now = Environment.TickCount64;
+        if (now - integrationsCheckedAt < 1000)
+        {
+            return;
+        }
+
+        integrationsCheckedAt = now;
+        var player = plugin.FindNearbyPlayer(e.Sender, avatarWorld);
+        if (player != null)
+        {
+            title = plugin.Integrations.GetTitle(player);
+            moodles = plugin.Integrations.GetMoodles(player);
+            extrasSeenAt = null;
+            if (plugin.Integrations.HonorificAvailable || plugin.Integrations.MoodlesAvailable)
+            {
+                plugin.RememberExtras(avatarKey, player, title, moodles);
+            }
+
+            return;
+        }
+
+        title = null;
+        moodles = new List<PluginIntegrations.MoodleStatus>();
+        extrasSeenAt = null;
+        if (plugin.Configuration.RememberPlayerExtras && plugin.PlayerExtras.Get(avatarKey) is { } cached)
+        {
+            if (!string.IsNullOrEmpty(cached.Title))
+            {
+                title = new PluginIntegrations.HonorificTitle(cached.Title, cached.IsPrefix, cached.Color);
+            }
+
+            foreach (var m in cached.Moodles)
+            {
+                moodles.Add(new PluginIntegrations.MoodleStatus(m.Icon, m.Title, m.Description, m.Type, m.Stacks));
+            }
+
+            if (title != null || moodles.Count > 0)
+            {
+                extrasSeenAt = cached.SeenAt;
+            }
+        }
+    }
+
+    private void DrawMoodles(float width)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var size = new Vector2(24f, 32f) * scale;
+        var drawList = ImGui.GetWindowDrawList();
+        var startX = ImGui.GetCursorScreenPos().X;
+        for (var i = 0; i < moodles.Count; i++)
+        {
+            var moodle = moodles[i];
+            if (i > 0)
+            {
+                if (ImGui.GetCursorScreenPos().X + size.X > startX + width)
+                {
+                    ImGui.NewLine();
+                }
+                else
+                {
+                    ImGui.SameLine(0, 3f * scale);
+                }
+            }
+
+            var min = ImGui.GetCursorScreenPos();
+            ImGui.Dummy(size);
+            if (moodle.Icon != 0 && plugin.TextureProvider.GetFromGameIcon(new Dalamud.Interface.Textures.GameIconLookup(moodle.Icon)).GetWrapOrDefault() is { } wrap)
+            {
+                drawList.AddImage(wrap.Handle, min, min + size, Vector2.Zero, Vector2.One, ImGui.GetColorU32(new Vector4(1f, 1f, 1f, extrasSeenAt != null ? 0.55f : 1f)));
+            }
+
+            if (ImGui.IsItemHovered())
+            {
+                var kind = Loc.T(moodle.Type switch
+                {
+                    1 => "PlayerCard.MoodleNegative",
+                    2 => "PlayerCard.MoodleSpecial",
+                    _ => "PlayerCard.MoodlePositive",
+                });
+                ImGui.SetTooltip(moodle.Title + (moodle.Stacks > 1 ? " \u00d7" + moodle.Stacks : string.Empty) + "\n" + kind
+                    + (moodle.Description.Length > 0 ? "\n\n" + moodle.Description : string.Empty));
+            }
         }
     }
 
@@ -307,6 +442,181 @@ internal sealed class PlayerCard
             editNote(e);
             ImGui.CloseCurrentPopup();
         }
+    }
+
+    private void DrawDates(ChatLogEntry e, Vector4 muted, Vector4 accent, float width)
+    {
+        var today = DateTime.Today;
+        var shownAny = false;
+        foreach (var kind in new[] { PlayerDateKind.Birthday, PlayerDateKind.Anniversary })
+        {
+            if (plugin.GetPlayerDate(kind, avatarKey, e.Sender) is not { } date)
+            {
+                continue;
+            }
+
+            shownAny = true;
+            var days = date.DaysUntil(today);
+            var when = days switch
+            {
+                0 => Loc.T("Dates.IsToday"),
+                1 => Loc.T("Dates.IsTomorrow"),
+                _ => Loc.T("Dates.InDays", days),
+            };
+
+            var label = Loc.T(kind == PlayerDateKind.Birthday ? "Dates.BirthdayLabel" : "Dates.AnniversaryLabel", date.Display()) + " \u00b7 " + when;
+            var icon = kind == PlayerDateKind.Birthday ? FontAwesomeIcon.BirthdayCake : FontAwesomeIcon.HandHoldingHeart;
+            if (ClickableStat("##date" + (int)kind, icon, label, days <= 1 ? accent : muted, width, Loc.T("Dates.Edit")))
+            {
+                StartDateEdit(kind, date);
+            }
+        }
+
+        if (!shownAny && ClickableStat("##dateAdd", FontAwesomeIcon.CalendarPlus, Loc.T("Dates.Add"), muted with { W = muted.W * 0.75f }, width, Loc.T("Dates.AddTooltip")))
+        {
+            StartDateEdit(PlayerDateKind.Birthday, null);
+        }
+
+        if (openDateEditor)
+        {
+            ImGui.OpenPopup("##playerDates");
+            openDateEditor = false;
+        }
+
+        DrawDateEditor(e);
+    }
+
+    private void StartDateEdit(PlayerDateKind kind, PlayerDate? date)
+    {
+        editKind = kind;
+        editDay = date?.Day ?? DateTime.Today.Day;
+        editMonth = date?.Month ?? DateTime.Today.Month;
+        editYear = date?.Year ?? 0;
+        openDateEditor = true;
+    }
+
+    private void LoadEditKind(ChatLogEntry e, PlayerDateKind kind)
+    {
+        editKind = kind;
+        if (plugin.GetPlayerDate(kind, avatarKey, e.Sender) is { } existing)
+        {
+            editDay = existing.Day;
+            editMonth = existing.Month;
+            editYear = existing.Year ?? 0;
+        }
+    }
+
+    private void DrawDateEditor(ChatLogEntry e)
+    {
+        using var popup = ImRaii.Popup("##playerDates");
+        if (!popup.Success)
+        {
+            return;
+        }
+
+        var scale = ImGuiHelpers.GlobalScale;
+        if (ImGui.RadioButton(Loc.T("Dates.KindBirthday"), editKind == PlayerDateKind.Birthday))
+        {
+            LoadEditKind(e, PlayerDateKind.Birthday);
+        }
+
+        ImGui.SameLine();
+        if (ImGui.RadioButton(Loc.T("Dates.KindAnniversary"), editKind == PlayerDateKind.Anniversary))
+        {
+            LoadEditKind(e, PlayerDateKind.Anniversary);
+        }
+
+        var culture = Loc.Culture;
+        ImGui.SetNextItemWidth(60f * scale);
+        using (var combo = ImRaii.Combo("##day", editDay.ToString(culture)))
+        {
+            if (combo.Success)
+            {
+                for (var d = 1; d <= DateTime.DaysInMonth(2024, editMonth); d++)
+                {
+                    if (ImGui.Selectable(d.ToString(culture), d == editDay))
+                    {
+                        editDay = d;
+                    }
+                }
+            }
+        }
+
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(120f * scale);
+        using (var combo = ImRaii.Combo("##month", culture.DateTimeFormat.GetMonthName(editMonth)))
+        {
+            if (combo.Success)
+            {
+                for (var m = 1; m <= 12; m++)
+                {
+                    if (ImGui.Selectable(culture.DateTimeFormat.GetMonthName(m), m == editMonth))
+                    {
+                        editMonth = m;
+                    }
+                }
+            }
+        }
+
+        editDay = Math.Min(editDay, DateTime.DaysInMonth(2024, editMonth));
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(70f * scale);
+        var yearText = editYear > 0 ? editYear.ToString(CultureInfo.InvariantCulture) : string.Empty;
+        if (ImGui.InputTextWithHint("##year", Loc.T("Dates.YearHint"), ref yearText, 4, ImGuiInputTextFlags.CharsDecimal))
+        {
+            editYear = int.TryParse(yearText, NumberStyles.None, CultureInfo.InvariantCulture, out var y) ? y : 0;
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Dates.YearTooltip"));
+        }
+
+        var yearValid = editYear == 0 || (editYear >= 1900 && editYear <= DateTime.Today.Year);
+        using (ImRaii.Disabled(!yearValid))
+        {
+            if (ImGui.Button(Loc.T("Dates.Save")))
+            {
+                plugin.SetPlayerDate(editKind, avatarKey, e.Sender, new PlayerDate(editMonth, editDay, editYear > 0 ? editYear : null));
+                ImGui.CloseCurrentPopup();
+            }
+        }
+
+        if (plugin.GetPlayerDate(editKind, avatarKey, e.Sender) != null)
+        {
+            ImGui.SameLine();
+            if (ImGui.Button(Loc.T("Dates.Remove")))
+            {
+                plugin.SetPlayerDate(editKind, avatarKey, e.Sender, null);
+                ImGui.CloseCurrentPopup();
+            }
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button(Loc.T("LinkConfirm.Cancel")))
+        {
+            ImGui.CloseCurrentPopup();
+        }
+    }
+
+    private static bool ClickableStat(string id, FontAwesomeIcon icon, string text, Vector4 color, float width, string tooltip)
+    {
+        var start = ImGui.GetCursorScreenPos();
+        using (ImRaii.PushId(id))
+        using (ImRaii.Group())
+        {
+            DrawStat(icon, text, color, width);
+        }
+
+        var end = ImGui.GetItemRectMax();
+        var hovered = ImGui.IsMouseHoveringRect(start, new Vector2(start.X + width, end.Y));
+        if (hovered)
+        {
+            ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
+            ImGui.SetTooltip(tooltip);
+        }
+
+        return hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Left);
     }
 
     private static void DrawStat(FontAwesomeIcon icon, string text, Vector4 color, float width)

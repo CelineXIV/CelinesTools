@@ -40,8 +40,11 @@ internal sealed class HttpRequest
 {
     private readonly Dictionary<string, string> headers;
 
-    public HttpRequest(HttpMethod method, string path, Dictionary<string, string> headers, byte[] body, string remoteIp)
+    private readonly string query;
+
+    public HttpRequest(HttpMethod method, string path, Dictionary<string, string> headers, byte[] body, string remoteIp, string query = "")
     {
+        this.query = query;
         Method = method;
         Path = path;
         this.headers = headers;
@@ -60,6 +63,21 @@ internal sealed class HttpRequest
     public string? DataAsString => Body.Length == 0 ? null : Encoding.UTF8.GetString(Body);
 
     public string? RetrieveHeaderValue(string key) => headers.TryGetValue(key, out var value) ? value : null;
+
+    public string? RetrieveQueryValue(string key)
+    {
+        foreach (var pair in query.Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var eq = pair.IndexOf('=');
+            var name = eq >= 0 ? pair[..eq] : pair;
+            if (string.Equals(Uri.UnescapeDataString(name), key, StringComparison.Ordinal))
+            {
+                return eq >= 0 ? Uri.UnescapeDataString(pair[(eq + 1)..].Replace('+', ' ')) : string.Empty;
+            }
+        }
+
+        return null;
+    }
 }
 
 internal sealed class HttpResponse
@@ -502,8 +520,10 @@ internal sealed class MiniHttpServer : IDisposable
         var method = Enum.TryParse<HttpMethod>(requestLineParts[0], ignoreCase: true, out var parsedMethod) ? parsedMethod : HttpMethod.Other;
         var path = requestLineParts[1];
         var queryIndex = path.IndexOf('?');
+        var query = string.Empty;
         if (queryIndex >= 0)
         {
+            query = path[(queryIndex + 1)..];
             path = path[..queryIndex];
         }
 
@@ -556,7 +576,7 @@ internal sealed class MiniHttpServer : IDisposable
             }
         }
 
-        return new HttpRequest(method, path, headers, body, remoteIp);
+        return new HttpRequest(method, path, headers, body, remoteIp, query);
     }
 
     private static int IndexOfHeaderTerminator(List<byte> buffer)

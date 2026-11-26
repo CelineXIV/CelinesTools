@@ -131,6 +131,95 @@ internal sealed class GeneralPage
             ImGui.SetTooltip(Loc.T("Settings.LodestoneAvatarsTooltip"));
         }
 
+        var imagePreviews = config.ImageLinkPreviews;
+        if (ImGui.Checkbox(Loc.T("Settings.ImageLinkPreviews"), ref imagePreviews))
+        {
+            config.ImageLinkPreviews = imagePreviews;
+            plugin.InvalidateChatLayout();
+            plugin.SaveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Settings.ImageLinkPreviewsTooltip"));
+        }
+
+        using (ImRaii.Disabled(!config.ImageLinkPreviews))
+        {
+            ImGui.Indent();
+            var videoCards = config.VideoCards;
+            if (ImGui.Checkbox(Loc.T("Settings.LinkCards"), ref videoCards))
+            {
+                config.VideoCards = videoCards;
+                plugin.InvalidateChatLayout();
+                plugin.SaveConfiguration();
+            }
+
+            ImGui.Unindent();
+        }
+
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+        {
+            ImGui.SetTooltip(Loc.T("Settings.LinkCardsTooltip"));
+        }
+
+        var dateReminders = config.DateReminders;
+        if (ImGui.Checkbox(Loc.T("Settings.DateReminders"), ref dateReminders))
+        {
+            config.DateReminders = dateReminders;
+            plugin.SaveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Settings.DateRemindersTooltip"));
+        }
+
+        var confirmLinks = config.ConfirmLinks;
+        if (ImGui.Checkbox(Loc.T("Settings.ConfirmLinks"), ref confirmLinks))
+        {
+            config.ConfirmLinks = confirmLinks;
+            plugin.SaveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Settings.ConfirmLinksTooltip"));
+        }
+
+        if (config.TrustedLinkHosts.Count > 0)
+        {
+            ImGui.SameLine();
+            if (ImGui.SmallButton(Loc.T("Settings.TrustedLinksReset", config.TrustedLinkHosts.Count)))
+            {
+                config.TrustedLinkHosts.Clear();
+                plugin.SaveConfiguration();
+            }
+
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(string.Join(", ", config.TrustedLinkHosts));
+            }
+        }
+
+        var rememberExtras = config.RememberPlayerExtras;
+        if (ImGui.Checkbox(Loc.T("Settings.RememberPlayerExtras"), ref rememberExtras))
+        {
+            config.RememberPlayerExtras = rememberExtras;
+            plugin.SaveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Settings.RememberPlayerExtrasTooltip"));
+        }
+
+        ImGui.SameLine();
+        if (ImGui.SmallButton(Loc.T("Settings.ForgetPlayerExtras")))
+        {
+            plugin.PlayerExtras.Clear();
+        }
+
         DrawOwnAvatar(config);
 
         var showNicknames = config.ShowNicknames;
@@ -206,6 +295,27 @@ internal sealed class GeneralPage
 
         ImGui.Separator();
         ImGui.TextUnformatted(Loc.T("Settings.MiscHeader"));
+
+        ImGui.SetNextItemWidth(160);
+        var notifyLabels = new[] { Loc.T("Friends.NotifyOff"), Loc.T("Friends.NotifyFavorites"), Loc.T("Friends.NotifyAll") };
+        var notifyIndex = (int)config.FriendOnlineNotify;
+        if (ImGui.Combo(Loc.T("Friends.NotifyLabel"), ref notifyIndex, notifyLabels, notifyLabels.Length))
+        {
+            config.FriendOnlineNotify = (FriendNotifyMode)notifyIndex;
+            plugin.SaveConfiguration();
+        }
+
+        var backgroundRefresh = config.FriendBackgroundRefresh;
+        if (ImGui.Checkbox(Loc.T("Friends.BackgroundRefresh"), ref backgroundRefresh))
+        {
+            config.FriendBackgroundRefresh = backgroundRefresh;
+            plugin.SaveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(Loc.T("Friends.BackgroundRefreshTooltip"));
+        }
 
         var replaceSocial = config.ReplaceSocialWindow;
         if (ImGui.Checkbox(Loc.T("Settings.ReplaceSocialWindow"), ref replaceSocial))

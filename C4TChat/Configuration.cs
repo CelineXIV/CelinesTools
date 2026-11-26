@@ -92,6 +92,8 @@ public class CharacterState
 {
     public List<CachedFriend> FriendCache { get; set; } = new();
 
+    public Dictionary<ulong, DateTime> FriendLastOnline { get; set; } = new();
+
     public ChatChannel LastChannel { get; set; } = ChatChannel.Say;
 
     public string LastWhisperTarget { get; set; } = string.Empty;
@@ -385,7 +387,31 @@ public class Configuration : IPluginConfiguration
 
     public bool DiscordModeWhispers { get; set; }
 
+    public HashSet<string> WhisperMediaHidden { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
     public bool LodestoneAvatars { get; set; } = true;
+
+    public bool RememberPlayerExtras { get; set; } = true;
+
+    public bool ImageLinkPreviews { get; set; }
+
+    public bool ConfirmLinks { get; set; } = true;
+
+    public bool VideoCards { get; set; } = true;
+
+    public Dictionary<string, string> PlayerBirthdays { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public Dictionary<string, string> PlayerAnniversaries { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public bool DateReminders { get; set; } = true;
+
+    public string? LastDateNoticeDay { get; set; }
+
+    public List<string> TrustedLinkHosts { get; set; } = new();
+
+    public FriendNotifyMode FriendOnlineNotify { get; set; } = FriendNotifyMode.Favorites;
+
+    public bool FriendBackgroundRefresh { get; set; } = true;
 
     public Dictionary<string, string> CustomAvatars { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -419,11 +445,14 @@ public class Configuration : IPluginConfiguration
         SecondaryChatWhisperTargets = new HashSet<string>(SecondaryChatWhisperTargets, StringComparer.OrdinalIgnoreCase);
         WhisperTabBackgroundColours = new Dictionary<string, Vector4>(WhisperTabBackgroundColours, StringComparer.OrdinalIgnoreCase);
         HiddenPlayers = new HashSet<string>(HiddenPlayers, StringComparer.OrdinalIgnoreCase);
+        WhisperMediaHidden = new HashSet<string>(WhisperMediaHidden, StringComparer.OrdinalIgnoreCase);
         PlayerNotes = new Dictionary<string, string>(PlayerNotes, StringComparer.OrdinalIgnoreCase);
         FavoritePlayers = new HashSet<string>(FavoritePlayers, StringComparer.OrdinalIgnoreCase);
         CustomAvatars = new Dictionary<string, string>(CustomAvatars, StringComparer.OrdinalIgnoreCase);
         CustomAvatarCrops = new Dictionary<string, Vector4>(CustomAvatarCrops, StringComparer.OrdinalIgnoreCase);
         PlayerNicknames = new Dictionary<string, string>(PlayerNicknames, StringComparer.OrdinalIgnoreCase);
+        PlayerBirthdays = new Dictionary<string, string>(PlayerBirthdays, StringComparer.OrdinalIgnoreCase);
+        PlayerAnniversaries = new Dictionary<string, string>(PlayerAnniversaries, StringComparer.OrdinalIgnoreCase);
         foreach (var character in Characters.Values)
         {
             character.LockedWhisperTargets = new HashSet<string>(character.LockedWhisperTargets, StringComparer.OrdinalIgnoreCase);
@@ -431,6 +460,13 @@ public class Configuration : IPluginConfiguration
             character.KnownFcMembers = new HashSet<string>(character.KnownFcMembers, StringComparer.OrdinalIgnoreCase);
         }
     }
+}
+
+public enum FriendNotifyMode
+{
+    Off,
+    Favorites,
+    AllFriends,
 }
 
 public class CachedFriend

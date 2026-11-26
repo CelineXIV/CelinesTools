@@ -114,6 +114,99 @@ public sealed class Plugin : IDalamudPlugin
 
     internal AvatarService Avatars { get; private set; } = null!;
 
+    internal PluginIntegrations Integrations { get; private set; } = null!;
+
+    internal PlayerExtrasCache PlayerExtras { get; private set; } = null!;
+
+    internal ImagePreviewService ImagePreviews { get; private set; } = null!;
+
+    internal LinkCardService LinkCards { get; private set; } = null!;
+
+    private ImagePreviewWindow imagePreviewWindow = null!;
+
+    internal void OpenImagePreview(string url) => imagePreviewWindow.Open(url);
+
+    private LinkConfirmWindow linkConfirmWindow = null!;
+
+    internal void RequestOpenUrl(string url)
+    {
+        var host = LinkConfirmWindow.HostOf(url);
+        if (!Configuration.ConfirmLinks || (host.Length > 0 && Configuration.TrustedLinkHosts.Contains(host)))
+        {
+            ChatWindow.OpenUrl(url, this);
+            return;
+        }
+
+        linkConfirmWindow.Open(url);
+    }
+
+    internal string PlayerKey(string name, string? world) => world != null ? name + "@" + world : name;
+
+    internal void RememberExtras(string key, Dalamud.Game.ClientState.Objects.SubKinds.IPlayerCharacter player,
+        PluginIntegrations.HonorificTitle? title, List<PluginIntegrations.MoodleStatus> moodles)
+    {
+        if (Configuration.RememberPlayerExtras)
+        {
+            PlayerExtras.Store(key, title, moodles);
+        }
+    }
+
+    private void RememberExtrasFromChat(ChatLogEntry entry)
+    {
+        if (!Configuration.RememberPlayerExtras
+            || (!Integrations.HonorificAvailable && !Integrations.MoodlesAvailable)
+            || entry.ChatType == XivChatType.TellOutgoing
+            || string.IsNullOrEmpty(entry.Sender)
+            || !entry.IsRealPlayer
+            || string.Equals(entry.Sender, OwnCharacterName, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var world = ResolveWorld(entry);
+        var key = PlayerKey(entry.Sender, world);
+        if (!PlayerExtras.ShouldQuery(key, Environment.TickCount64, 30_000))
+        {
+            return;
+        }
+
+        var player = FindNearbyPlayer(entry.Sender, world);
+        if (player != null)
+        {
+            PlayerExtras.Store(key, Integrations.GetTitle(player), Integrations.GetMoodles(player));
+        }
+    }
+
+    internal string? CurrentWorldName => playerState.IsLoaded ? playerState.CurrentWorld.ValueNullable?.Name.ExtractText() : null;
+
+    internal unsafe string? FriendCurrentWorld(ulong contentId, string name)
+    {
+        var proxy = (InfoProxyCommonList*)InfoProxyFriendList.Instance();
+        if (proxy == null)
+        {
+            return null;
+        }
+
+        var count = proxy->GetEntryCount();
+        for (uint i = 0; i < count; i++)
+        {
+            var entry = proxy->GetEntry(i);
+            if (entry == null || (contentId != 0 ? entry->ContentId != contentId : !string.Equals(entry->NameString, name, StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
+            if (entry->CurrentWorld == 0)
+            {
+                return null;
+            }
+
+            return dataManager.GetExcelSheet<World>().GetRowOrDefault(entry->CurrentWorld)?.Name.ExtractText();
+        }
+
+        return null;
+    }
+
     internal string? OwnHomeWorld => playerState.IsLoaded ? playerState.HomeWorld.ValueNullable?.Name.ExtractText() : null;
 
     internal string? ResolveWorld(ChatLogEntry entry) =>
@@ -349,10 +442,18 @@ public sealed class Plugin : IDalamudPlugin
         bookmarksWindow = new BookmarksWindow(this);
         perfWindow = new PerfOverlayWindow(this) { IsOpen = Configuration.ShowPerformanceOverlay };
         socialWindow = new SocialWindow(this);
+        imagePreviewWindow = new ImagePreviewWindow(this);
+        windowSystem.AddWindow(imagePreviewWindow);
+        linkConfirmWindow = new LinkConfirmWindow(this);
+        windowSystem.AddWindow(linkConfirmWindow);
         avatarCropWindow = new AvatarCropWindow(this);
         windowSystem.AddWindow(avatarCropWindow);
         windowSystem.AddWindow(socialWindow);
         Avatars = new AvatarService(textureProvider, textureReadbackProvider, log, this.pluginInterface.GetPluginConfigDirectory());
+        Integrations = new PluginIntegrations(this.pluginInterface, log);
+        PlayerExtras = new PlayerExtrasCache(this.pluginInterface.GetPluginConfigDirectory(), log);
+        ImagePreviews = new ImagePreviewService(textureProvider, log, this.pluginInterface.GetPluginConfigDirectory());
+        LinkCards = new LinkCardService(log, this.pluginInterface.GetPluginConfigDirectory());
         windowSystem.AddWindow(settingsWindow);
         windowSystem.AddWindow(bookmarksWindow);
         windowSystem.AddWindow(perfWindow);
@@ -559,12 +660,24 @@ public sealed class Plugin : IDalamudPlugin
         {
             chatGui.Print(new XivChatEntry { Type = XivChatType.Echo, Message = "[C4TChat] " + text });
         }
+
+        foreach (var other in pluginInterface.InstalledPlugins)
+        {
+            if (other.IsLoaded && string.Equals(other.InternalName, "ChatTwo", StringComparison.OrdinalIgnoreCase))
+            {
+                chatGui.Print(new XivChatEntry { Type = XivChatType.Echo, Message = "[C4TChat] " + Loc.T("Rebrand.ChatTwoRunning") });
+                break;
+            }
+        }
     }
 
     private void UpdateAwayAndRelations()
     {
+        RefreshFriendListInBackground();
+        PlayerExtras.SaveIfDue();
         ShowLegacyNoticeOnce();
         PrintPendingNameChangeNotices();
+        CheckPlayerDates();
         var now = Environment.TickCount64;
         if (now >= nextAwayCheckTicks)
         {
@@ -579,6 +692,7 @@ public sealed class Plugin : IDalamudPlugin
             nextRelationRefreshTicks = now + 30_000;
             relationVersion++;
             CheckFriendListForNameChanges();
+            TrackFriendPresence();
         }
 
         if (nextLogMaintenanceTicks == 0)
@@ -626,6 +740,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnEntryAddedForPlugin(ChatLogEntry entry)
     {
+        RememberExtrasFromChat(entry);
         Away.OnEntry(entry);
 
         if (entry.ChatType == XivChatType.TellIncoming && !string.IsNullOrEmpty(entry.Sender) && !IsFilteredOut(entry))
@@ -706,7 +821,288 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        if (friendContentIds.Contains(entry.ContentId) && playerState.IsLoaded)
+        {
+            GetCharacterState().FriendLastOnline[entry.ContentId] = DateTime.Now;
+        }
+
         ObserveCharacter(entry.ContentId, entry.Sender, ResolveWorld(entry), fromFriendList: false);
+    }
+
+    private readonly HashSet<ulong> friendContentIds = new();
+    private Dictionary<ulong, bool>? friendWasOnline;
+    private readonly Dictionary<ulong, int> friendOfflineScans = new();
+    private long nextFriendBackgroundRefresh;
+    private bool friendPresenceDirty;
+
+    internal unsafe List<string> GetNameCandidates()
+    {
+        var names = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void add(string? name)
+        {
+            if (!string.IsNullOrWhiteSpace(name) && name.Contains(' ') && seen.Add(name)
+                && !string.Equals(name, OwnCharacterName, StringComparison.OrdinalIgnoreCase))
+            {
+                names.Add(name);
+            }
+        }
+
+        foreach (var member in partyList)
+        {
+            add(member.Name.TextValue);
+        }
+
+        var recent = ChatLog.Snapshot();
+        for (var i = recent.Count - 1; i >= 0 && i >= recent.Count - 400; i--)
+        {
+            if (recent[i].ChatType != XivChatType.TellOutgoing && recent[i].IsRealPlayer)
+            {
+                add(recent[i].Sender);
+            }
+        }
+
+        if (playerState.IsLoaded)
+        {
+            foreach (var target in GetCharacterState().RecentWhisperTargets)
+            {
+                var at = target.IndexOf('@');
+                add(at > 0 ? target[..at] : target);
+            }
+        }
+
+        var proxy = (InfoProxyCommonList*)InfoProxyFriendList.Instance();
+        if (proxy != null)
+        {
+            var count = proxy->GetEntryCount();
+            for (uint i = 0; i < count; i++)
+            {
+                var entry = proxy->GetEntry(i);
+                if (entry != null)
+                {
+                    add(entry->NameString);
+                }
+            }
+        }
+
+        return names;
+    }
+
+    internal DateTime? FriendLastOnline(ulong contentId) =>
+        playerState.IsLoaded && GetCharacterState().FriendLastOnline.TryGetValue(contentId, out var seen) ? seen : null;
+
+    private unsafe void RefreshFriendListInBackground()
+    {
+        var now = Environment.TickCount64;
+        if (!Configuration.FriendBackgroundRefresh || !playerState.IsLoaded || now < nextFriendBackgroundRefresh)
+        {
+            return;
+        }
+
+        if (nextFriendBackgroundRefresh == 0)
+        {
+            nextFriendBackgroundRefresh = now + 60_000;
+            return;
+        }
+
+        nextFriendBackgroundRefresh = now + 180_000;
+        if (condition[ConditionFlag.BoundByDuty] || condition[ConditionFlag.BetweenAreas] || condition[ConditionFlag.InCombat])
+        {
+            return;
+        }
+
+        var proxy = InfoProxyFriendList.Instance();
+        if (proxy != null)
+        {
+            ((InfoProxyCommonList*)proxy)->RequestData();
+        }
+    }
+
+    private unsafe void TrackFriendPresence()
+    {
+        if (!playerState.IsLoaded)
+        {
+            return;
+        }
+
+        var proxy = (InfoProxyCommonList*)InfoProxyFriendList.Instance();
+        if (proxy == null)
+        {
+            return;
+        }
+
+        var state = GetCharacterState();
+        var count = proxy->GetEntryCount();
+        if (count == 0)
+        {
+            return;
+        }
+
+        var firstScan = friendWasOnline == null;
+        friendWasOnline ??= new Dictionary<ulong, bool>();
+        var now = DateTime.Now;
+        friendContentIds.Clear();
+
+        for (uint i = 0; i < count; i++)
+        {
+            var entry = proxy->GetEntry(i);
+            if (entry == null || entry->ContentId == 0 || string.IsNullOrEmpty(entry->NameString))
+            {
+                continue;
+            }
+
+            var contentId = entry->ContentId;
+            friendContentIds.Add(contentId);
+            var raw = (ulong)entry->State;
+            var online = raw != 0 && (raw & (1UL << 10)) == 0 && (raw & (1UL << 9)) == 0;
+            var pending = entry->WaitingForFriendListApproval || (entry->ExtraFlags & 0x20) != 0;
+            var unclear = online && entry->Job == 0 && entry->Location == 0;
+            if (pending || unclear)
+            {
+                continue;
+            }
+
+            if (online && (!state.FriendLastOnline.TryGetValue(contentId, out var lastSeen) || now - lastSeen > TimeSpan.FromMinutes(5)))
+            {
+                state.FriendLastOnline[contentId] = now;
+                friendPresenceDirty = true;
+            }
+
+            var offlineScans = friendOfflineScans.GetValueOrDefault(contentId);
+            if (!online)
+            {
+                friendOfflineScans[contentId] = offlineScans + 1;
+                if (offlineScans + 1 >= 2)
+                {
+                    friendWasOnline[contentId] = false;
+                }
+
+                continue;
+            }
+
+            friendOfflineScans[contentId] = 0;
+            var confirmedOffline = friendWasOnline.TryGetValue(contentId, out var before) && !before;
+            friendWasOnline[contentId] = true;
+            if (!firstScan && confirmedOffline)
+            {
+                NotifyFriendOnline(entry->NameString, entry->HomeWorld);
+            }
+        }
+
+        if (friendPresenceDirty)
+        {
+            friendPresenceDirty = false;
+            SaveConfiguration();
+        }
+    }
+
+    private string? dateCheckDay;
+
+    private Dictionary<string, string> DatesFor(PlayerDateKind kind) =>
+        kind == PlayerDateKind.Birthday ? Configuration.PlayerBirthdays : Configuration.PlayerAnniversaries;
+
+    internal PlayerDate? GetPlayerDate(PlayerDateKind kind, string key, string name)
+    {
+        var dates = DatesFor(kind);
+        if (dates.Count == 0)
+        {
+            return null;
+        }
+
+        return (dates.TryGetValue(key, out var text) || dates.TryGetValue(name, out text)) && PlayerDate.TryParse(text, out var date)
+            ? date
+            : null;
+    }
+
+    internal void SetPlayerDate(PlayerDateKind kind, string key, string name, PlayerDate? date)
+    {
+        var dates = DatesFor(kind);
+        dates.Remove(name);
+        if (date is { } value)
+        {
+            dates[key] = value.Serialize();
+        }
+        else
+        {
+            dates.Remove(key);
+        }
+
+        SaveConfiguration();
+    }
+
+    private void CheckPlayerDates()
+    {
+        var today = DateTime.Today;
+        var day = today.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+        if (dateCheckDay == day || !playerState.IsLoaded)
+        {
+            return;
+        }
+
+        dateCheckDay = day;
+        if (!Configuration.DateReminders || Configuration.LastDateNoticeDay == day)
+        {
+            return;
+        }
+
+        Configuration.LastDateNoticeDay = day;
+        var any = false;
+        foreach (var kind in new[] { PlayerDateKind.Birthday, PlayerDateKind.Anniversary })
+        {
+            foreach (var (key, text) in DatesFor(kind))
+            {
+                if (!PlayerDate.TryParse(text, out var date))
+                {
+                    continue;
+                }
+
+                var days = date.DaysUntil(today);
+                if (days > 1)
+                {
+                    continue;
+                }
+
+                var at = key.IndexOf('@');
+                var name = at > 0 ? key[..at] : key;
+                var world = at > 0 ? key[(at + 1)..] : null;
+                var shown = FindNickname(key, name, world) ?? name;
+                var years = date.YearsAt(date.NextOccurrence(today));
+                var baseKey = (kind == PlayerDateKind.Birthday ? "Dates.Birthday" : "Dates.Anniversary") + (days == 0 ? "Today" : "Tomorrow");
+                var message = Loc.T(baseKey, shown);
+                if (years is { } y)
+                {
+                    message += " " + Loc.T(kind == PlayerDateKind.Birthday ? "Dates.TurnsAge" : "Dates.AnniversaryYears", y);
+                }
+
+                chatGui.Print(new XivChatEntry { Type = XivChatType.Echo, Message = "[C4TChat] " + message });
+                any = true;
+            }
+        }
+
+        if (any || Configuration.LastDateNoticeDay != null)
+        {
+            SaveConfiguration();
+        }
+    }
+
+    private void NotifyFriendOnline(string name, ushort homeWorld)
+    {
+        var mode = Configuration.FriendOnlineNotify;
+        if (mode == FriendNotifyMode.Off)
+        {
+            return;
+        }
+
+        var world = dataManager.GetExcelSheet<World>().GetRowOrDefault(homeWorld)?.Name.ExtractText();
+        var key = world != null ? name + "@" + world : name;
+        var favorite = Configuration.FavoritePlayers.Contains(key) || Configuration.FavoritePlayers.Contains(name);
+        if (mode == FriendNotifyMode.Favorites && !favorite)
+        {
+            return;
+        }
+
+        var shown = FindNickname(key, name, world) ?? name;
+        chatGui.Print(new XivChatEntry { Type = XivChatType.Echo, Message = "[C4TChat] " + Loc.T(favorite ? "Friends.FavoriteOnline" : "Friends.FriendOnline", shown) });
     }
 
     private void CheckFriendListForNameChanges()
@@ -918,6 +1314,8 @@ public sealed class Plugin : IDalamudPlugin
 
         moveDict(config.PlayerNotes);
         moveDict(config.PlayerNicknames);
+        moveDict(config.PlayerBirthdays);
+        moveDict(config.PlayerAnniversaries);
         moveDict(config.CustomAvatars);
         moveSet(config.FavoritePlayers);
         moveSet(config.HiddenPlayers);
@@ -1426,7 +1824,7 @@ public sealed class Plugin : IDalamudPlugin
     private static string WithWorld(string name, string? world) =>
         string.IsNullOrEmpty(world) ? name : $"{name}@{world}";
 
-    private IPlayerCharacter? FindNearbyPlayer(string name, string? world)
+    internal IPlayerCharacter? FindNearbyPlayer(string name, string? world)
     {
         foreach (var obj in objectTable)
         {
@@ -3118,6 +3516,9 @@ public sealed class Plugin : IDalamudPlugin
         ChatLog.EntryAdded -= OnEntryAddedForPlugin;
         ChatLog.SenderIdentified -= OnSenderIdentified;
         contextMenu.OnMenuOpened -= OnGameContextMenuOpened;
+        PlayerExtras.SaveIfDue(force: true);
+        ImagePreviews.Dispose();
+        LinkCards.Dispose();
         SetNativeChatVisible(true);
 
         windowSystem.RemoveAllWindows();

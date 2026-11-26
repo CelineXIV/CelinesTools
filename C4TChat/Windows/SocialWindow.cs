@@ -498,6 +498,12 @@ internal sealed unsafe class SocialWindow : Window
             }
 
             DrawCommonActions(row, allowInvite: true);
+            if (IsElsewhere(row) && WorldName(row.CurrentWorld) is { } travelWorld && plugin.Integrations.CanTravelTo(travelWorld)
+                && ChatWindow.MenuItem(Loc.T("PlayerCard.Travel", travelWorld), config))
+            {
+                plugin.Integrations.TravelTo(travelWorld);
+            }
+
             if (ChatWindow.MenuItem(Loc.T("ChatLog.EstateTeleportAction"), config))
             {
                 AgentFriendlist.Instance()->OpenFriendEstateTeleportation(row.ContentId);
@@ -1304,12 +1310,34 @@ internal sealed unsafe class SocialWindow : Window
 
     private string LocationText(Row row)
     {
+        if (!IsOnline(row.State) && !row.Pending && activeTab == SocialTab.Friends && plugin.FriendLastOnline(row.ContentId) is { } seen)
+        {
+            var world = WorldName(row.HomeWorld) ?? string.Empty;
+            return (world.Length > 0 ? world + "  \u00b7  " : string.Empty) + Loc.T("Friends.LastOnline", AgoShort(seen));
+        }
+
         if (IsOnline(row.State) && !row.OtherServer && row.Location != 0 && PlaceName(row.Location) is { Length: > 0 } place)
         {
             return place;
         }
 
         return WorldName(row.CurrentWorld != 0 ? row.CurrentWorld : row.HomeWorld) ?? string.Empty;
+    }
+
+    private static string AgoShort(DateTime time)
+    {
+        var ago = DateTime.Now - time;
+        if (ago.TotalMinutes < 60)
+        {
+            return Loc.T("Friends.AgoMinutes", Math.Max(1, (int)ago.TotalMinutes));
+        }
+
+        if (ago.TotalHours < 24)
+        {
+            return Loc.T("Friends.AgoHours", (int)ago.TotalHours);
+        }
+
+        return ago.TotalDays < 60 ? Loc.T("Friends.AgoDays", (int)ago.TotalDays) : time.ToString("dd.MM.yyyy");
     }
 
     private static bool RequestThrottled(InfoProxyCommonList* proxy, ref long last)
