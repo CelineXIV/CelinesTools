@@ -153,7 +153,9 @@ internal sealed unsafe class SocialWindow : Window
 
         using var rounding = ImRaii.PushStyle(ImGuiStyleVar.FrameRounding, 6f * ImGuiHelpers.GlobalScale)
             .Push(ImGuiStyleVar.PopupRounding, 6f * ImGuiHelpers.GlobalScale)
-            .Push(ImGuiStyleVar.ChildRounding, 6f * ImGuiHelpers.GlobalScale);
+            .Push(ImGuiStyleVar.ChildRounding, 6f * ImGuiHelpers.GlobalScale)
+            .Push(ImGuiStyleVar.FrameBorderSize, 1f);
+        using var frameBorder = ImRaii.PushColor(ImGuiCol.Border, ImGui.GetStyle().Colors[(int)ImGuiCol.Separator]);
 
         if (requestedTab is { } requested)
         {
@@ -260,30 +262,11 @@ internal sealed unsafe class SocialWindow : Window
     private void DrawStripTab(Configuration config, SocialTab tab, FontAwesomeIcon icon, string label)
     {
         var selected = activeTab == tab;
-        var iconText = icon.ToIconString();
-        float iconWidth;
-        using (ImRaii.PushFont(UiBuilder.IconFont))
-        {
-            iconWidth = ImGui.CalcTextSize(iconText).X;
-        }
-
-        var padding = ImGui.GetStyle().FramePadding.X;
-        var width = iconWidth + 6f + ImGui.CalcTextSize(label).X + (padding * 3f);
-        var size = new Vector2(width, ImGui.GetFrameHeight() + 2f);
-
-        var pos = ImGui.GetCursorScreenPos();
-        if (ImGui.Selectable("##stripTab" + tab, selected, ImGuiSelectableFlags.None, size) && !selected)
+        var size = new Vector2(ChatWindow.StripTabWidth(label, 0, false, icon), ImGui.GetFrameHeight() + (2f * ImGuiHelpers.GlobalScale));
+        if (ChatWindow.DrawStripTab(label, "##stripTab" + tab, selected, size, 0, false, null, null, config, icon) && !selected)
         {
             SwitchTab(tab);
         }
-
-        ChatWindow.DrawActiveTabUnderline(selected, config);
-
-        var drawList = ImGui.GetWindowDrawList();
-        var color = ImGui.GetColorU32(selected ? ImGuiCol.Text : ImGuiCol.TextDisabled);
-        var textY = pos.Y + ((size.Y - ImGui.GetTextLineHeight()) / 2f);
-        drawList.AddText(UiBuilder.IconFont, ImGui.GetFontSize() * 0.9f, new Vector2(pos.X + (padding * 1.5f), textY + 1f), color, iconText);
-        drawList.AddText(new Vector2(pos.X + (padding * 1.5f) + iconWidth + 6f, textY), color, label);
     }
 
     private void DrawParty()
@@ -884,7 +867,7 @@ internal sealed unsafe class SocialWindow : Window
             ImGui.Dummy(new Vector2(1f, 6f * scale));
         }
 
-        var label = (foldable ? (collapsed ? "▸ " : "▾ ") : string.Empty) + text.ToUpperInvariant() + "  ·  " + count;
+        var label = (foldable ? (collapsed ? "▸ " : "▾ ") : string.Empty) + text + "  ·  " + count;
         var pos = ImGui.GetCursorScreenPos();
         var textSize = ImGui.CalcTextSize(label);
         var width = ImGui.GetContentRegionAvail().X;
@@ -1057,6 +1040,7 @@ internal sealed unsafe class SocialWindow : Window
         if (card)
         {
             drawList.AddRectFilled(min, max, ImGui.GetColorU32(cardBg), radius);
+            drawList.AddRectFilled(min, max, ImGui.GetColorU32(new Vector4(1f, 1f, 1f, 0.035f)), radius);
         }
 
         if (selectedContentId == row.ContentId)
@@ -1236,7 +1220,8 @@ internal sealed unsafe class SocialWindow : Window
         var center = min + new Vector2(size / 2f);
         if (texture is { } handle)
         {
-            drawList.AddImageRounded(handle, min, max, Vector2.Zero, Vector2.One, ImGui.GetColorU32(new Vector4(1f, 1f, 1f, online ? 1f : 0.7f)), size / 2f);
+            var (uv0, uv1) = plugin.AvatarUv(key, customFile);
+            drawList.AddImageRounded(handle, min, max, uv0, uv1, ImGui.GetColorU32(new Vector4(1f, 1f, 1f, online ? 1f : 0.7f)), size / 2f);
         }
         else
         {

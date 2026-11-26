@@ -221,6 +221,8 @@ internal sealed class TabsPage
 
         plugin.ChatWindowInstance.DrawTabNotifyModeCombo(tab);
 
+        TabIconPicker.DrawButton(tab, plugin);
+
         var discordMode = tab.DiscordMode;
         if (ImGui.Checkbox(Loc.T("Tabs.DiscordMode") + "##discord", ref discordMode))
         {

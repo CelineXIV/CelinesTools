@@ -23,5 +23,6 @@ internal static class Changelog
         ("1.1.1", "Hotfix"),
         ("1.2.0", "New Big Update"),
         ("1.3.0", "Optional Social Window"),
+        ("1.3.1", "bug fix and design changes"),
     };
 }

@@ -81,6 +81,12 @@ public sealed class Plugin : IDalamudPlugin
     private readonly EstateTeleportService estateTeleportService;
     private readonly PerfOverlayWindow perfWindow;
     private readonly SocialWindow socialWindow;
+    private readonly AvatarCropWindow avatarCropWindow;
+
+    internal void OpenAvatarCrop(string storedFileName, string forWhom) => avatarCropWindow.Open(storedFileName, forWhom);
+
+    internal (Vector2 Uv0, Vector2 Uv1) AvatarUv(string key, string? customFile) =>
+        Avatars.UvFor(key, customFile, Configuration.CustomAvatarCrops);
 
     public Configuration Configuration { get; }
 
@@ -252,6 +258,12 @@ public sealed class Plugin : IDalamudPlugin
 
         Configuration = this.pluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
 
+        if (!Configuration.ToolbarFlatIntroduced)
+        {
+            Configuration.ToolbarFlatIntroduced = true;
+            Configuration.ToolbarIconPack = ToolbarIconPack.Flat;
+        }
+
         if (Configuration.WebClientAuthStore.Count > 0)
         {
             foreach (var token in Configuration.WebClientAuthStore)
@@ -334,6 +346,8 @@ public sealed class Plugin : IDalamudPlugin
         bookmarksWindow = new BookmarksWindow(this);
         perfWindow = new PerfOverlayWindow(this) { IsOpen = Configuration.ShowPerformanceOverlay };
         socialWindow = new SocialWindow(this);
+        avatarCropWindow = new AvatarCropWindow(this);
+        windowSystem.AddWindow(avatarCropWindow);
         windowSystem.AddWindow(socialWindow);
         Avatars = new AvatarService(textureProvider, textureReadbackProvider, log, this.pluginInterface.GetPluginConfigDirectory());
         windowSystem.AddWindow(settingsWindow);

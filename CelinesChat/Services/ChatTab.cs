@@ -38,6 +38,8 @@ public sealed class ChatTab
 
     public bool DiscordMode { get; set; }
 
+    public Dalamud.Interface.FontAwesomeIcon? Icon { get; set; }
+
     public bool ShowTimestamps { get; set; } = true;
 
     public bool Matches(XivChatType type)

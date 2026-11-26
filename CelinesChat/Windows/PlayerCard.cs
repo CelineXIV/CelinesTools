@@ -241,7 +241,8 @@ internal sealed class PlayerCard
             var min = ImGui.GetCursorScreenPos();
             if (texture is { } handle)
             {
-                ImGui.Image(handle, size);
+                var (uv0, uv1) = plugin.AvatarUv(avatarKey, customFile);
+                ImGui.Image(handle, size, uv0, uv1);
             }
             else
             {
@@ -272,6 +273,17 @@ internal sealed class PlayerCard
             ImGui.SameLine();
             if (customFile != null)
             {
+                if (ImGuiComponents.IconButton(FontAwesomeIcon.Crop))
+                {
+                    plugin.OpenAvatarCrop(customFile, avatarKey);
+                }
+
+                if (ImGui.IsItemHovered())
+                {
+                    ImGui.SetTooltip(Loc.T("Crop.Adjust"));
+                }
+
+                ImGui.SameLine();
                 if (ImGuiComponents.IconButton(FontAwesomeIcon.Trash))
                 {
                     plugin.Avatars.DeleteCustom(customFile);
@@ -332,7 +344,9 @@ internal sealed class PlayerCard
                         plugin.Avatars.DeleteCustom(old);
                     }
 
-                    config.CustomAvatars[key] = plugin.Avatars.StoreCustom(key, paths[0]);
+                    var stored = plugin.Avatars.StoreCustom(key, paths[0]);
+                    config.CustomAvatars[key] = stored;
+                    plugin.OpenAvatarCrop(stored, key);
                     plugin.SaveConfiguration();
                     statusMessage = null;
                 }

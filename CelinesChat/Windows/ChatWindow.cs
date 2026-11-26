@@ -405,17 +405,43 @@ internal sealed class ChatWindow : Window
 
         DrawAwaySummary(config);
 
+        var windowPos = ImGui.GetWindowPos();
+        var windowSize = ImGui.GetWindowSize();
+        var logTop = ImGui.GetCursorScreenPos().Y;
+        ImGui.PushClipRect(windowPos, windowPos + windowSize, false);
+        ImGui.SetCursorScreenPos(new Vector2(windowPos.X, logTop));
         using (ImRaii.PushColor(ImGuiCol.ChildBg, C4tTheme.LogBackground(config)))
-        using (ImRaii.Child("##chatLogScroll", new Vector2(-1, -(composeAreaHeight + SplitterHeight)), true, ImGuiWindowFlags.AlwaysVerticalScrollbar))
+        using (ImRaii.PushStyle(ImGuiStyleVar.WindowPadding, new Vector2(16f, 6f) * ImGuiHelpers.GlobalScale)
+                   .Push(ImGuiStyleVar.ChildBorderSize, 0f))
+        using (ImRaii.Child("##chatLogScroll", new Vector2(windowSize.X, -(composeAreaHeight + SplitterHeight)), true, ImGuiWindowFlags.AlwaysVerticalScrollbar))
         {
             ImGui.SetScrollX(0f);
             C4tTheme.DrawWatermark(plugin);
+
+            var wantedInset = 16f * ImGuiHelpers.GlobalScale;
+            var actualInset = ImGui.GetCursorScreenPos().X - ImGui.GetWindowPos().X;
+            var extraInset = MathF.Max(0f, wantedInset - actualInset);
+            if (extraInset > 0f)
+            {
+                ImGui.Indent(extraInset);
+            }
 
             using (ImRaii.PushStyle(ImGuiStyleVar.ItemSpacing, new Vector2(ImGui.GetStyle().ItemSpacing.X, config.LineSpacing), config.LineSpacing >= 0f))
             {
                 DrawChatLogEntries(config, state, composeAreaHeight, inputBoxHeight);
             }
+
+            if (extraInset > 0f)
+            {
+                ImGui.Unindent(extraInset);
+            }
         }
+
+        var logBottom = ImGui.GetItemRectMax().Y;
+        var edgeLine = ImGui.GetColorU32(ImGuiCol.Separator, 0.8f);
+        ImGui.GetWindowDrawList().AddLine(new Vector2(windowPos.X, logTop), new Vector2(windowPos.X + windowSize.X, logTop), edgeLine);
+        ImGui.GetWindowDrawList().AddLine(new Vector2(windowPos.X, logBottom), new Vector2(windowPos.X + windowSize.X, logBottom), edgeLine);
+        ImGui.PopClipRect();
 
         DrawPlayerNoteEditor();
         playerCard.Draw();
@@ -438,6 +464,7 @@ internal sealed class ChatWindow : Window
             ImGuiP.ClearActiveID();
         }
 
+        using var composeRounding = ImRaii.PushStyle(ImGuiStyleVar.FrameRounding, 5f * ImGuiHelpers.GlobalScale);
         DrawChannelPickerButton(config, state);
         ImGui.SameLine();
 
@@ -449,6 +476,7 @@ internal sealed class ChatWindow : Window
 
         var sendingMultiMessage = plugin.IsSending && plugin.SendTotal > 1;
 
+        var sendButtonWidth = ImGui.GetFrameHeight() * 1.25f;
         ImGui.SetNextItemWidth(-1);
         const ImGuiInputTextFlags composeFlags = ImGuiInputTextFlags.CallbackAlways | ImGuiInputTextFlags.CallbackCharFilter | ImGuiInputTextFlags.AllowTabInput;
         var commandTint = GetCommandTint(config);
@@ -456,7 +484,7 @@ internal sealed class ChatWindow : Window
         using (ImRaii.Disabled(sendingMultiMessage))
         using (ImRaii.PushColor(ImGuiCol.Text, commandTint))
         {
-            if (ImGui.InputTextMultiline("##composeText", ref inputText, 4000, new Vector2(-1, inputBoxHeight), composeFlags, TrackTextState))
+            if (ImGui.InputTextMultiline("##composeText", ref inputText, 4000, new Vector2(-(sendButtonWidth + ImGui.GetStyle().ItemSpacing.X), inputBoxHeight), composeFlags, TrackTextState))
             {
                 state.Drafts[currentDraftKey] = inputText;
                 draftSavePending = true;
@@ -466,6 +494,9 @@ internal sealed class ChatWindow : Window
             inputBoxBottom = ImGui.GetItemRectMax().Y;
         }
 
+        var inputMin = ImGui.GetItemRectMin();
+        var inputMax = ImGui.GetItemRectMax();
+
         if (draftSavePending && (ImGui.IsItemDeactivated() || Environment.TickCount64 >= draftSaveDueTick))
         {
             FlushPendingDraftSave();
@@ -473,6 +504,23 @@ internal sealed class ChatWindow : Window
 
         composeBoxActive = ImGui.IsItemActive();
         plugin.IsChatInputActive = composeBoxActive;
+
+        if (inputText.Length == 0 && !composeBoxActive)
+        {
+            ImGui.GetWindowDrawList().AddText(
+                inputMin + ImGui.GetStyle().FramePadding,
+                ImGui.GetColorU32(ImGuiCol.TextDisabled),
+                ComposePlaceholder(state));
+        }
+
+        var afterInput = ImGui.GetCursorScreenPos();
+        ImGui.SetCursorScreenPos(new Vector2(inputMax.X + ImGui.GetStyle().ItemSpacing.X, inputMin.Y));
+        if (DrawSendButton(config, sendButtonWidth, sendingMultiMessage || string.IsNullOrWhiteSpace(inputText)))
+        {
+            TrySend(state);
+        }
+
+        ImGui.SetCursorScreenPos(afterInput);
 
         if (composeBoxActive && stashedCursorCharIndex is { } stashedIndex)
         {
@@ -508,6 +556,7 @@ internal sealed class ChatWindow : Window
 
         if (state.LastChannel == ChatChannel.Whisper && !string.IsNullOrEmpty(activeWhisperTabTarget))
         {
+            ImGui.Dummy(new Vector2(1f, 3f * ImGuiHelpers.GlobalScale));
             DrawActiveWhisperIndicator(config, activeWhisperTabTarget, chunks.Count);
         }
 
@@ -523,9 +572,11 @@ internal sealed class ChatWindow : Window
 
     private void DrawSplitter(Configuration config, float minComposeAreaHeight)
     {
-        using (ImRaii.PushColor(ImGuiCol.Button, new Vector4(1f, 1f, 1f, 0.06f))
-                   .Push(ImGuiCol.ButtonHovered, new Vector4(1f, 1f, 1f, 0.16f))
-                   .Push(ImGuiCol.ButtonActive, new Vector4(1f, 1f, 1f, 0.26f)))
+        var splitterAccent = C4tTheme.ActiveMarkerColor(config);
+        using (ImRaii.PushColor(ImGuiCol.Button, Vector4.Zero)
+                   .Push(ImGuiCol.ButtonHovered, splitterAccent with { W = 0.25f })
+                   .Push(ImGuiCol.ButtonActive, splitterAccent with { W = 0.45f }))
+        using (ImRaii.PushStyle(ImGuiStyleVar.FrameBorderSize, 0f))
         {
             ImGui.Button("##chatSplitter", new Vector2(-1, SplitterHeight));
         }
@@ -549,7 +600,38 @@ internal sealed class ChatWindow : Window
 
     private void DrawChannelPickerButton(Configuration config, CharacterState state)
     {
-        if (DrawToolbarIconButton(FontAwesomeIcon.Comment))
+        var tag = ChannelShortTag(state);
+        var chevron = FontAwesomeIcon.ChevronDown.ToIconString();
+        var style = ImGui.GetStyle();
+        Vector2 chevronSize;
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            chevronSize = ImGui.CalcTextSize(chevron) * 0.7f;
+        }
+
+        var tagSize = ImGui.CalcTextSize(tag);
+        var size = new Vector2(tagSize.X + chevronSize.X + (style.FramePadding.X * 2f) + 6f, ImGui.GetFrameHeight());
+        var min = ImGui.GetCursorScreenPos();
+        bool pressed;
+        using (ImRaii.PushColor(ImGuiCol.Button, style.Colors[(int)ImGuiCol.FrameBg])
+                   .Push(ImGuiCol.ButtonHovered, style.Colors[(int)ImGuiCol.FrameBgHovered])
+                   .Push(ImGuiCol.ButtonActive, style.Colors[(int)ImGuiCol.FrameBgActive]))
+        {
+            pressed = ImGui.Button("##channelPickerButton", size);
+        }
+
+        var channelColor = GetActiveChannelColor(config, state);
+        var drawList = ImGui.GetWindowDrawList();
+        var textY = min.Y + ((size.Y - tagSize.Y) / 2f);
+        drawList.AddText(new Vector2(min.X + style.FramePadding.X, textY), ImGui.GetColorU32(channelColor), tag);
+        drawList.AddText(
+            UiBuilder.IconFont,
+            ImGui.GetFontSize() * 0.7f,
+            new Vector2(min.X + style.FramePadding.X + tagSize.X + 6f, min.Y + ((size.Y - chevronSize.Y) / 2f)),
+            ImGui.GetColorU32(channelColor with { W = 0.8f }),
+            chevron);
+
+        if (pressed)
         {
             ImGui.OpenPopup("##channelPicker");
         }
@@ -705,6 +787,12 @@ internal sealed class ChatWindow : Window
     private bool DrawToolbarIconButton(FontAwesomeIcon icon, Vector4? colorOverride = null)
     {
         var config = plugin.Configuration;
+        if (config.ToolbarIconPack == ToolbarIconPack.Flat)
+        {
+            var flatColor = colorOverride ?? (config.ToolbarUseCustomIconColor ? config.ToolbarIconColor : (Vector4?)null);
+            return DrawFlatIconButton("##flat" + (int)icon + "_" + (int)ImGui.GetCursorPosX(), icon, flatColor, ImGui.GetFrameHeight(), 0.85f);
+        }
+
         if (config.ToolbarIconPack == ToolbarIconPack.Classic)
         {
             if (colorOverride is { } classicColor)
@@ -1915,6 +2003,8 @@ internal sealed class ChatWindow : Window
         var isPlayer = self || (hasSender && entry.IsRealPlayer);
 
         ImTextureID? texture = null;
+        var uv0 = Vector2.Zero;
+        var uv1 = Vector2.One;
         if (isPlayer)
         {
             var name = self ? plugin.OwnCharacterName : entry.Sender;
@@ -1922,11 +2012,12 @@ internal sealed class ChatWindow : Window
             var key = world != null ? name + "@" + world : name;
             config.CustomAvatars.TryGetValue(key, out var customFile);
             texture = plugin.Avatars.Get(key, customFile, config.LodestoneAvatars, name, world, out _);
+            (uv0, uv1) = plugin.AvatarUv(key, customFile);
         }
 
         if (texture is { } handle)
         {
-            drawList.AddImageRounded(handle, pos, max, Vector2.Zero, Vector2.One, ImGui.GetColorU32(Vector4.One), size / 2f);
+            drawList.AddImageRounded(handle, pos, max, uv0, uv1, ImGui.GetColorU32(Vector4.One), size / 2f);
         }
         else
         {
@@ -1951,12 +2042,24 @@ internal sealed class ChatWindow : Window
             }
         }
 
-        if (!self && isPlayer && ImGui.IsWindowHovered() && ImGui.IsMouseHoveringRect(pos, max))
+        if (isPlayer && ImGui.IsWindowHovered() && ImGui.IsMouseHoveringRect(pos, max))
         {
             ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
+            if (self)
+            {
+                ImGui.SetTooltip(Loc.T("Settings.OwnAvatarClickHint"));
+            }
+
             if (ImGui.IsMouseClicked(ImGuiMouseButton.Left))
             {
-                playerCard.Open(entry);
+                if (self)
+                {
+                    plugin.OpenSettingsPage(SettingsPage.General);
+                }
+                else
+                {
+                    playerCard.Open(entry);
+                }
             }
         }
     }
@@ -3185,16 +3288,67 @@ internal sealed class ChatWindow : Window
         }
     }
 
+    private static string ChannelShortTag(CharacterState state) => state.LastChannel switch
+    {
+        ChatChannel.Say => "[S]",
+        ChatChannel.Party => "[P]",
+        ChatChannel.Whisper => string.IsNullOrEmpty(state.LastWhisperTarget) ? "[T]" : "[T] " + FirstName(state.LastWhisperTarget),
+        ChatChannel.Yell => "[Y]",
+        ChatChannel.Shout => "[Sh]",
+        ChatChannel.FreeCompany => "[FC]",
+        ChatChannel.Alliance => "[A]",
+        ChatChannel.PvpTeam => "[PT]",
+        ChatChannel.NoviceNetwork => "[NN]",
+        ChatChannel.Linkshell => "[LS" + state.LinkshellNumber + "]",
+        ChatChannel.CrossWorldLinkshell => "[CWLS" + state.CrossWorldLinkshellNumber + "]",
+        _ => "[" + state.LastChannel + "]",
+    };
+
+    private static string ComposePlaceholder(CharacterState state) => Loc.T("Compose.Placeholder", CurrentChannelLabel(state));
+
+    private bool DrawSendButton(Configuration config, float width, bool disabled)
+    {
+        var size = new Vector2(width, ImGui.GetFrameHeight());
+        var min = ImGui.GetCursorScreenPos();
+        var accent = C4tTheme.ActiveMarkerColor(config);
+        bool pressed;
+        using (ImRaii.PushColor(ImGuiCol.Button, accent with { W = 0.12f })
+                   .Push(ImGuiCol.ButtonHovered, accent with { W = disabled ? 0.18f : 0.32f })
+                   .Push(ImGuiCol.ButtonActive, accent with { W = disabled ? 0.18f : 0.5f }))
+        {
+            pressed = ImGui.Button("##sendButton", size) && !disabled;
+        }
+
+        var hovered = ImGui.IsItemHovered();
+        if (hovered)
+        {
+            ImGui.SetTooltip(Loc.T("Compose.SendTooltip"));
+            if (!disabled)
+            {
+                ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
+            }
+        }
+
+        var icon = FontAwesomeIcon.PaperPlane.ToIconString();
+        var fontSize = ImGui.GetFontSize() * 0.9f;
+        Vector2 iconSize;
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            iconSize = ImGui.CalcTextSize(icon) * 0.9f;
+        }
+
+        var color = disabled ? accent with { W = 0.4f } : hovered ? Vector4.Lerp(accent, Vector4.One, 0.35f) : accent;
+        var nudge = hovered && !disabled ? new Vector2(1f, -1f) * ImGuiHelpers.GlobalScale : Vector2.Zero;
+        ImGui.GetWindowDrawList().AddText(UiBuilder.IconFont, fontSize, min + ((size - iconSize) / 2f) + nudge, ImGui.GetColorU32(color), icon);
+        return pressed;
+    }
+
     private void DrawComposeStatusRow(Configuration config, CharacterState state, List<string> chunks)
     {
-        if (!string.IsNullOrEmpty(activeWhisperTabTarget))
+        if (!string.IsNullOrEmpty(activeWhisperTabTarget) || chunks.Count < 2)
         {
             return;
         }
-
-        var channelColor = GetActiveChannelColor(config, state);
-        ImGui.TextColored(channelColor, CurrentChannelLabel(state));
-        ImGui.SameLine();
 
         var countText = Loc.T("Compose.MessageCount", chunks.Count);
         var countWidth = ImGui.CalcTextSize(countText).X;
@@ -3922,12 +4076,12 @@ internal sealed class ChatWindow : Window
         ImGui.GetWindowDrawList().AddRectFilled(
             rowOrigin,
             rowOrigin + new Vector2(ImGui.GetContentRegionAvail().X, rowHeight),
-            ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, config.TabStripBackgroundOpacity)));
+            ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, config.TabStripBackgroundOpacity * 0.35f)));
 
         C4tTheme.DrawLogoItem(plugin);
 
         var toolbarExpanded = config.ChatToolbarExpanded;
-        if (DrawToolbarIconButton(toolbarExpanded ? FontAwesomeIcon.ChevronUp : FontAwesomeIcon.ChevronDown))
+        if (DrawStripNavButton("##toolbarToggle", toolbarExpanded ? FontAwesomeIcon.ChevronUp : FontAwesomeIcon.ChevronDown))
         {
             config.ChatToolbarExpanded = !toolbarExpanded;
             plugin.SaveConfiguration();
@@ -3943,7 +4097,7 @@ internal sealed class ChatWindow : Window
         var arrowSize = ImGui.GetFrameHeight();
         var spacing = ImGui.GetStyle().ItemSpacing.X;
 
-        var stripWidth = MathF.Max(1f, ImGui.GetContentRegionAvail().X - (arrowSize + spacing) * 2f - spacing);
+        var stripWidth = MathF.Max(1f, ImGui.GetContentRegionAvail().X - (StripNavButtonWidth() + spacing) * 2f - spacing);
 
         var lastTabStart = tabStripTabStartOffsets.Count > 0 ? tabStripTabStartOffsets[^1] : 0f;
         var maxScroll = MathF.Max(MathF.Max(0f, tabStripContentWidth - stripWidth), lastTabStart);
@@ -3952,7 +4106,7 @@ internal sealed class ChatWindow : Window
 
         using (ImRaii.Disabled(tabStripScrollX <= 0f))
         {
-            if (DrawToolbarIconButton(FontAwesomeIcon.ChevronLeft, unreadTabScrolledLeft ? SearchHighlightColor : null))
+            if (DrawStripNavButton("##tabsLeft", FontAwesomeIcon.ChevronLeft, unreadTabScrolledLeft ? SearchHighlightColor : null))
             {
                 tabStripScrollX = PrevTabBoundaryBefore(tabStripScrollX);
                 tabStripScrollRawTarget = tabStripScrollX;
@@ -3966,6 +4120,7 @@ internal sealed class ChatWindow : Window
 
         ImGui.SameLine();
 
+        var stripMin = ImGui.GetCursorScreenPos();
         var tabsStripChild = ImRaii.Child("##logTabsStrip", new Vector2(stripWidth, arrowSize), false, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
 
         if (TabDragHelper.DrawDropZone(stripWidth, arrowSize) is { } droppedOnMain)
@@ -3999,9 +4154,10 @@ internal sealed class ChatWindow : Window
                 continue;
             }
 
-            var tabWidth = ImGui.CalcTextSize(tab.Name).X + ImGui.GetStyle().FramePadding.X * 2f;
-            tabStripTabStartOffsets.Add(runningX);
             var fixedUnread = fixedTabUnreadCounts.GetValueOrDefault(tab.Id);
+            var fixedImportant = fixedTabMentionCounts.GetValueOrDefault(tab.Id) > 0;
+            var tabWidth = StripTabWidth(tab.Name, fixedUnread, fixedImportant, tab.Icon);
+            tabStripTabStartOffsets.Add(runningX);
 
             if (tab.Id == pendingFixedTabForceSelect)
             {
@@ -4027,11 +4183,17 @@ internal sealed class ChatWindow : Window
                 var tabSize = new Vector2(tabWidth, arrowSize);
 
                 ImGui.SetCursorPos(new Vector2(basePos.X + runningX - tabStripScrollX, basePos.Y));
-                DrawTabBackgroundFill(tab.BackgroundColor ?? (config.TabStripBackgroundColorEnabled ? config.TabStripBackgroundColor : (Vector4?)null), tabSize);
-                var clicked = ImGui.Selectable(tab.Name + "##tab" + tab.Id, isSelected, ImGuiSelectableFlags.None, tabSize);
-                DrawActiveTabUnderline(isSelected, config);
-
-                DrawUnreadBadge(fixedUnread, fixedTabMentionCounts.GetValueOrDefault(tab.Id) > 0);
+                var clicked = DrawStripTab(
+                    tab.Name,
+                    "##tab" + tab.Id,
+                    isSelected,
+                    tabSize,
+                    fixedUnread,
+                    fixedImportant,
+                    null,
+                    tab.BackgroundColor ?? (config.TabStripBackgroundColorEnabled ? config.TabStripBackgroundColor : (Vector4?)null),
+                    config,
+                    tab.Icon);
 
                 if (!tab.PositionLocked)
                 {
@@ -4075,7 +4237,7 @@ internal sealed class ChatWindow : Window
         if (NoviceNetworkService.IsConnected)
         {
             var noviceLabel = Loc.T("Channel.NoviceNetwork");
-            var noviceTabWidth = ImGui.CalcTextSize(noviceLabel).X + ImGui.GetStyle().FramePadding.X * 2f;
+            var noviceTabWidth = StripTabWidth(noviceLabel, noviceNetworkUnread, false, FontAwesomeIcon.Seedling);
             tabStripTabStartOffsets.Add(runningX);
 
             if (noviceNetworkUnread > 0)
@@ -4096,10 +4258,7 @@ internal sealed class ChatWindow : Window
                 var tabSize = new Vector2(noviceTabWidth, arrowSize);
 
                 ImGui.SetCursorPos(new Vector2(basePos.X + runningX - tabStripScrollX, basePos.Y));
-                var clicked = ImGui.Selectable(noviceLabel + "##noviceNetworkTab", isSelected, ImGuiSelectableFlags.None, tabSize);
-                DrawActiveTabUnderline(isSelected, config);
-
-                DrawUnreadBadge(noviceNetworkUnread);
+                var clicked = DrawStripTab(noviceLabel, "##noviceNetworkTab", isSelected, tabSize, noviceNetworkUnread, false, null, null, config, FontAwesomeIcon.Seedling);
 
                 if (clicked && !isSelected)
                 {
@@ -4125,9 +4284,9 @@ internal sealed class ChatWindow : Window
             }
 
             var whisperText = FirstName(targetName);
-            var tabWidth = ImGui.CalcTextSize(whisperText).X + ImGui.GetStyle().FramePadding.X * 2f;
-            tabStripTabStartOffsets.Add(runningX);
             var whisperUnread = whisperUnreadCounts.GetValueOrDefault(targetName);
+            var tabWidth = StripTabWidth(whisperText, whisperUnread, false);
+            tabStripTabStartOffsets.Add(runningX);
 
             if (targetName == pendingTabForceSelect)
             {
@@ -4156,17 +4315,8 @@ internal sealed class ChatWindow : Window
                 var whisperBg = config.WhisperTabBackgroundColours.TryGetValue(targetName, out var customBg)
                     ? customBg
                     : config.TabStripBackgroundColorEnabled ? config.TabStripBackgroundColor : (Vector4?)null;
-                DrawTabBackgroundFill(whisperBg, tabSize);
-
                 var blinking = whisperUnread > 0 && config.BlinkUnreadWhisperTabs;
-                bool clicked;
-                using (ImRaii.PushColor(ImGuiCol.Text, BlinkColor(), blinking))
-                {
-                    clicked = ImGui.Selectable(whisperText + "##whisper" + targetName, isSelected, ImGuiSelectableFlags.None, tabSize);
-                }
-
-                DrawActiveTabUnderline(isSelected, config);
-                DrawUnreadBadge(whisperUnread);
+                var clicked = DrawStripTab(whisperText, "##whisper" + targetName, isSelected, tabSize, whisperUnread, false, blinking ? BlinkColor() : null, whisperBg, config);
 
                 var locked = state.LockedWhisperTargets.Contains(targetName);
                 if (!locked)
@@ -4246,10 +4396,12 @@ internal sealed class ChatWindow : Window
         tabsStripTextAlign.Dispose();
         tabsStripChild.Dispose();
 
+        DrawStripEdgeFades(stripMin, new Vector2(stripWidth, arrowSize), tabStripScrollX > 0.5f, tabStripScrollX < wheelMaxScroll - 0.5f);
+
         ImGui.SameLine();
         using (ImRaii.Disabled(tabStripScrollX >= wheelMaxScroll))
         {
-            if (DrawToolbarIconButton(FontAwesomeIcon.ChevronRight, unreadTabScrolledRight ? SearchHighlightColor : null))
+            if (DrawStripNavButton("##tabsRight", FontAwesomeIcon.ChevronRight, unreadTabScrolledRight ? SearchHighlightColor : null))
             {
                 tabStripScrollX = MathF.Min(wheelMaxScroll, NextTabBoundaryAfter(tabStripScrollX));
                 tabStripScrollRawTarget = tabStripScrollX;
@@ -4290,6 +4442,154 @@ internal sealed class ChatWindow : Window
 
         plugin.SaveConfiguration();
         ViewChanged?.Invoke();
+    }
+
+    private const float StripTabBadgeGap = 6f;
+
+    private static string UnreadLabel(int count, bool important) =>
+        (important ? "@" : string.Empty) + (count > 99 ? "99+" : count.ToString());
+
+    private static float UnreadPillWidth(int count, bool important) =>
+        ImGui.CalcTextSize(UnreadLabel(count, important)).X * 0.85f + 10f;
+
+    internal static float StripTabWidth(string label, int unread, bool important, FontAwesomeIcon? icon = null)
+    {
+        var width = ImGui.CalcTextSize(label).X + (ImGui.GetStyle().FramePadding.X * 2.5f);
+        if (icon != null)
+        {
+            width += TabIconPicker.IconWidth(icon) + StripTabIconGap;
+        }
+
+        if (unread > 0)
+        {
+            width += UnreadPillWidth(unread, important) + StripTabBadgeGap;
+        }
+
+        return width;
+    }
+
+    private const float StripTabIconGap = 6f;
+
+    private void DrawStripEdgeFades(Vector2 min, Vector2 size, bool left, bool right)
+    {
+        if (!left && !right)
+        {
+            return;
+        }
+
+        var drawList = ImGui.GetWindowDrawList();
+        var fadeWidth = 22f * ImGuiHelpers.GlobalScale;
+        var bg = ImGui.GetStyle().Colors[(int)ImGuiCol.WindowBg] with { W = Math.Clamp(currentOpacity, 0.35f, 1f) };
+        var solid = ImGui.GetColorU32(bg);
+        var clear = ImGui.GetColorU32(bg with { W = 0f });
+        if (left)
+        {
+            drawList.AddRectFilledMultiColor(min, min + new Vector2(fadeWidth, size.Y), solid, clear, clear, solid);
+        }
+
+        if (right)
+        {
+            var start = new Vector2(min.X + size.X - fadeWidth, min.Y);
+            drawList.AddRectFilledMultiColor(start, min + size, clear, solid, solid, clear);
+        }
+    }
+
+    private static float StripNavButtonWidth() => ImGui.GetFrameHeight() * 0.9f;
+
+    private static bool DrawStripNavButton(string id, FontAwesomeIcon icon, Vector4? color = null) =>
+        DrawFlatIconButton(id, icon, color, StripNavButtonWidth(), 0.75f);
+
+    internal static bool DrawFlatIconButton(string id, FontAwesomeIcon icon, Vector4? color, float width, float iconScale)
+    {
+        var size = new Vector2(width, ImGui.GetFrameHeight());
+        var min = ImGui.GetCursorScreenPos();
+        bool pressed;
+        using (ImRaii.PushColor(ImGuiCol.Button, Vector4.Zero)
+                   .Push(ImGuiCol.ButtonHovered, new Vector4(1f, 1f, 1f, 0.08f))
+                   .Push(ImGuiCol.ButtonActive, new Vector4(1f, 1f, 1f, 0.14f)))
+        using (ImRaii.PushStyle(ImGuiStyleVar.FrameRounding, 6f * ImGuiHelpers.GlobalScale)
+                   .Push(ImGuiStyleVar.FrameBorderSize, 0f))
+        {
+            pressed = ImGui.Button(id, size);
+        }
+
+        var hovered = ImGui.IsItemHovered();
+        var style = ImGui.GetStyle();
+        var baseColor = color ?? style.Colors[(int)ImGuiCol.Text];
+        var iconColor = hovered ? baseColor : baseColor with { W = baseColor.W * (color != null ? 0.9f : 0.62f) };
+        var glyph = icon.ToIconString();
+        var fontSize = ImGui.GetFontSize() * iconScale;
+        Vector2 glyphSize;
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            glyphSize = ImGui.CalcTextSize(glyph) * iconScale;
+        }
+
+        ImGui.GetWindowDrawList().AddText(UiBuilder.IconFont, fontSize, min + ((size - glyphSize) / 2f), ImGui.GetColorU32(iconColor), glyph);
+        return pressed;
+    }
+
+    internal static bool DrawStripTab(string label, string id, bool selected, Vector2 size, int unread, bool important, Vector4? textColor, Vector4? background, Configuration config, FontAwesomeIcon? icon = null)
+    {
+        var drawList = ImGui.GetWindowDrawList();
+        var min = ImGui.GetCursorScreenPos();
+        var max = min + size;
+        var hovered = ImGui.IsWindowHovered() && ImGui.IsMouseHoveringRect(min, max);
+        var accent = C4tTheme.ActiveMarkerColor(config);
+
+        var rounding = 5f * ImGuiHelpers.GlobalScale;
+
+        if (background is { } custom)
+        {
+            drawList.AddRectFilled(min, max, ImGui.GetColorU32(custom), rounding, ImDrawFlags.RoundCornersTop);
+        }
+
+        if (selected)
+        {
+            drawList.AddRectFilled(min, max, ImGui.GetColorU32(accent with { W = 0.22f }), rounding, ImDrawFlags.RoundCornersTop);
+            drawList.AddRectFilled(new Vector2(min.X, max.Y - (2f * ImGuiHelpers.GlobalScale)), max, ImGui.GetColorU32(accent));
+        }
+        else if (hovered)
+        {
+            drawList.AddRectFilled(min, max, ImGui.GetColorU32(new Vector4(1f, 1f, 1f, 0.06f)), rounding, ImDrawFlags.RoundCornersTop);
+        }
+
+        bool clicked;
+        using (ImRaii.PushColor(ImGuiCol.Header, Vector4.Zero)
+                   .Push(ImGuiCol.HeaderHovered, Vector4.Zero)
+                   .Push(ImGuiCol.HeaderActive, new Vector4(1f, 1f, 1f, 0.04f)))
+        {
+            clicked = ImGui.Selectable(id, selected, ImGuiSelectableFlags.None, size);
+        }
+
+        var style = ImGui.GetStyle();
+        var color = textColor ?? (selected || hovered ? style.Colors[(int)ImGuiCol.Text] : style.Colors[(int)ImGuiCol.TextDisabled]);
+        var textSize = ImGui.CalcTextSize(label);
+        var x = min.X + (style.FramePadding.X * 1.25f);
+        var y = min.Y + ((size.Y - textSize.Y) / 2f);
+        if (icon is { } tabIcon)
+        {
+            var iconColor = selected ? C4tTheme.ActiveMarkerColor(config) : color;
+            TabIconPicker.DrawIcon(drawList, tabIcon, new Vector2(x, y), textSize.Y, ImGui.GetColorU32(iconColor));
+            x += TabIconPicker.IconWidth(tabIcon) + StripTabIconGap;
+        }
+
+        drawList.AddText(new Vector2(x, y), ImGui.GetColorU32(color), label);
+
+        if (unread > 0)
+        {
+            var text = UnreadLabel(unread, important);
+            var fontSize = ImGui.GetFontSize() * 0.85f;
+            var pillTextSize = ImGui.CalcTextSize(text) * 0.85f;
+            var pillMin = new Vector2(x + textSize.X + StripTabBadgeGap, min.Y + ((size.Y - pillTextSize.Y - 2f) / 2f));
+            var pillMax = pillMin + new Vector2(UnreadPillWidth(unread, important), pillTextSize.Y + 2f);
+            var fill = important ? new Vector4(0.95f, 0.68f, 0.12f, 1f) : accent;
+            var ink = important || C4tTheme.IsActive(config) ? new Vector4(0.08f, 0.04f, 0.1f, 1f) : new Vector4(1f, 1f, 1f, 1f);
+            drawList.AddRectFilled(pillMin, pillMax, ImGui.GetColorU32(fill), (pillMax.Y - pillMin.Y) / 2f);
+            drawList.AddText(ImGui.GetFont(), fontSize, new Vector2(pillMin.X + 5f, pillMin.Y + 1f), ImGui.GetColorU32(ink), text);
+        }
+
+        return clicked;
     }
 
     internal static void DrawTabBackgroundFill(Vector4? color, Vector2 size)
@@ -4461,6 +4761,8 @@ internal sealed class ChatWindow : Window
             tab.Name = name;
             plugin.SaveConfiguration();
         }
+
+        TabIconPicker.DrawMenu(tab, plugin);
 
         var locked = tab.PositionLocked;
         if (ImGui.Checkbox(Loc.T("Tabs.PositionLocked") + "##lock" + tab.Id, ref locked))

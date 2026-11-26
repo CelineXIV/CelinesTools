@@ -151,7 +151,7 @@ internal sealed class DisplayPage
             plugin.SaveConfiguration();
         }
 
-        var isGlassPack = config.ToolbarIconPack != ToolbarIconPack.Classic;
+        var isGlassPack = config.ToolbarIconPack is ToolbarIconPack.AeroGlass or ToolbarIconPack.FrostedGlass;
         Vector4 iconBgColor;
         bool useCustomIconColor;
         Vector4 iconColor;
@@ -164,7 +164,11 @@ internal sealed class DisplayPage
                 config.ToolbarIconBackgroundColor = iconBgColor;
                 plugin.SaveConfiguration();
             }
+        }
 
+        using (ImRaii.Disabled(config.ToolbarIconPack == ToolbarIconPack.Classic))
+        using (ImRaii.PushIndent())
+        {
             useCustomIconColor = config.ToolbarUseCustomIconColor;
             if (ImGui.Checkbox(Loc.T("Settings.ToolbarUseCustomIconColor"), ref useCustomIconColor))
             {
@@ -186,7 +190,16 @@ internal sealed class DisplayPage
         ImGui.TextDisabled(Loc.T("Settings.ToolbarIconPackPreview"));
         ImGui.SameLine();
 
-        if (config.ToolbarIconPack == ToolbarIconPack.Classic)
+        if (config.ToolbarIconPack == ToolbarIconPack.Flat)
+        {
+            var flatColor = useCustomIconColor ? iconColor : (Vector4?)null;
+            ChatWindow.DrawFlatIconButton("##flatPreview1", FontAwesomeIcon.Cog, flatColor, ImGui.GetFrameHeight(), 0.85f);
+            ImGui.SameLine();
+            ChatWindow.DrawFlatIconButton("##flatPreview2", FontAwesomeIcon.Wifi, flatColor, ImGui.GetFrameHeight(), 0.85f);
+            ImGui.SameLine();
+            ChatWindow.DrawFlatIconButton("##flatPreview3", FontAwesomeIcon.Users, flatColor, ImGui.GetFrameHeight(), 0.85f);
+        }
+        else if (config.ToolbarIconPack == ToolbarIconPack.Classic)
         {
             ImGuiComponents.IconButton(FontAwesomeIcon.Cog);
             ImGui.SameLine();
@@ -223,6 +236,7 @@ internal sealed class DisplayPage
         Loc.T("Settings.ToolbarIconPack.Classic"),
         Loc.T("Settings.ToolbarIconPack.AeroGlass"),
         Loc.T("Settings.ToolbarIconPack.FrostedGlass"),
+        Loc.T("Settings.ToolbarIconPack.Flat"),
     };
 
     private void DrawSpacingSlider(string label, float value, float min, float max, System.Action<float> set)

@@ -288,10 +288,20 @@ internal static class ColoredTextRenderer
                 startOfLine = true;
                 lineWidthUsed = 0f;
 
-                ImGui.PushTextWrapPos(ImGui.GetCursorScreenPos().X + wrapWidth);
-                DrawUnit(word + " ", word, color, link, onLinkClicked, onLinkHovered);
-                ImGui.PopTextWrapPos();
-                lineWidthUsed = size.X;
+                var remaining = word;
+                while (remaining.Length > 0)
+                {
+                    var take = FittingLength(remaining, wrapWidth);
+                    var piece = remaining[..take];
+                    remaining = remaining[take..];
+                    var last = remaining.Length == 0;
+                    DrawUnit(last ? piece + " " : piece, piece, color, link, onLinkClicked, onLinkHovered);
+                    if (last)
+                    {
+                        lineWidthUsed = ImGui.CalcTextSize(piece + " ").X;
+                    }
+                }
+
                 startOfLine = false;
                 continue;
             }
@@ -327,6 +337,31 @@ internal static class ColoredTextRenderer
         {
             ImGui.TextColored(defaultColor, " ");
         }
+    }
+
+    private static int FittingLength(string text, float width)
+    {
+        var low = 1;
+        var high = text.Length;
+        while (low < high)
+        {
+            var mid = (low + high + 1) / 2;
+            if (ImGui.CalcTextSize(text[..mid]).X <= width)
+            {
+                low = mid;
+            }
+            else
+            {
+                high = mid - 1;
+            }
+        }
+
+        if (low < text.Length && char.IsHighSurrogate(text[low - 1]))
+        {
+            low = low > 1 ? low - 1 : low + 1;
+        }
+
+        return Math.Clamp(low, 1, text.Length);
     }
 
     private static void DrawUnit(string display, string bareText, Vector4 color, LinkTarget? link, Action<LinkTarget>? onLinkClicked, Action<LinkTarget>? onLinkHovered)

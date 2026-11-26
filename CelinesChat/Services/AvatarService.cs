@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Http;
+using System.Numerics;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -316,6 +317,29 @@ internal sealed class AvatarService : IDisposable
     }
 
     private void Forget(string key) => forgetQueue.Enqueue(key);
+
+    internal string CustomPath(string fileName) => Path.Combine(customFolder, fileName);
+
+    internal (Vector2 Uv0, Vector2 Uv1) UvFor(string key, string? customFile, Dictionary<string, Vector4> crops)
+    {
+        if (customFile != null && crops.TryGetValue(customFile, out var crop))
+        {
+            return (new Vector2(crop.X, crop.Y), new Vector2(crop.Z, crop.W));
+        }
+
+        if (memory.TryGetValue(key, out var cached) && cached.Texture?.GetWrapOrDefault() is { } wrap
+            && wrap.Width > 0 && wrap.Height > 0 && wrap.Width != wrap.Height)
+        {
+            float w = wrap.Width;
+            float h = wrap.Height;
+            var side = MathF.Min(w, h);
+            var x = (w - side) / 2f / w;
+            var y = (h - side) / 2f / h;
+            return (new Vector2(x, y), new Vector2(x + (side / w), y + (side / h)));
+        }
+
+        return (Vector2.Zero, Vector2.One);
+    }
 
     internal string StoreCustom(string key, string sourcePath)
     {

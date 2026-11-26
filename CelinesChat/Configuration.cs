@@ -33,6 +33,8 @@ public enum ToolbarIconPack
     AeroGlass,
 
     FrostedGlass,
+
+    Flat,
 }
 
 public enum PreviewPosition
@@ -275,7 +277,9 @@ public class Configuration : IPluginConfiguration
 
     public bool ShowC4tWatermark { get; set; } = true;
 
-    public ToolbarIconPack ToolbarIconPack { get; set; } = ToolbarIconPack.Classic;
+    public ToolbarIconPack ToolbarIconPack { get; set; } = ToolbarIconPack.Flat;
+
+    public bool ToolbarFlatIntroduced { get; set; }
 
     public Vector4 ToolbarIconBackgroundColor { get; set; } = new(0.28f, 0.48f, 0.72f, 0.55f);
 
@@ -385,6 +389,8 @@ public class Configuration : IPluginConfiguration
 
     public Dictionary<string, string> CustomAvatars { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
+    public Dictionary<string, Vector4> CustomAvatarCrops { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
     public Dictionary<string, string> PlayerNicknames { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     public bool SocialCardView { get; set; } = true;
@@ -416,6 +422,7 @@ public class Configuration : IPluginConfiguration
         PlayerNotes = new Dictionary<string, string>(PlayerNotes, StringComparer.OrdinalIgnoreCase);
         FavoritePlayers = new HashSet<string>(FavoritePlayers, StringComparer.OrdinalIgnoreCase);
         CustomAvatars = new Dictionary<string, string>(CustomAvatars, StringComparer.OrdinalIgnoreCase);
+        CustomAvatarCrops = new Dictionary<string, Vector4>(CustomAvatarCrops, StringComparer.OrdinalIgnoreCase);
         PlayerNicknames = new Dictionary<string, string>(PlayerNicknames, StringComparer.OrdinalIgnoreCase);
         foreach (var character in Characters.Values)
         {
